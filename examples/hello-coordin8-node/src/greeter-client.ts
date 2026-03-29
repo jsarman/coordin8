@@ -1,16 +1,15 @@
 import * as grpc from "@grpc/grpc-js";
-import { DjinnClient } from "@coordin8/sdk";
+import { DjinnClient, ServiceDiscovery } from "@coordin8/sdk";
 import { GreeterServiceClient } from "../gen/greeter";
 
 async function main() {
   const name = process.argv[2] ?? "Coordin8 (Node)";
 
   const djinn = DjinnClient.connect("localhost");
+  const discovery = ServiceDiscovery.watch(djinn);
 
   try {
-    // One call. No host, no port, no channel wiring. The Djinn handles it.
-    console.log("Opening proxy to Greeter...");
-    const greeter = await djinn.proxy().proxyClient(
+    const greeter = await discovery.get(
       (addr) => new GreeterServiceClient(addr, grpc.credentials.createInsecure()),
       { interface: "Greeter" }
     );
@@ -22,8 +21,9 @@ async function main() {
       });
     });
 
-    console.log(`\n  → ${resp.message}`);
+    console.log(resp.message);
   } finally {
+    await discovery.close();
     djinn.close();
   }
 }
