@@ -1,6 +1,7 @@
 PROTO_DIR  := proto
 SDK_GO_GEN := sdks/go/gen
-GO         := $(HOME)/go-install/go/bin/go
+# Use mise-managed `go` when active; fall back to the legacy non-standard install.
+GO         ?= $(HOME)/go-install/go/bin/go
 
 .PHONY: proto build build-examples test lint clean
 

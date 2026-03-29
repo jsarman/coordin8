@@ -1,0 +1,9 @@
+[tools]
+rust = "1.93"
+go   = "1.22"
+node = "23"
+java = "openjdk-21"
+
+[env]
+# Override the Makefile's legacy Go path so mise-managed `go` is used.
+GO = "go"
