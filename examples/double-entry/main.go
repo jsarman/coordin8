@@ -88,13 +88,17 @@ func spawnLedger(name string, veto bool, advertiseHost string) (string, *ledger)
 }
 
 // resolveAdvertiseHost returns the host to advertise to the Djinn for 2PC callbacks.
-// Defaults to "host.docker.internal" so a Docker-hosted Djinn can reach back to
-// participant servers running on the host. Override with ADVERTISE_HOST if needed.
+// If host.docker.internal resolves, the Djinn is Docker-hosted and needs that name
+// to reach back across the bridge. Otherwise falls back to 127.0.0.1 for local runs.
+// Override with ADVERTISE_HOST if needed.
 func resolveAdvertiseHost() string {
 	if h := os.Getenv("ADVERTISE_HOST"); h != "" {
 		return h
 	}
-	return "host.docker.internal"
+	if _, err := net.LookupHost("host.docker.internal"); err == nil {
+		return "host.docker.internal"
+	}
+	return "127.0.0.1"
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
