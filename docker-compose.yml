@@ -1,16 +1,54 @@
-version: "3.9"
-
 services:
-  # LocalStack — AWS emulation for integration testing (Phase 8)
-  localstack:
-    image: localstack/localstack:3
+
+  djinn:
+    build:
+      context: .
+      dockerfile: Dockerfile.djinn
+    container_name: coordin8-djinn
     ports:
-      - "4566:4566"
+      - "9001:9001"       # LeaseMgr
+      - "9002:9002"       # Registry
+      - "9003:9003"       # Proxy control
+      - "9100-9200:9100-9200"  # Proxy forwarding port range
     environment:
-      - SERVICES=dynamodb,sqs,events
-      - DEFAULT_REGION=us-east-1
-    volumes:
-      - localstack-data:/var/lib/localstack
+      RUST_LOG: "coordin8_lease=debug,coordin8_registry=debug,coordin8_proxy=debug,djinn=info"
+      PROXY_BIND_HOST: "0.0.0.0"
+      PROXY_PORT_MIN: "9100"
+      PROXY_PORT_MAX: "9200"
+    networks:
+      - coordin8-net
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/localhost/9001'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  greeter:
+    build:
+      context: .
+      dockerfile: Dockerfile.greeter
+    container_name: coordin8-greeter
+    depends_on:
+      djinn:
+        condition: service_healthy
+    restart: on-failure
+    environment:
+      DJINN_HOST: djinn        # reach Djinn by service name on Docker network
+      ADVERTISE_HOST: greeter  # Djinn proxy will forward to greeter:50051
+      GRPC_PORT: "50051"
+    networks:
+      - coordin8-net
+
+  # LocalStack — AWS emulation for integration testing (Phase 8)
+  # localstack:
+  #   image: localstack/localstack:3
+  #   ports:
+  #     - "4566:4566"
+  #   environment:
+  #     - SERVICES=dynamodb,sqs,events
+  #     - DEFAULT_REGION=us-east-1
+  #   volumes:
+  #     - localstack-data:/var/lib/localstack
 
   # Dashboard — Coordin8 observability UI (Phase 9)
   # dashboard:
@@ -20,6 +58,10 @@ services:
   #   environment:
   #     - DJINN_LEASE_ADDR=djinn:9001
   #     - DJINN_REGISTRY_ADDR=djinn:9002
+
+networks:
+  coordin8-net:
+    driver: bridge
 
 volumes:
   localstack-data:

@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Rust build artifacts
+djinn/target/
+
+# Go build artifacts
+examples/*/bin/
+sdks/go/vendor/
+
+# Node
+node_modules/
+sdks/node/dist/
+sdks/node/node_modules/
+examples/hello-coordin8-node/node_modules/
+examples/hello-coordin8-node/dist/
+
+# Java
+sdks/java/build/
+examples/hello-coordin8-java/build/
+**/.gradle/
+
+# Claude/plans
+.claude/
+
+# IDE
+.idea/
+.vscode/

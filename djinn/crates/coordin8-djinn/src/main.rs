@@ -11,7 +11,7 @@ use coordin8_proto::coordin8::lease_service_server::LeaseServiceServer;
 use coordin8_proto::coordin8::proxy_service_server::ProxyServiceServer;
 use coordin8_proto::coordin8::registry_service_server::RegistryServiceServer;
 use coordin8_provider_local::{InMemoryLeaseStore, InMemoryRegistryStore};
-use coordin8_proxy::{ProxyManager, ProxyServiceImpl};
+use coordin8_proxy::{ProxyConfig, ProxyManager, ProxyServiceImpl};
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
 
@@ -56,7 +56,8 @@ async fn main() -> Result<()> {
     info!("  ✓ Registry: ready");
 
     // ── Layer 3: Proxy ───────────────────────────────────────────────────────
-    let proxy_manager = Arc::new(ProxyManager::new(registry_store));
+    let proxy_config = ProxyConfig::from_env();
+    let proxy_manager = Arc::new(ProxyManager::new(registry_store, proxy_config));
     info!("  ✓ Proxy: ready");
 
     // ── gRPC servers ─────────────────────────────────────────────────────────

@@ -20,10 +20,14 @@ import (
 	"google.golang.org/grpc"
 )
 
-const (
-	grpcPort = "50051"
-	leaseTTL = 30 * time.Second
-)
+const leaseTTL = 30 * time.Second
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 // greeterServer implements gen.GreeterServiceServer.
 type greeterServer struct {
@@ -37,6 +41,10 @@ func (s *greeterServer) Hello(_ context.Context, req *gen.HelloRequest) (*gen.He
 }
 
 func main() {
+	grpcPort     := envOr("GRPC_PORT", "50051")
+	djinnHost    := envOr("DJINN_HOST", "localhost")
+	advertiseHost := envOr("ADVERTISE_HOST", "localhost")
+
 	// ── 1. Start the gRPC server ──────────────────────────────────────────────
 	lis, err := net.Listen("tcp", ":"+grpcPort)
 	if err != nil {
@@ -53,7 +61,7 @@ func main() {
 	fmt.Printf("Greeter gRPC server listening on :%s\n", grpcPort)
 
 	// ── 2. Connect to the Djinn ───────────────────────────────────────────────
-	djinn, err := coordin8.Connect("localhost")
+	djinn, err := coordin8.Connect(djinnHost)
 	if err != nil {
 		log.Fatalf("connect to djinn: %v", err)
 	}
@@ -71,7 +79,7 @@ func main() {
 		TTL:       leaseTTL,
 		Transport: &coordin8.TransportDescriptor{
 			Type:   "grpc",
-			Config: map[string]string{"host": "localhost", "port": grpcPort},
+			Config: map[string]string{"host": advertiseHost, "port": grpcPort},
 		},
 	})
 	if err != nil {
@@ -80,7 +88,7 @@ func main() {
 	fmt.Printf("Registered with Djinn\n")
 	fmt.Printf("  interface:  Greeter\n")
 	fmt.Printf("  language:   english\n")
-	fmt.Printf("  transport:  grpc @ localhost:%s\n", grpcPort)
+	fmt.Printf("  transport:  grpc @ %s:%s\n", advertiseHost, grpcPort)
 	fmt.Printf("  lease:      %s (TTL=%s, auto-renewing)\n", leaseID, leaseTTL)
 	fmt.Println("Serving... (Ctrl+C to stop)")
 

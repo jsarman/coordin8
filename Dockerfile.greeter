@@ -1,0 +1,33 @@
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM golang:1.22-bookworm AS builder
+
+WORKDIR /build
+
+# Copy SDK and example source
+COPY sdks/go ./sdks/go/
+COPY examples/hello-coordin8 ./examples/hello-coordin8/
+
+# Build the greeter service
+WORKDIR /build/examples/hello-coordin8
+RUN go build -o bin/greeter-service ./greeter_service/
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/examples/hello-coordin8/bin/greeter-service /usr/local/bin/greeter-service
+
+EXPOSE 50051
+
+# Override these in docker-compose or at runtime:
+#   DJINN_HOST      — hostname of the Djinn (default: localhost)
+#   ADVERTISE_HOST  — hostname clients use to reach this service (default: localhost)
+#   GRPC_PORT       — port this service listens on (default: 50051)
+ENV DJINN_HOST=localhost \
+    ADVERTISE_HOST=localhost \
+    GRPC_PORT=50051
+
+ENTRYPOINT ["greeter-service"]
