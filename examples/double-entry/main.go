@@ -71,19 +71,38 @@ func (l *ledger) PrepareAndCommit(_ context.Context, req *pb.ParticipantRequest)
 }
 
 // spawnLedger starts a participant gRPC server on an ephemeral port.
-// Returns the host:port address and the ledger instance.
-func spawnLedger(name string, veto bool) (string, *ledger) {
+// Binds on 0.0.0.0 so Docker-hosted Djinn can call back; advertises
+// advertiseHost (see resolveAdvertiseHost) so the enlisted endpoint is reachable.
+func spawnLedger(name string, veto bool, advertiseHost string) (string, *ledger) {
 	l := &ledger{name: name, veto: veto}
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	lis, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		log.Fatalf("listen %s: %v", name, err)
 	}
-	addr := lis.Addr().String()
+	port := lis.Addr().(*net.TCPAddr).Port
 	srv := grpc.NewServer()
 	pb.RegisterParticipantServiceServer(srv, l)
 	go func() { _ = srv.Serve(lis) }()
 	time.Sleep(20 * time.Millisecond) // let it bind
-	return addr, l
+	return fmt.Sprintf("%s:%d", advertiseHost, port), l
+}
+
+// resolveAdvertiseHost returns the host to advertise to the Djinn.
+// If ADVERTISE_HOST is set, use that. Otherwise use the outbound IP
+// toward the Djinn so Docker-hosted coordinators can call back.
+func resolveAdvertiseHost(djinnAddr string) string {
+	if h := os.Getenv("ADVERTISE_HOST"); h != "" {
+		return h
+	}
+	// Dial the Djinn address (UDP, no actual packet sent) to find which
+	// local interface the OS would route through — that's the right IP.
+	host, _, _ := net.SplitHostPort(djinnAddr)
+	conn, err := net.Dial("udp", net.JoinHostPort(host, "9"))
+	if err != nil {
+		return "127.0.0.1"
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -103,16 +122,19 @@ func main() {
 	txn := pb.NewTransactionServiceClient(conn)
 	ctx := context.Background()
 
+	advertiseHost := resolveAdvertiseHost(djinnAddr)
+
 	banner("double-entry — Coordin8 TransactionMgr 2PC demo")
-	fmt.Printf("  djinn: %s\n", djinnAddr)
+	fmt.Printf("  djinn:          %s\n", djinnAddr)
+	fmt.Printf("  advertise host: %s\n", advertiseHost)
 
 	// ═════════════════════════════════════════════════════════════════════════
 	// Scenario A — Happy path: both participants prepared → COMMITTED
 	// ═════════════════════════════════════════════════════════════════════════
 	section("Scenario A — happy path (both prepared → COMMITTED)")
 
-	debitAddrA, debitA := spawnLedger("ledger-debit ", false)
-	creditAddrA, creditA := spawnLedger("ledger-credit", false)
+	debitAddrA, debitA := spawnLedger("ledger-debit ", false, advertiseHost)
+	creditAddrA, creditA := spawnLedger("ledger-credit", false, advertiseHost)
 	fmt.Printf("  ledger-debit  listening on %s\n", debitAddrA)
 	fmt.Printf("  ledger-credit listening on %s\n\n", creditAddrA)
 
@@ -150,8 +172,8 @@ func main() {
 	// ═════════════════════════════════════════════════════════════════════════
 	section("Scenario B — veto abort (debit vetoes → ABORTED)")
 
-	debitAddrB, debitB := spawnLedger("ledger-debit ", true /* veto */)
-	creditAddrB, creditB := spawnLedger("ledger-credit", false)
+	debitAddrB, debitB := spawnLedger("ledger-debit ", true /* veto */, advertiseHost)
+	creditAddrB, creditB := spawnLedger("ledger-credit", false, advertiseHost)
 	fmt.Printf("  ledger-debit  listening on %s (will VETO)\n", debitAddrB)
 	fmt.Printf("  ledger-credit listening on %s\n\n", creditAddrB)
 
