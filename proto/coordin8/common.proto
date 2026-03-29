@@ -1,0 +1,5 @@
+syntax = "proto3";
+
+package coordin8;
+
+option go_package = "github.com/coordin8/proto/coordin8";

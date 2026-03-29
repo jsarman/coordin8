@@ -1,0 +1,19 @@
+[package]
+name = "coordin8-registry"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+coordin8-core  = { workspace = true }
+coordin8-proto = { workspace = true }
+coordin8-lease = { workspace = true }
+
+async-trait  = { workspace = true }
+tokio        = { workspace = true }
+tonic        = { workspace = true }
+prost-types  = { workspace = true }
+thiserror    = { workspace = true }
+uuid         = { workspace = true }
+tracing      = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-core = "0.3"

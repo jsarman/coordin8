@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package coordin8;
+
+import "coordin8/lease.proto";
+
+option go_package = "github.com/coordin8/proto/coordin8";
+
+service RegistryService {
+    // Register a service. Returns a lease — stop renewing to disappear.
+    rpc Register(RegisterRequest) returns (Lease);
+    // Lookup returns the first matching capability.
+    rpc Lookup(LookupRequest) returns (Capability);
+    // LookupAll streams all currently matching capabilities.
+    rpc LookupAll(LookupRequest) returns (stream Capability);
+    // Watch streams registration and expiration events for matching capabilities.
+    rpc Watch(RegistryWatchRequest) returns (stream RegistryEvent);
+}
+
+message RegisterRequest {
+    string interface = 1;
+    map<string, string> attrs = 2;
+    uint64 ttl_seconds = 3;
+    TransportDescriptor transport = 4;
+}
+
+message LookupRequest {
+    // Template: missing fields match anything, present fields must match.
+    // "interface" is a required field.
+    map<string, string> template = 1;
+}
+
+message RegistryWatchRequest {
+    map<string, string> template = 1;
+}
+
+message Capability {
+    string capability_id = 1;
+    string interface = 2;
+    map<string, string> attrs = 3;
+    TransportDescriptor transport = 4;
+}
+
+message TransportDescriptor {
+    // type: "grpc", "kafka", "kinesis", "nats", "tcp"
+    string type = 1;
+    // transport-specific config resolved by the SDK
+    map<string, string> config = 2;
+}
+
+message RegistryEvent {
+    enum EventType {
+        REGISTERED = 0;
+        EXPIRED = 1;
+        RENEWED = 2;
+    }
+    EventType type = 1;
+    Capability capability = 2;
+}

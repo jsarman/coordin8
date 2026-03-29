@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/coordin8-core",
+    "crates/coordin8-proto",
+    "crates/coordin8-lease",
+    "crates/coordin8-registry",
+    "crates/coordin8-djinn",
+    "providers/local",
+]
+
+[workspace.dependencies]
+# Internal crates
+coordin8-core    = { path = "crates/coordin8-core" }
+coordin8-proto   = { path = "crates/coordin8-proto" }
+coordin8-lease   = { path = "crates/coordin8-lease" }
+coordin8-registry = { path = "crates/coordin8-registry" }
+coordin8-provider-local = { path = "providers/local" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# gRPC / Protobuf
+tonic      = "0.12"
+prost      = "0.13"
+prost-types = "0.13"
+
+# Error handling
+thiserror = "1"
+anyhow    = "1"
+
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+uuid    = { version = "1", features = ["v4"] }
+chrono  = { version = "0.4", features = ["serde"] }
+dashmap = "5"
+
+# Async traits
+async-trait = "0.1"
+
+# Tracing
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

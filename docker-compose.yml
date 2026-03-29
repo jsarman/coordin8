@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  # LocalStack — AWS emulation for integration testing (Phase 8)
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=dynamodb,sqs,events
+      - DEFAULT_REGION=us-east-1
+    volumes:
+      - localstack-data:/var/lib/localstack
+
+  # Dashboard — Coordin8 observability UI (Phase 9)
+  # dashboard:
+  #   image: coordin8/dashboard:latest
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - DJINN_LEASE_ADDR=djinn:9001
+  #     - DJINN_REGISTRY_ADDR=djinn:9002
+
+volumes:
+  localstack-data:

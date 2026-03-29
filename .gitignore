@@ -1,0 +1,29 @@
+# Rust
+djinn/target/
+**/*.rs.bk
+Cargo.lock
+
+# Go binaries
+djinn/coordin8
+examples/*/bin/
+
+# Go module cache artifacts
+vendor/
+
+# Generated proto code (Go) — committed for now, regenerate with `make proto`
+# sdks/go/gen/
+# examples/hello-coordin8/gen/
+
+# Environment
+.env
+*.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,11 @@
+[package]
+name = "coordin8-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror   = { workspace = true }
+uuid        = { workspace = true }
+chrono      = { workspace = true }
+serde       = { workspace = true }

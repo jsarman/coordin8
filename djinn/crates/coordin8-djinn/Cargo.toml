@@ -1,0 +1,21 @@
+[package]
+name = "coordin8-djinn"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "djinn"
+path = "src/main.rs"
+
+[dependencies]
+coordin8-core             = { workspace = true }
+coordin8-proto            = { workspace = true }
+coordin8-lease            = { workspace = true }
+coordin8-registry         = { workspace = true }
+coordin8-provider-local   = { workspace = true }
+
+tokio              = { workspace = true }
+tonic              = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
