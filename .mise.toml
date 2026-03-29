@@ -7,3 +7,61 @@ java = "openjdk-21"
 [env]
 # Override the Makefile's legacy Go path so mise-managed `go` is used.
 GO = "go"
+
+# ── Tasks ────────────────────────────────────────────────────────────────────
+
+[tasks.proto]
+description = "Regenerate proto stubs for all languages"
+run = "make proto"
+
+[tasks.build]
+description = "Build Djinn (release) + CLI"
+run = "make build"
+
+[tasks.build-djinn]
+description = "Build Djinn only (dev profile)"
+run = "cd djinn && cargo build"
+
+[tasks.build-examples]
+description = "Build all example binaries"
+run = "make build-examples"
+
+[tasks.test]
+description = "Run all tests (Rust + Go SDK)"
+run = "make test"
+
+[tasks.test-rust]
+description = "Run Rust tests only"
+run = "cd djinn && cargo test --all"
+
+[tasks.test-go]
+description = "Run Go SDK tests only"
+run = "cd sdks/go && go test ./..."
+
+[tasks.lint]
+description = "Lint everything (clippy, fmt, go vet)"
+run = "make lint"
+
+[tasks.clean]
+description = "Remove all build artifacts"
+run = "make clean"
+
+[tasks.djinn]
+description = "Start Djinn locally (dev)"
+run = "cd djinn && cargo run"
+
+[tasks.up]
+description = "Start full stack in Docker (Djinn + greeter)"
+run = "docker compose up --build"
+
+[tasks.down]
+description = "Stop Docker stack"
+run = "docker compose down"
+
+[tasks.demo-events]
+description = "Run market-watch EventMgr demo (requires live Djinn on :9005)"
+run = "cd examples/market-watch && go run ."
+
+[tasks.demo-txn]
+description = "Run double-entry TransactionMgr demo (requires live Djinn on :9004)"
+run = "cd examples/double-entry && go run ."
