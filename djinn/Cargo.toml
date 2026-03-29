@@ -5,6 +5,7 @@ members = [
     "crates/coordin8-proto",
     "crates/coordin8-lease",
     "crates/coordin8-registry",
+    "crates/coordin8-proxy",
     "crates/coordin8-djinn",
     "providers/local",
 ]
@@ -15,6 +16,7 @@ coordin8-core    = { path = "crates/coordin8-core" }
 coordin8-proto   = { path = "crates/coordin8-proto" }
 coordin8-lease   = { path = "crates/coordin8-lease" }
 coordin8-registry = { path = "crates/coordin8-registry" }
+coordin8-proxy   = { path = "crates/coordin8-proxy" }
 coordin8-provider-local = { path = "providers/local" }
 
 # Async runtime

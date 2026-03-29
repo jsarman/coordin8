@@ -1,0 +1,18 @@
+[package]
+name = "coordin8-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+coordin8-core  = { workspace = true }
+coordin8-proto = { workspace = true }
+coordin8-registry = { workspace = true }
+
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+tonic       = { workspace = true }
+prost-types = { workspace = true }
+thiserror   = { workspace = true }
+uuid        = { workspace = true }
+tracing     = { workspace = true }
+dashmap     = { workspace = true }

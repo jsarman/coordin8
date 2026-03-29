@@ -2,8 +2,8 @@
   "name": "@coordin8/sdk",
   "version": "0.1.0",
   "description": "Node.js SDK for the Coordin8 Djinn",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
   "scripts": {
     "build": "tsc",
     "proto": "npm run proto:coordin8",

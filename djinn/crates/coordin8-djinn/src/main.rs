@@ -8,8 +8,10 @@ use tracing::info;
 
 use coordin8_lease::{LeaseManager, LeaseServiceImpl};
 use coordin8_proto::coordin8::lease_service_server::LeaseServiceServer;
+use coordin8_proto::coordin8::proxy_service_server::ProxyServiceServer;
 use coordin8_proto::coordin8::registry_service_server::RegistryServiceServer;
 use coordin8_provider_local::{InMemoryLeaseStore, InMemoryRegistryStore};
+use coordin8_proxy::{ProxyManager, ProxyServiceImpl};
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
 
@@ -17,9 +19,10 @@ use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
 ///
 ///   Layer 0 → Provider (storage)
 ///   Layer 1 → LeaseMgr (bedrock)
-///   Layer 2 → Registry (peers with Space, neither depends on the other)
-///   Layer 3 → TransactionMgr (Phase 7)
-///   Layer 4 → Space (Phase 5)
+///   Layer 2 → Registry
+///   Layer 3 → Proxy (depends on Registry)
+///   Layer 4 → TransactionMgr (Phase 7)
+///   Layer 5 → Space (Phase 5)
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -40,7 +43,6 @@ async fn main() -> Result<()> {
     let (expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);
     let lease_manager = Arc::new(LeaseManager::new(lease_store));
 
-    // Background reaper — sweeps for expired leases every second
     let reaper_manager = Arc::clone(&lease_manager);
     let reaper_tx = expiry_tx.clone();
     tokio::spawn(async move {
@@ -50,12 +52,17 @@ async fn main() -> Result<()> {
 
     // ── Layer 2: Registry ────────────────────────────────────────────────────
     let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
-    let registry_index = Arc::new(RegistryIndex::new(registry_store));
+    let registry_index = Arc::new(RegistryIndex::new(registry_store.clone()));
     info!("  ✓ Registry: ready");
 
+    // ── Layer 3: Proxy ───────────────────────────────────────────────────────
+    let proxy_manager = Arc::new(ProxyManager::new(registry_store));
+    info!("  ✓ Proxy: ready");
+
     // ── gRPC servers ─────────────────────────────────────────────────────────
-    let lease_addr = "0.0.0.0:9001".parse()?;
+    let lease_addr    = "0.0.0.0:9001".parse()?;
     let registry_addr = "0.0.0.0:9002".parse()?;
+    let proxy_addr    = "0.0.0.0:9003".parse()?;
 
     let lease_svc =
         LeaseServiceServer::new(LeaseServiceImpl::new(Arc::clone(&lease_manager), expiry_tx));
@@ -64,17 +71,17 @@ async fn main() -> Result<()> {
         Arc::clone(&lease_manager),
         registry_tx,
     ));
+    let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
 
     info!("  ✓ LeaseMgr:  listening on {}", lease_addr);
     info!("  ✓ Registry:  listening on {}", registry_addr);
+    info!("  ✓ Proxy:     listening on {}", proxy_addr);
     info!("Djinn ready.");
 
-    // Run both gRPC servers concurrently
     tokio::try_join!(
         Server::builder().add_service(lease_svc).serve(lease_addr),
-        Server::builder()
-            .add_service(registry_svc)
-            .serve(registry_addr),
+        Server::builder().add_service(registry_svc).serve(registry_addr),
+        Server::builder().add_service(proxy_svc).serve(proxy_addr),
     )?;
 
     Ok(())

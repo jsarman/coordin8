@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
         proto_root.join("coordin8/lease.proto"),
         proto_root.join("coordin8/registry.proto"),
+        proto_root.join("coordin8/proxy.proto"),
     ];
 
     // Tell cargo to re-run if any proto changes
