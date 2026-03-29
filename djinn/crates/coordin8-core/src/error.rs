@@ -17,6 +17,12 @@ pub enum Error {
     #[error("storage error: {0}")]
     Storage(String),
 
+    #[error("subscription not found: {0}")]
+    SubscriptionNotFound(String),
+
+    #[error("subscription expired: {0}")]
+    SubscriptionExpired(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }

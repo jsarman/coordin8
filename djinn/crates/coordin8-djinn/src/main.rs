@@ -6,11 +6,13 @@ use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tracing::info;
 
+use coordin8_event::{EventManager, EventServiceImpl};
 use coordin8_lease::{LeaseManager, LeaseServiceImpl};
+use coordin8_proto::coordin8::event_service_server::EventServiceServer;
 use coordin8_proto::coordin8::lease_service_server::LeaseServiceServer;
 use coordin8_proto::coordin8::proxy_service_server::ProxyServiceServer;
 use coordin8_proto::coordin8::registry_service_server::RegistryServiceServer;
-use coordin8_provider_local::{InMemoryLeaseStore, InMemoryRegistryStore};
+use coordin8_provider_local::{InMemoryEventStore, InMemoryLeaseStore, InMemoryRegistryStore};
 use coordin8_proxy::{ProxyConfig, ProxyManager, ProxyServiceImpl};
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
@@ -37,6 +39,7 @@ async fn main() -> Result<()> {
     // ── Layer 0: Provider ────────────────────────────────────────────────────
     let lease_store = Arc::new(InMemoryLeaseStore::new());
     let registry_store = Arc::new(InMemoryRegistryStore::new());
+    let event_store = Arc::new(InMemoryEventStore::new());
     info!("  ✓ Provider: local (in-memory)");
 
     // ── Layer 1: LeaseMgr ────────────────────────────────────────────────────
@@ -50,10 +53,19 @@ async fn main() -> Result<()> {
     });
     info!("  ✓ LeaseMgr: ready");
 
-    // ── Layer 2: Registry ────────────────────────────────────────────────────
+    // ── Layer 2a: Registry ───────────────────────────────────────────────────
     let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
     let registry_index = Arc::new(RegistryIndex::new(registry_store.clone()));
     info!("  ✓ Registry: ready");
+
+    // ── Layer 2b: EventMgr (peer to Registry) ────────────────────────────────
+    let (event_tx, _) = broadcast::channel::<coordin8_core::EventRecord>(256);
+    let event_manager = Arc::new(EventManager::new(
+        event_store,
+        Arc::clone(&lease_manager),
+        event_tx,
+    ));
+    info!("  ✓ EventMgr: ready");
 
     // ── Layer 3: Proxy ───────────────────────────────────────────────────────
     let proxy_config = ProxyConfig::from_env();
@@ -64,6 +76,7 @@ async fn main() -> Result<()> {
     let lease_addr    = "0.0.0.0:9001".parse()?;
     let registry_addr = "0.0.0.0:9002".parse()?;
     let proxy_addr    = "0.0.0.0:9003".parse()?;
+    let event_addr    = "0.0.0.0:9005".parse()?;
 
     let lease_svc =
         LeaseServiceServer::new(LeaseServiceImpl::new(Arc::clone(&lease_manager), expiry_tx));
@@ -73,16 +86,19 @@ async fn main() -> Result<()> {
         registry_tx,
     ));
     let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
+    let event_svc = EventServiceServer::new(EventServiceImpl::new(event_manager));
 
     info!("  ✓ LeaseMgr:  listening on {}", lease_addr);
     info!("  ✓ Registry:  listening on {}", registry_addr);
     info!("  ✓ Proxy:     listening on {}", proxy_addr);
+    info!("  ✓ EventMgr:  listening on {}", event_addr);
     info!("Djinn ready.");
 
     tokio::try_join!(
         Server::builder().add_service(lease_svc).serve(lease_addr),
         Server::builder().add_service(registry_svc).serve(registry_addr),
         Server::builder().add_service(proxy_svc).serve(proxy_addr),
+        Server::builder().add_service(event_svc).serve(event_addr),
     )?;
 
     Ok(())

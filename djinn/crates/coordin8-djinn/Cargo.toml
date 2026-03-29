@@ -13,6 +13,7 @@ coordin8-proto            = { workspace = true }
 coordin8-lease            = { workspace = true }
 coordin8-registry         = { workspace = true }
 coordin8-proxy            = { workspace = true }
+coordin8-event            = { workspace = true }
 coordin8-provider-local   = { workspace = true }
 
 tokio              = { workspace = true }

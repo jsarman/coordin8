@@ -9,9 +9,10 @@ services:
       - "9001:9001"       # LeaseMgr
       - "9002:9002"       # Registry
       - "9003:9003"       # Proxy control
+      - "9005:9005"       # EventMgr
       - "9100-9200:9100-9200"  # Proxy forwarding port range
     environment:
-      RUST_LOG: "coordin8_lease=debug,coordin8_registry=debug,coordin8_proxy=debug,djinn=info"
+      RUST_LOG: "coordin8_lease=debug,coordin8_registry=debug,coordin8_proxy=debug,coordin8_event=debug,djinn=info"
       PROXY_BIND_HOST: "0.0.0.0"
       PROXY_PORT_MIN: "9100"
       PROXY_PORT_MAX: "9200"

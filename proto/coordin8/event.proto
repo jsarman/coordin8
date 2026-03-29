@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package coordin8;
+
+import "coordin8/lease.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/coordin8/proto/coordin8";
+
+// EventService — durable event delivery with leased subscriptions.
+// Modeled after net.jini.core.event (Jini Distributed Events Specification).
+//
+// Any service can emit events. Subscriptions are leased — stop renewing
+// and the subscription expires. Sequence numbers enable idempotency and
+// gap detection (missing seqNum = dropped event).
+service EventService {
+    // Subscribe to events from a source matching a template.
+    // Returns a registration with a lease. Renew the lease to stay subscribed.
+    rpc Subscribe(SubscribeRequest)     returns (EventRegistration);
+
+    // Receive events for a registration (server-streaming).
+    // Equivalent to RemoteEventListener.notify() in Jini — but pull-based.
+    rpc Receive(ReceiveRequest)         returns (stream Event);
+
+    // Emit an event into the bus. Any service can call this.
+    rpc Emit(EmitRequest)               returns (google.protobuf.Empty);
+
+    // Renew a subscription lease.
+    rpc RenewSubscription(RenewSubscriptionRequest) returns (Lease);
+
+    // Cancel a subscription explicitly.
+    rpc CancelSubscription(CancelSubscriptionRequest) returns (google.protobuf.Empty);
+}
+
+// ── Messages ─────────────────────────────────────────────────────────────────
+
+message SubscribeRequest {
+    string              source      = 1;  // event source name (e.g. "market.signals")
+    map<string, string> template    = 2;  // template match on event attrs; empty = all
+    DeliveryMode        delivery    = 3;
+    uint64              ttl_seconds = 4;  // subscription lease TTL
+    bytes               handback    = 5;  // opaque; returned with each event (Jini handback)
+}
+
+// EventRegistration — Jini EventRegistration equivalent.
+message EventRegistration {
+    string registration_id = 1;
+    string source          = 2;
+    Lease  lease           = 3;
+    uint64 seq_num         = 4;  // current sequence number at time of registration
+}
+
+message ReceiveRequest {
+    string registration_id = 1;
+}
+
+message EmitRequest {
+    string              source  = 1;
+    string              event_type = 2;  // maps to Jini eventID
+    map<string, string> attrs   = 3;
+    bytes               payload = 4;    // opaque event body
+}
+
+// Event — Jini RemoteEvent equivalent.
+message Event {
+    string                    event_id        = 1;
+    string                    source          = 2;
+    string                    event_type      = 3;
+    uint64                    seq_num         = 4;  // monotonically increasing per source+type
+    map<string, string>       attrs           = 5;
+    bytes                     payload         = 6;
+    bytes                     handback        = 7;  // echoed from SubscribeRequest
+    google.protobuf.Timestamp emitted_at      = 8;
+}
+
+message RenewSubscriptionRequest {
+    string registration_id = 1;
+    uint64 ttl_seconds     = 2;
+}
+
+message CancelSubscriptionRequest {
+    string registration_id = 1;
+}
+
+// ── Enums ─────────────────────────────────────────────────────────────────────
+
+enum DeliveryMode {
+    // Store-and-forward. Events queue if the subscriber is offline.
+    // Guaranteed delivery once the subscriber reconnects and calls Receive.
+    DURABLE      = 0;
+
+    // Fire and forget. If the subscriber isn't actively receiving, event is dropped.
+    BEST_EFFORT  = 1;
+}
