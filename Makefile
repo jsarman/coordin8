@@ -30,6 +30,8 @@ build-examples: ## Build example binaries into their own directories
 		$(GO) build -o bin/greeter-client  ./greeter_client/
 	@echo "examples/hello-coordin8/bin/greeter-service"
 	@echo "examples/hello-coordin8/bin/greeter-client"
+	cd examples/hello-coordin8-java && ./gradlew assemble -q
+	@echo "examples/hello-coordin8-java/build/distributions/ (run via ./gradlew run)"
 
 test: ## Run all tests
 	cd djinn && cargo test --all
@@ -45,3 +47,5 @@ clean:
 	cd djinn && cargo clean
 	rm -f djinn/coordin8
 	rm -rf examples/hello-coordin8/bin
+	cd examples/hello-coordin8-java && ./gradlew clean -q
+	cd sdks/java && ./gradlew clean -q
