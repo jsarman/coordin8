@@ -17,6 +17,8 @@ services:
       PROXY_BIND_HOST: "0.0.0.0"
       PROXY_PORT_MIN: "9100"
       PROXY_PORT_MAX: "9200"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # lets Djinn call back to host (2PC participants)
     networks:
       - coordin8-net
     healthcheck:

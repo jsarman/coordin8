@@ -87,22 +87,14 @@ func spawnLedger(name string, veto bool, advertiseHost string) (string, *ledger)
 	return fmt.Sprintf("%s:%d", advertiseHost, port), l
 }
 
-// resolveAdvertiseHost returns the host to advertise to the Djinn.
-// If ADVERTISE_HOST is set, use that. Otherwise use the outbound IP
-// toward the Djinn so Docker-hosted coordinators can call back.
-func resolveAdvertiseHost(djinnAddr string) string {
+// resolveAdvertiseHost returns the host to advertise to the Djinn for 2PC callbacks.
+// Defaults to "host.docker.internal" so a Docker-hosted Djinn can reach back to
+// participant servers running on the host. Override with ADVERTISE_HOST if needed.
+func resolveAdvertiseHost() string {
 	if h := os.Getenv("ADVERTISE_HOST"); h != "" {
 		return h
 	}
-	// Dial the Djinn address (UDP, no actual packet sent) to find which
-	// local interface the OS would route through — that's the right IP.
-	host, _, _ := net.SplitHostPort(djinnAddr)
-	conn, err := net.Dial("udp", net.JoinHostPort(host, "9"))
-	if err != nil {
-		return "127.0.0.1"
-	}
-	defer conn.Close()
-	return conn.LocalAddr().(*net.UDPAddr).IP.String()
+	return "host.docker.internal"
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -122,7 +114,7 @@ func main() {
 	txn := pb.NewTransactionServiceClient(conn)
 	ctx := context.Background()
 
-	advertiseHost := resolveAdvertiseHost(djinnAddr)
+	advertiseHost := resolveAdvertiseHost()
 
 	banner("double-entry — Coordin8 TransactionMgr 2PC demo")
 	fmt.Printf("  djinn:          %s\n", djinnAddr)
