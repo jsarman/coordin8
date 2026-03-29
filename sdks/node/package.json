@@ -1,0 +1,19 @@
+{
+  "name": "@coordin8/sdk",
+  "version": "0.1.0",
+  "description": "Node.js SDK for the Coordin8 Djinn",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "proto": "npm run proto:coordin8",
+    "proto:coordin8": "protoc --plugin=protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=gen --ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,env=node -I ../../proto ../../proto/coordin8/lease.proto ../../proto/coordin8/registry.proto ../../proto/coordin8/common.proto"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.10.0"
+  },
+  "devDependencies": {
+    "ts-proto": "^1.176.0",
+    "typescript": "^5.4.0"
+  }
+}

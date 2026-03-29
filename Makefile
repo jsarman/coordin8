@@ -19,6 +19,14 @@ proto: ## Regenerate proto code for all languages
 		--go-grpc_out=examples/hello-coordin8/gen --go-grpc_opt=paths=source_relative \
 		-I examples/hello-coordin8/proto \
 		examples/hello-coordin8/proto/greeter.proto
+	cd sdks/node && npm run proto
+	cd examples/hello-coordin8-node && \
+		protoc \
+		--plugin=protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto \
+		--ts_proto_out=gen \
+		--ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,env=node \
+		-I ../hello-coordin8/proto \
+		../hello-coordin8/proto/greeter.proto
 
 build: ## Build the Djinn and CLI
 	cd djinn && cargo build --release
@@ -32,6 +40,8 @@ build-examples: ## Build example binaries into their own directories
 	@echo "examples/hello-coordin8/bin/greeter-client"
 	cd examples/hello-coordin8-java && ./gradlew assemble -q
 	@echo "examples/hello-coordin8-java/build/distributions/ (run via ./gradlew run)"
+	cd examples/hello-coordin8-node && npm run build
+	@echo "examples/hello-coordin8-node/dist/ (run via npm start)"
 
 test: ## Run all tests
 	cd djinn && cargo test --all
@@ -49,3 +59,4 @@ clean:
 	rm -rf examples/hello-coordin8/bin
 	cd examples/hello-coordin8-java && ./gradlew clean -q
 	cd sdks/java && ./gradlew clean -q
+	rm -rf sdks/node/dist examples/hello-coordin8-node/dist
