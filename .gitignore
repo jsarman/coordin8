@@ -21,6 +21,7 @@ npm-debug.log*
 
 # Java / Gradle
 **/build/
+**/bin/
 **/.gradle/
 **/gradle/wrapper/gradle-wrapper.jar
 
