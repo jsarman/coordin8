@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -26,7 +25,6 @@ pub enum ProxyError {
 }
 
 struct ProxyEntry {
-    local_port: u16,
     shutdown: oneshot::Sender<()>,
 }
 
@@ -142,7 +140,7 @@ impl ProxyManager {
 
         self.proxies.insert(
             proxy_id.clone(),
-            ProxyEntry { local_port, shutdown: tx },
+            ProxyEntry { shutdown: tx },
         );
 
         Ok((proxy_id, local_port))
