@@ -12,10 +12,14 @@ use coordin8_proto::coordin8::event_service_server::EventServiceServer;
 use coordin8_proto::coordin8::lease_service_server::LeaseServiceServer;
 use coordin8_proto::coordin8::proxy_service_server::ProxyServiceServer;
 use coordin8_proto::coordin8::registry_service_server::RegistryServiceServer;
-use coordin8_provider_local::{InMemoryEventStore, InMemoryLeaseStore, InMemoryRegistryStore};
+use coordin8_proto::coordin8::transaction_service_server::TransactionServiceServer;
+use coordin8_provider_local::{
+    InMemoryEventStore, InMemoryLeaseStore, InMemoryRegistryStore, InMemoryTxnStore,
+};
 use coordin8_proxy::{ProxyConfig, ProxyManager, ProxyServiceImpl};
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
+use coordin8_txn::{TxnManager, TxnServiceImpl};
 
 /// Coordin8 boot sequence:
 ///
@@ -40,6 +44,7 @@ async fn main() -> Result<()> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
     let registry_store = Arc::new(InMemoryRegistryStore::new());
     let event_store = Arc::new(InMemoryEventStore::new());
+    let txn_store = Arc::new(InMemoryTxnStore::new());
     info!("  ✓ Provider: local (in-memory)");
 
     // ── Layer 1: LeaseMgr ────────────────────────────────────────────────────
@@ -72,10 +77,15 @@ async fn main() -> Result<()> {
     let proxy_manager = Arc::new(ProxyManager::new(registry_store, proxy_config));
     info!("  ✓ Proxy: ready");
 
+    // ── Layer 4: TransactionMgr ───────────────────────────────────────────────
+    let txn_manager = Arc::new(TxnManager::new(txn_store, Arc::clone(&lease_manager)));
+    info!("  ✓ TransactionMgr: ready");
+
     // ── gRPC servers ─────────────────────────────────────────────────────────
     let lease_addr    = "0.0.0.0:9001".parse()?;
     let registry_addr = "0.0.0.0:9002".parse()?;
     let proxy_addr    = "0.0.0.0:9003".parse()?;
+    let txn_addr      = "0.0.0.0:9004".parse()?;
     let event_addr    = "0.0.0.0:9005".parse()?;
 
     let lease_svc =
@@ -86,18 +96,21 @@ async fn main() -> Result<()> {
         registry_tx,
     ));
     let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
+    let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(txn_manager));
     let event_svc = EventServiceServer::new(EventServiceImpl::new(event_manager));
 
-    info!("  ✓ LeaseMgr:  listening on {}", lease_addr);
-    info!("  ✓ Registry:  listening on {}", registry_addr);
-    info!("  ✓ Proxy:     listening on {}", proxy_addr);
-    info!("  ✓ EventMgr:  listening on {}", event_addr);
+    info!("  ✓ LeaseMgr:      listening on {}", lease_addr);
+    info!("  ✓ Registry:      listening on {}", registry_addr);
+    info!("  ✓ Proxy:         listening on {}", proxy_addr);
+    info!("  ✓ TransactionMgr: listening on {}", txn_addr);
+    info!("  ✓ EventMgr:      listening on {}", event_addr);
     info!("Djinn ready.");
 
     tokio::try_join!(
         Server::builder().add_service(lease_svc).serve(lease_addr),
         Server::builder().add_service(registry_svc).serve(registry_addr),
         Server::builder().add_service(proxy_svc).serve(proxy_addr),
+        Server::builder().add_service(txn_svc).serve(txn_addr),
         Server::builder().add_service(event_svc).serve(event_addr),
     )?;
 

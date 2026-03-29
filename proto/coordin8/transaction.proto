@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package coordin8;
+
+import "coordin8/lease.proto";
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/coordin8/proto/coordin8";
+
+// TransactionService — 2PC coordinator.
+// Modeled after net.jini.core.transaction.server.TransactionManager.
+//
+// Participants expose a ParticipantService (separate gRPC server) and
+// register their endpoint via Enlist. The manager calls them back during
+// prepare and commit phases.
+service TransactionService {
+    // Begin a new transaction. Returns the transaction + a lease.
+    // Let the lease expire and the transaction auto-aborts.
+    rpc Begin(BeginRequest)       returns (TransactionCreated);
+
+    // Participant enlists in a transaction.
+    // Equivalent to TransactionManager.join(id, participant, crashCount).
+    rpc Enlist(EnlistRequest)     returns (google.protobuf.Empty);
+
+    // Query current state of a transaction.
+    rpc GetState(GetStateRequest) returns (TransactionStateResponse);
+
+    // Commit — manager runs prepare phase then commit phase.
+    rpc Commit(CommitRequest)     returns (google.protobuf.Empty);
+
+    // Abort — manager calls abort on all enlisted participants.
+    rpc Abort(AbortRequest)       returns (google.protobuf.Empty);
+}
+
+// ParticipantService — implemented BY services that want to participate.
+// The manager calls these during 2PC. Participants register their
+// endpoint address via EnlistRequest.participant_endpoint.
+service ParticipantService {
+    // Phase 1: can you commit? Returns PREPARED, NOTCHANGED, or ABORTED.
+    rpc Prepare(ParticipantRequest)           returns (PrepareResponse);
+
+    // Phase 2: commit (only called if you returned PREPARED).
+    rpc Commit(ParticipantRequest)            returns (google.protobuf.Empty);
+
+    // Rollback.
+    rpc Abort(ParticipantRequest)             returns (google.protobuf.Empty);
+
+    // Optimization: single-participant transactions skip a round-trip.
+    rpc PrepareAndCommit(ParticipantRequest)  returns (PrepareResponse);
+}
+
+// ── Messages ─────────────────────────────────────────────────────────────────
+
+message BeginRequest {
+    uint64 ttl_seconds = 1;  // lease TTL; expire = auto-abort
+}
+
+message TransactionCreated {
+    string txn_id = 1;
+    Lease  lease  = 2;
+}
+
+message EnlistRequest {
+    string txn_id               = 1;
+    string participant_endpoint = 2;  // host:port of the participant's gRPC server
+    uint64 crash_count          = 3;  // monotonic counter; prevents stale rejoin
+}
+
+message GetStateRequest {
+    string txn_id = 1;
+}
+
+message TransactionStateResponse {
+    TransactionState state = 1;
+}
+
+message CommitRequest {
+    string txn_id      = 1;
+    uint64 wait_millis = 2;  // 0 = fire and forget
+}
+
+message AbortRequest {
+    string txn_id      = 1;
+    uint64 wait_millis = 2;
+}
+
+message ParticipantRequest {
+    string txn_id = 1;
+}
+
+message PrepareResponse {
+    PrepareVote vote = 1;
+}
+
+// ── Enums ─────────────────────────────────────────────────────────────────────
+
+enum TransactionState {
+    ACTIVE     = 0;  // accepting participants and operations
+    VOTING     = 1;  // prepare phase in progress
+    PREPARED   = 2;  // all participants voted PREPARED
+    COMMITTED  = 3;  // all participants committed
+    ABORTED    = 4;  // rolled back
+}
+
+enum PrepareVote {
+    VOTE_PREPARED    = 0;  // state modified; ready to commit
+    VOTE_NOTCHANGED  = 1;  // read-only participant; no action needed at commit
+    VOTE_ABORTED     = 2;  // cannot commit; transaction must abort
+}

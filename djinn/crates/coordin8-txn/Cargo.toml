@@ -1,0 +1,22 @@
+[package]
+name = "coordin8-txn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+coordin8-core  = { workspace = true }
+coordin8-proto = { workspace = true }
+coordin8-lease = { workspace = true }
+
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+tonic       = { workspace = true }
+prost-types = { workspace = true }
+uuid        = { workspace = true }
+chrono      = { workspace = true }
+tracing     = { workspace = true }
+futures     = { workspace = true }
+
+[dev-dependencies]
+coordin8-provider-local = { workspace = true }
+tokio = { workspace = true }

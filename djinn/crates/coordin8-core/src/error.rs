@@ -23,6 +23,15 @@ pub enum Error {
     #[error("subscription expired: {0}")]
     SubscriptionExpired(String),
 
+    #[error("transaction not found: {0}")]
+    TransactionNotFound(String),
+
+    #[error("transaction in terminal state: {0}")]
+    TransactionTerminal(String),
+
+    #[error("transaction aborted: {0}")]
+    TransactionAborted(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }

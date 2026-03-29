@@ -7,6 +7,7 @@ members = [
     "crates/coordin8-registry",
     "crates/coordin8-proxy",
     "crates/coordin8-event",
+    "crates/coordin8-txn",
     "crates/coordin8-djinn",
     "providers/local",
 ]
@@ -19,6 +20,7 @@ coordin8-lease   = { path = "crates/coordin8-lease" }
 coordin8-registry = { path = "crates/coordin8-registry" }
 coordin8-proxy   = { path = "crates/coordin8-proxy" }
 coordin8-event   = { path = "crates/coordin8-event" }
+coordin8-txn     = { path = "crates/coordin8-txn" }
 coordin8-provider-local = { path = "providers/local" }
 
 # Async runtime
@@ -44,6 +46,9 @@ dashmap = "5"
 
 # Async traits
 async-trait = "0.1"
+
+# Futures
+futures = "0.3"
 
 # Tracing
 tracing            = "0.1"
