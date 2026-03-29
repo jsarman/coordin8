@@ -2,102 +2,177 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project State
+## What Coordin8 Is
 
-**Pre-alpha, design phase.** The single source of truth is `coordin8-design-napkin.md` — read it before touching anything. No code exists yet. Phase 0 (Rust workspace + protobuf scaffolding) is the starting point.
+Coordin8 is a distributed coordination platform inspired by Jini/JavaSpaces (Sun Labs, 1999), decoupled from the JVM and modernized for any cloud. The wire protocol is gRPC + Protobuf. The core runtime — **the Djinn** — is written in Rust. Client SDKs exist for Go, Java, and Node.js/TypeScript.
 
-## Planned Repo Structure
+**"Describe what you need, not where it is."**
+
+The full vision (Space, EventMgr, TransactionMgr, AWS provider, higher-order patterns) is in `coordin8-design-napkin.md`. Session plans live in `.claude/plans/`.
+
+## Architecture
+
+### Djinn Services
+
+Boot order is strict and load-bearing. No circular dependencies.
+
+| Layer | Service | Port | Role |
+|-------|---------|------|------|
+| 0 | Provider | — | Storage backend (InMemory for dev) |
+| 1 | LeaseMgr | 9001 | TTL-based liveness contracts. Bedrock — everything depends on leases. |
+| 2a | Registry | 9002 | Attribute-based service discovery. Entries are leased — stop renewing, disappear. |
+| 2b | EventMgr | 9005 | Durable event delivery. Leased subscriptions, mailbox buffering, sequence numbers. |
+| 3 | Proxy | 9003 | TCP forwarding. `OpenProxy(template)` → local port with live failover. |
+| 4 | TransactionMgr | 9004 | 2PC coordinator. Participants expose their own gRPC `ParticipantService`. |
+
+### Smart Proxy
+
+`ProxyManager` resolves a capability template against the Registry **at connection time**, not at open time. Each forwarded TCP connection re-resolves the upstream — if a service moves or fails over, the next connection finds the new one.
+
+Configuration via env vars:
+- `PROXY_BIND_HOST` — bind address (`127.0.0.1` locally, `0.0.0.0` in Docker)
+- `PROXY_PORT_MIN` / `PROXY_PORT_MAX` — fixed port range (9100–9200 in compose); when unset, OS picks ephemeral ports
+
+### ServiceDiscovery
+
+Wraps the proxy layer with a cache keyed by template. Stale-on-lease-expire, eager-refresh-on-register. The one-liner pattern:
+
+```go
+// Go
+discovery, _ := coordin8.Watch(djinn)
+greeter := pb.NewGreeterClient(discovery.Get(coordin8.Template{"interface": "Greeter"}))
+```
+
+```java
+// Java
+var discovery = ServiceDiscovery.watch(djinn);
+var greeter = discovery.get(GreeterGrpc::newBlockingStub, Map.of("interface", "Greeter"));
+```
+
+```typescript
+// Node
+const discovery = await ServiceDiscovery.watch(djinn);
+const greeter = await discovery.get(addr => new GreeterClient(addr, creds), { interface: "Greeter" });
+```
+
+### Template Matching
+
+Operators: `contains:`, `starts_with:`, exact match, or `Any` (missing field = match anything). The `interface` field is always injected into the match set alongside `attrs`.
+
+## Repo Structure
 
 ```
 coordin8/
-  proto/coordin8/           ← .proto service definitions (lease, registry, common)
-  djinn/                    ← Rust workspace (core services)
-    Cargo.toml
+  proto/coordin8/              .proto definitions (lease, registry, proxy, event, transaction, common)
+  djinn/                       Rust workspace
     crates/
-      coordin8-proto/       ← generated protobuf/gRPC code
-      coordin8-core/        ← shared types, provider trait
-      coordin8-lease/       ← LeaseMgr implementation
-      coordin8-registry/    ← Registry (Space with leased entries)
-      coordin8-space/       ← Space implementation
-      coordin8-event/       ← EventMgr
-      coordin8-txn/         ← TransactionMgr
-      coordin8-djinn/       ← binary, bootstraps all services
-    providers/local/        ← SQLite/in-memory (dev tier)
-  cli/                      ← Go module
-  sdks/go/                  ← Go client SDK
-  examples/hello-coordin8/
+      coordin8-core/           Shared types, store traits
+      coordin8-proto/          Generated gRPC bindings (tonic)
+      coordin8-lease/          LeaseMgr + reaper
+      coordin8-registry/       Registry + template matcher
+      coordin8-proxy/          ProxyManager + TCP forwarding
+      coordin8-event/          EventMgr (durable delivery, mailbox, broadcast)
+      coordin8-txn/            TransactionMgr (2PC coordinator)
+      coordin8-provider-local/ InMemory stores (lease, registry, event, txn)
+      coordin8-djinn/          Binary entry point
+  sdks/
+    go/coordin8/               Go SDK (client, lease, registry, proxy, discovery)
+    java/                      Java SDK (Gradle, gRPC stubs auto-generated)
+    node/                      Node.js/TypeScript SDK (ts-proto generated)
+  cli/cmd/coordin8/            Go CLI (Cobra) — lease + registry commands
+  examples/
+    hello-coordin8/
+      go/                      Go greeter service + client
+      java/                    Java greeter client (Gradle)
+      node/                    Node.js greeter client (ts-node)
+    market-watch/              EventMgr live demo — subscribe, mailbox drain, live stream
+    double-entry/              TransactionMgr 2PC demo — happy path + veto abort
+  Dockerfile.djinn             Multi-stage Rust build
+  Dockerfile.greeter           Multi-stage Go build
+  docker-compose.yml           Full stack: Djinn + greeter
+  Makefile                     proto, build, build-examples, test, lint, clean
+  .mise.toml                   Tool versions (rust, go, node, java) + task runner
+  coordin8-design-napkin.md    Full vision / PRD
 ```
 
-## Build Commands (Phase 0 onward)
+## Build Commands
 
 ```bash
-# Rust — core Djinn
+# mise tasks (preferred — manages tool versions automatically)
+mise r build             # Djinn release + CLI
+mise r build-djinn       # Djinn dev build only
+mise r build-examples    # all example binaries
+mise r test              # Rust + Go SDK tests
+mise r test-rust         # Rust only
+mise r test-go           # Go SDK only
+mise r lint              # clippy + fmt + go vet
+mise r proto             # regenerate all proto stubs
+mise r clean             # remove all build artifacts
+mise r djinn             # start Djinn locally (dev)
+mise r up / down         # Docker stack
+mise r demo-events       # market-watch vs live Djinn on :9005
+mise r demo-txn          # double-entry vs live Djinn on :9004
+
+# Rust (from djinn/)
 cargo build
 cargo test
-cargo test -p coordin8-lease         # single crate
-cargo clippy -- -D warnings
-cargo fmt --check
+cargo test -p coordin8-lease       # single crate
+cargo run                           # starts Djinn locally
 
-# Protobuf
-protoc --rust_out=. --grpc_out=. proto/coordin8/*.proto
-
-# Go — CLI + SDKs
-go build ./cli/...
+# Go SDK (from sdks/go/)
 go test ./...
-go vet ./...
-gofmt -l .
+
+# Node SDK (from sdks/node/)
+npm install && npm run build
+npm run proto                       # regenerate ts-proto stubs
+
+# Node example (from examples/hello-coordin8/node/)
+npx ts-node src/greeter-client.ts John
+
+# Java SDK (from sdks/java/)
+./gradlew build
+
+# Java example (from examples/hello-coordin8/java/)
+./gradlew run --args="John"
+
+# Docker
+docker compose up --build           # Djinn + greeter, full stack
+docker compose down
 ```
 
-## Architecture — The Five Djinn
+**Note:** The Makefile `GO ?=` falls back to `$(HOME)/go-install/go/bin/go` when mise is not active. With mise, `go` is on PATH and the env override takes effect automatically.
 
-Boot order is strict (no circular deps):
+## Gotchas
 
-```
-Layer 0: Provider          (DynamoDB | SQLite | CosmosDB | Firestore)
-Layer 1: LeaseMgr          ← bedrock; everything depends on leases
-Layer 2: Space + EventMgr  ← peers, no dependency between them
-Layer 3: TransactionMgr    ← uses LeaseMgr + provider
-Layer 4: Registry          ← implemented as a Space with leased entries
-```
+### Proto
 
-**LeaseMgr** — TTL-based liveness contracts. Lease expiry is a coordination signal, not an error. Drives leader election, distributed locks, session management, failure detection.
+- `proxy.proto` uses `Release`, not `Close` — `close` conflicts with gRPC base `Client.close()` in Node's `@grpc/grpc-js`
+- Java outer class for `lease.proto` is `LeaseOuterClass`, not `Lease` — protobuf renames the outer class when the filename collides with a message name. Import `coordin8.LeaseOuterClass.*`.
+- Regenerate all stubs: `make proto`. Rust stubs auto-regenerate via `build.rs` on `cargo build`.
 
-**Space** — Named tuple store. Primitives: `out()` (write), `take()` (atomic claim+remove), `read()` (non-destructive), `watch()` (reactive push). Template matching: null fields match anything. Every op takes optional tx, TTL, lease.
+### Docker
 
-**EventMgr** — Independent of Space. Delivery modes: durable (store-and-forward) or best-effort. Leased subscriptions.
+- `PROXY_BIND_HOST=0.0.0.0` is required in containers — default `127.0.0.1` binds only inside the container
+- Proxy port range `9100-9200` must be exposed in compose for host clients to reach forwarded ports
+- `ADVERTISE_HOST` on services tells the Djinn proxy where to forward across the Docker bridge (e.g., `greeter` resolves to the greeter container)
+- Health check: TCP probe on `:9001` (LeaseMgr). Greeter `depends_on` this with `condition: service_healthy`.
+- `restart: on-failure` on greeter handles DNS race at container startup
+- `extra_hosts: host.docker.internal:host-gateway` on the djinn service — required on Linux so the 2PC coordinator can call back to participant servers running on the host. On Mac/Windows Docker Desktop this is automatic.
 
-**TransactionMgr** — Real 2PC distributed transactions (not sagas). Same-provider path uses native atomic ops (e.g., DynamoDB `TransactWriteItems`). Transactions are leased — auto-abort on expiry.
+### Node SDK
 
-**Registry** — Attribute-based service discovery (not DNS). Pure pattern: it's a Space with leased entries. Consumers match on capability templates, not hardcoded endpoints.
+- `tsconfig.json` has `rootDir: "."` — output lands in `dist/src/`, so `package.json` main/types point to `dist/src/index.{js,d.ts}`
+- Stubs generated by `ts-proto` with `outputServices=grpc-js,esModuleInterop=true,env=node`
+- `proxyClient` and `ServiceDiscovery.get` use a factory pattern `(address: string) => T` to avoid cross-module `@grpc/grpc-js` credential identity mismatches
 
-## Provider Tiers (Three Environments, One Codebase)
+### Java SDK
 
-```python
-Djinn(provider="local")                                   # SQLite in-process (dev)
-Djinn(provider="aws", endpoint="http://localhost:4566")   # LocalStack (integration)
-Djinn(provider="aws", region="us-east-1")                 # Production
-```
+- Gradle: `proto { srcDir }` goes in the top-level `sourceSets {}` block, **not** inside the `protobuf {}` block (plugin 0.9.x doesn't support it there)
+- Same `LeaseOuterClass` naming issue as above — affects all Java imports from `lease.proto`
 
-## Wire Protocol
+## Design Constraints
 
-gRPC + Protobuf. Capabilities (smart proxies) are descriptor-based — no executable code crosses the wire; the SDK hydrates the proxy locally.
-
-## Build Phases
-
-0. Foundation: Rust workspace, proto defs, CI
-1. LeaseMgr
-2. Registry
-3. Hello Coordin8 (end-to-end demo, Go example)
-4. Polyglot SDK proof (Go + one other)
-5. Space
-6. EventMgr
-7. TransactionMgr
-8. AWS provider
-9. Dashboard + observability
-
-## Key Design Constraints
-
-- Absence is a signal — don't treat lease expiry as an exception, handle it as a coordination event
-- The Space carries indexes and handles, never heavy data (Information pattern separates coordination from data plane)
-- No IPs, ports, or endpoints in application code — location is resolved through Registry
-- No circular dependencies between the five Djinn layers — the boot order is load-bearing
+- **Absence is a signal** — lease expiry is a coordination event, not an error. Don't catch it, handle it.
+- **No IPs, ports, or endpoints in application code** — location is resolved through Registry + Proxy
+- **Boot order is non-negotiable** — Provider → LeaseMgr → Registry/EventMgr → Proxy → TransactionMgr. Violating this causes undefined behavior.
+- **The Space carries indexes and handles, never heavy data** — the Information pattern separates coordination from data plane
