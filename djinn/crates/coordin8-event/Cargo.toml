@@ -19,3 +19,6 @@ dashmap      = { workspace = true }
 tracing      = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-core = "0.3"
+
+[dev-dependencies]
+coordin8-provider-local = { workspace = true }

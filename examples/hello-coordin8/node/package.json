@@ -7,7 +7,7 @@
     "dev": "ts-node src/greeter-client.ts"
   },
   "dependencies": {
-    "@coordin8/sdk": "file:../../sdks/node",
+    "@coordin8/sdk": "file:../../../sdks/node",
     "@grpc/grpc-js": "^1.10.0"
   },
   "devDependencies": {

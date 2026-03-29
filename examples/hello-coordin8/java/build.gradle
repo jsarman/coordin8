@@ -30,7 +30,7 @@ dependencies {
 sourceSets {
     main {
         proto {
-            srcDir '../hello-coordin8/proto'
+            srcDir '../go/proto'
         }
         java {
             srcDirs 'src/main/java',

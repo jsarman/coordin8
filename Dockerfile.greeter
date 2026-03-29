@@ -5,10 +5,10 @@ WORKDIR /build
 
 # Copy SDK and example source
 COPY sdks/go ./sdks/go/
-COPY examples/hello-coordin8 ./examples/hello-coordin8/
+COPY examples/hello-coordin8/go ./examples/hello-coordin8/go/
 
 # Build the greeter service
-WORKDIR /build/examples/hello-coordin8
+WORKDIR /build/examples/hello-coordin8/go
 RUN go build -o bin/greeter-service ./greeter_service/
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/examples/hello-coordin8/bin/greeter-service /usr/local/bin/greeter-service
+COPY --from=builder /build/examples/hello-coordin8/go/bin/greeter-service /usr/local/bin/greeter-service
 
 EXPOSE 50051
 

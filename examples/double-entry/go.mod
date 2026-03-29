@@ -1,4 +1,4 @@
-module github.com/coordin8/examples/hello-coordin8
+module github.com/coordin8/examples/double-entry
 
 go 1.22
 

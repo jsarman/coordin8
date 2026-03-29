@@ -1,6 +1,6 @@
 rootProject.name = 'hello-coordin8-java'
 
-includeBuild('../../sdks/java') {
+includeBuild('../../../sdks/java') {
     dependencySubstitution {
         substitute(module('io.coordin8:coordin8-sdk-java')).using(project(':'))
     }
