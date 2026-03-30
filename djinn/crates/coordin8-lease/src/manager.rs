@@ -2,26 +2,29 @@ use std::sync::Arc;
 
 use tracing::debug;
 
-use coordin8_core::{Error, LeaseRecord, LeaseStore};
+use coordin8_core::{Error, LeaseConfig, LeaseRecord, LeaseStore};
 
 /// Coordinates lease operations. Wraps the backing store with business logic.
 ///
 /// Owned by the Djinn and shared (Arc) across the gRPC service and reaper.
 pub struct LeaseManager {
     store: Arc<dyn LeaseStore>,
+    config: LeaseConfig,
 }
 
 impl LeaseManager {
-    pub fn new(store: Arc<dyn LeaseStore>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<dyn LeaseStore>, config: LeaseConfig) -> Self {
+        Self { store, config }
     }
 
     pub async fn grant(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error> {
-        let record = self.store.create(resource_id, ttl_secs).await?;
+        let granted_ttl = self.config.negotiate(ttl_secs);
+        let record = self.store.create(resource_id, granted_ttl).await?;
         debug!(
             lease_id = %record.lease_id,
             resource_id = %record.resource_id,
-            ttl_secs,
+            requested_ttl = ttl_secs,
+            granted_ttl,
             expires_at = %record.expires_at,
             "lease granted"
         );
@@ -40,11 +43,13 @@ impl LeaseManager {
             return Err(Error::LeaseExpired(lease_id.to_string()));
         }
 
-        let record = self.store.renew(lease_id, ttl_secs).await?;
+        let granted_ttl = self.config.negotiate(ttl_secs);
+        let record = self.store.renew(lease_id, granted_ttl).await?;
         debug!(
             lease_id = %record.lease_id,
             resource_id = %record.resource_id,
-            ttl_secs,
+            requested_ttl = ttl_secs,
+            granted_ttl,
             expires_at = %record.expires_at,
             "lease renewed"
         );

@@ -38,6 +38,9 @@ message Lease {
     string resource_id = 2;
     google.protobuf.Timestamp granted_at = 3;
     google.protobuf.Timestamp expires_at = 4;
+    // The TTL actually granted by the server (may be less than requested).
+    // 0 = FOREVER (no expiry).
+    uint64 ttl_seconds = 5;
 }
 
 message ExpiryEvent {

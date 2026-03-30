@@ -60,7 +60,7 @@ impl SpaceService for SpaceServiceImpl {
             Some(r.input_tuple_id)
         };
 
-        let record = self
+        let (record, lease_record) = self
             .manager
             .out(r.attrs, r.payload, r.ttl_seconds, r.written_by, input_tuple_id)
             .await
@@ -69,10 +69,11 @@ impl SpaceService for SpaceServiceImpl {
         debug!(tuple_id = %record.tuple_id, "out rpc");
 
         let lease = Some(Lease {
-            lease_id: record.lease_id.clone(),
-            resource_id: format!("space:{}", record.tuple_id),
-            granted_at: Some(to_timestamp(record.written_at)),
-            expires_at: None,
+            lease_id: lease_record.lease_id,
+            resource_id: lease_record.resource_id,
+            granted_at: Some(to_timestamp(lease_record.granted_at)),
+            expires_at: Some(to_timestamp(lease_record.expires_at)),
+            ttl_seconds: lease_record.ttl_seconds,
         });
 
         Ok(Response::new(OutResponse {
@@ -183,6 +184,7 @@ impl SpaceService for SpaceServiceImpl {
             resource_id: record.resource_id,
             granted_at: Some(to_timestamp(record.granted_at)),
             expires_at: Some(to_timestamp(record.expires_at)),
+            ttl_seconds: record.ttl_seconds,
         }))
     }
 

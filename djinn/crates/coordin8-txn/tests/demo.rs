@@ -91,7 +91,7 @@ impl ParticipantService for MockParticipant {
 
 fn make_manager() -> Arc<TxnManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(lease_store));
+    let lease_manager = Arc::new(LeaseManager::new(lease_store, coordin8_core::LeaseConfig::default()));
     let txn_store = Arc::new(InMemoryTxnStore::new());
     Arc::new(TxnManager::new(txn_store, lease_manager))
 }

@@ -33,7 +33,7 @@ impl SpaceManager {
         }
     }
 
-    /// Write a leased tuple into the Space.
+    /// Write a leased tuple into the Space. Returns both the tuple and its lease.
     pub async fn out(
         &self,
         attrs: HashMap<String, String>,
@@ -41,7 +41,7 @@ impl SpaceManager {
         ttl_secs: u64,
         written_by: String,
         input_tuple_id: Option<String>,
-    ) -> Result<TupleRecord, Error> {
+    ) -> Result<(TupleRecord, LeaseRecord), Error> {
         let tuple_id = Uuid::new_v4().to_string();
         let resource_id = format!("space:{}", tuple_id);
         let lease = self.lease_manager.grant(&resource_id, ttl_secs).await?;
@@ -58,12 +58,12 @@ impl SpaceManager {
 
         self.store.insert(record.clone()).await?;
 
-        debug!(tuple_id, lease_id = %lease.lease_id, ttl_secs, "tuple written");
+        debug!(tuple_id, lease_id = %lease.lease_id, granted_ttl = lease.ttl_seconds, "tuple written");
 
         // Broadcast to wake blocked read/take and fire appearance watches.
         let _ = self.tuple_tx.send(record.clone());
 
-        Ok(record)
+        Ok((record, lease))
     }
 
     /// Non-destructive read by template. Blocking or non-blocking.

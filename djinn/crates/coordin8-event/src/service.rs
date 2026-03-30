@@ -59,7 +59,7 @@ impl EventService for EventServiceImpl {
             _ => DeliveryMode::Durable,
         };
 
-        let (registration_id, lease_id, seq_num) = self
+        let (registration_id, lease, seq_num) = self
             .manager
             .subscribe(r.source.clone(), r.template, delivery, r.ttl_seconds, r.handback)
             .await
@@ -71,10 +71,11 @@ impl EventService for EventServiceImpl {
             registration_id,
             source: r.source,
             lease: Some(Lease {
-                lease_id,
-                resource_id: String::new(),
-                granted_at: None,
-                expires_at: None,
+                lease_id: lease.lease_id,
+                resource_id: lease.resource_id,
+                granted_at: Some(to_timestamp(lease.granted_at)),
+                expires_at: Some(to_timestamp(lease.expires_at)),
+                ttl_seconds: lease.ttl_seconds,
             }),
             seq_num,
         }))
@@ -188,6 +189,7 @@ impl EventService for EventServiceImpl {
             resource_id: record.resource_id,
             granted_at: Some(to_timestamp(record.granted_at)),
             expires_at: Some(to_timestamp(record.expires_at)),
+            ttl_seconds: record.ttl_seconds,
         }))
     }
 

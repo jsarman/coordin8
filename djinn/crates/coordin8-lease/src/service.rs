@@ -28,6 +28,7 @@ fn record_to_proto(r: LeaseRecord) -> Lease {
         resource_id: r.resource_id,
         granted_at: to_timestamp(r.granted_at),
         expires_at: to_timestamp(r.expires_at),
+        ttl_seconds: r.ttl_seconds,
     }
 }
 

@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 fn make_manager() -> Arc<EventManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(lease_store));
+    let lease_manager = Arc::new(LeaseManager::new(lease_store, coordin8_core::LeaseConfig::default()));
     let event_store = Arc::new(InMemoryEventStore::new());
     let (event_tx, _) = broadcast::channel(256);
     Arc::new(EventManager::new(event_store, lease_manager, event_tx))

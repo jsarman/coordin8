@@ -121,6 +121,7 @@ impl RegistryService for RegistryServiceImpl {
                 seconds: lease.expires_at.timestamp(),
                 nanos: lease.expires_at.timestamp_subsec_nanos() as i32,
             }),
+            ttl_seconds: lease.ttl_seconds,
         }))
     }
 

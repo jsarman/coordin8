@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 
 fn make_manager() -> (Arc<SpaceManager>, broadcast::Sender<TupleRecord>) {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(lease_store));
+    let lease_manager = Arc::new(LeaseManager::new(lease_store, coordin8_core::LeaseConfig::default()));
     let space_store = Arc::new(InMemorySpaceStore::new());
     let (tuple_tx, _) = broadcast::channel(256);
     let (expiry_tx, _) = broadcast::channel(256);
@@ -28,7 +28,7 @@ fn make_manager() -> (Arc<SpaceManager>, broadcast::Sender<TupleRecord>) {
 
 fn make_manager_with_reaper() -> Arc<SpaceManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(lease_store.clone()));
+    let lease_manager = Arc::new(LeaseManager::new(lease_store.clone(), coordin8_core::LeaseConfig::default()));
     let space_store = Arc::new(InMemorySpaceStore::new());
     let (tuple_tx, _) = broadcast::channel(256);
     let (expiry_tx, _) = broadcast::channel(256);
@@ -69,7 +69,7 @@ fn make_manager_with_reaper() -> Arc<SpaceManager> {
 async fn out_and_read() {
     let (mgr, _) = make_manager();
 
-    let record = mgr
+    let (record, _lease) = mgr
         .out(
             [("kind".into(), "price".into()), ("ticker".into(), "AAPL".into())].into(),
             b"{\"price\": 189}".to_vec(),
@@ -402,7 +402,7 @@ async fn take_race_one_winner() {
 async fn cancel_tuple_removes() {
     let (mgr, _) = make_manager();
 
-    let record = mgr
+    let (record, _lease) = mgr
         .out(
             [("kind".into(), "temp".into())].into(),
             vec![],
@@ -430,7 +430,7 @@ async fn provenance_tracking() {
     let (mgr, _) = make_manager();
 
     // Out an input tuple
-    let input = mgr
+    let (input, _lease) = mgr
         .out(
             [("kind".into(), "raw".into())].into(),
             b"raw data".to_vec(),
@@ -442,7 +442,7 @@ async fn provenance_tracking() {
         .unwrap();
 
     // Out a derived tuple with lineage
-    let derived = mgr
+    let (derived, _lease) = mgr
         .out(
             [("kind".into(), "processed".into())].into(),
             b"processed data".to_vec(),

@@ -28,11 +28,18 @@ impl Default for InMemoryLeaseStore {
 impl LeaseStore for InMemoryLeaseStore {
     async fn create(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error> {
         let now = Utc::now();
+        let expires_at = if ttl_secs == coordin8_core::LEASE_FOREVER {
+            // FOREVER: set far-future sentinel so list_expired never picks it up.
+            chrono::DateTime::<Utc>::MAX_UTC
+        } else {
+            now + chrono::Duration::seconds(ttl_secs as i64)
+        };
         let record = LeaseRecord {
             lease_id: Uuid::new_v4().to_string(),
             resource_id: resource_id.to_string(),
             granted_at: now,
-            expires_at: now + chrono::Duration::seconds(ttl_secs as i64),
+            expires_at,
+            ttl_seconds: ttl_secs,
         };
         self.leases.insert(record.lease_id.clone(), record.clone());
         Ok(record)
@@ -43,7 +50,12 @@ impl LeaseStore for InMemoryLeaseStore {
             .leases
             .get_mut(lease_id)
             .ok_or_else(|| Error::LeaseNotFound(lease_id.to_string()))?;
-        entry.expires_at = Utc::now() + chrono::Duration::seconds(ttl_secs as i64);
+        if ttl_secs == coordin8_core::LEASE_FOREVER {
+            entry.expires_at = chrono::DateTime::<Utc>::MAX_UTC;
+        } else {
+            entry.expires_at = Utc::now() + chrono::Duration::seconds(ttl_secs as i64);
+        }
+        entry.ttl_seconds = ttl_secs;
         Ok(entry.clone())
     }
 
@@ -107,9 +119,20 @@ mod tests {
     #[tokio::test]
     async fn expired_lease_shows_up_in_list() {
         let store = InMemoryLeaseStore::new();
-        let record = store.create("worker-3", 0).await.unwrap(); // ttl=0 → already expired
-        sleep(Duration::from_millis(10)).await;
+        let record = store.create("worker-3", 1).await.unwrap(); // 1s TTL
+        sleep(Duration::from_millis(1100)).await;
         let expired = store.list_expired().await.unwrap();
         assert!(expired.iter().any(|r| r.lease_id == record.lease_id));
+    }
+
+    #[tokio::test]
+    async fn forever_lease_never_expires() {
+        let store = InMemoryLeaseStore::new();
+        let record = store.create("worker-forever", 0).await.unwrap(); // ttl=0 → FOREVER
+        assert_eq!(record.ttl_seconds, 0);
+        assert!(!record.is_expired());
+        sleep(Duration::from_millis(10)).await;
+        let expired = store.list_expired().await.unwrap();
+        assert!(!expired.iter().any(|r| r.lease_id == record.lease_id));
     }
 }

@@ -53,7 +53,11 @@ async fn main() -> Result<()> {
 
     // ── Layer 1: LeaseMgr ────────────────────────────────────────────────────
     let (expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);
-    let lease_manager = Arc::new(LeaseManager::new(lease_store));
+    let lease_config = coordin8_core::LeaseConfig::from_env();
+    info!("  Lease policy: max_ttl={}, preferred_ttl={}s",
+        lease_config.max_ttl.map_or("FOREVER".to_string(), |v| format!("{}s", v)),
+        lease_config.preferred_ttl);
+    let lease_manager = Arc::new(LeaseManager::new(lease_store, lease_config));
 
     let reaper_manager = Arc::clone(&lease_manager);
     let reaper_tx = expiry_tx.clone();

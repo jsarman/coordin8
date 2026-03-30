@@ -60,6 +60,7 @@ impl TransactionService for TxnServiceImpl {
                 resource_id: lease.resource_id,
                 granted_at: Some(to_timestamp(lease.granted_at)),
                 expires_at: Some(to_timestamp(lease.expires_at)),
+                ttl_seconds: lease.ttl_seconds,
             }),
         }))
     }

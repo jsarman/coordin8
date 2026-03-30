@@ -34,7 +34,7 @@ impl EventManager {
         }
     }
 
-    /// Create a subscription. Returns (registration_id, lease_id, initial_seq_num).
+    /// Create a subscription. Returns (registration_id, lease, initial_seq_num).
     pub async fn subscribe(
         &self,
         source: String,
@@ -42,7 +42,7 @@ impl EventManager {
         delivery: DeliveryMode,
         ttl_secs: u64,
         handback: Vec<u8>,
-    ) -> Result<(String, String, u64), Error> {
+    ) -> Result<(String, LeaseRecord, u64), Error> {
         let registration_id = Uuid::new_v4().to_string();
         let resource_id = format!("event:{}", registration_id);
         let lease = self.lease_manager.grant(&resource_id, ttl_secs).await?;
@@ -76,7 +76,7 @@ impl EventManager {
             "event subscription created"
         );
 
-        Ok((registration_id, lease.lease_id, initial_seq_num))
+        Ok((registration_id, lease, initial_seq_num))
     }
 
     /// Emit an event. Broadcasts to live receivers and enqueues into durable mailboxes.
