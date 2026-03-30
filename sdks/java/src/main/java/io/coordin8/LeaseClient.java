@@ -44,7 +44,8 @@ public class LeaseClient {
                 l.getLeaseId(),
                 l.getResourceId(),
                 l.hasGrantedAt() ? Instant.ofEpochSecond(l.getGrantedAt().getSeconds()) : null,
-                l.hasExpiresAt() ? Instant.ofEpochSecond(l.getExpiresAt().getSeconds()) : null
+                l.hasExpiresAt() ? Instant.ofEpochSecond(l.getExpiresAt().getSeconds()) : null,
+                l.getTtlSeconds()
         );
     }
 
@@ -52,6 +53,7 @@ public class LeaseClient {
             String leaseId,
             String resourceId,
             Instant grantedAt,
-            Instant expiresAt
+            Instant expiresAt,
+            long ttlSeconds
     ) {}
 }
