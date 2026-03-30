@@ -44,6 +44,9 @@ pub trait EventStore: Send + Sync {
         registration_id: &str,
     ) -> Result<Option<SubscriptionRecord>, Error>;
     async fn remove_subscription(&self, registration_id: &str) -> Result<(), Error>;
+    /// Remove the subscription associated with the given lease ID.
+    /// Returns the removed subscription, if any.
+    async fn remove_by_lease(&self, lease_id: &str) -> Result<Option<SubscriptionRecord>, Error>;
     async fn list_subscriptions(&self) -> Result<Vec<SubscriptionRecord>, Error>;
 
     /// Enqueue an event into a durable subscription's mailbox.

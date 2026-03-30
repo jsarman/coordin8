@@ -198,3 +198,52 @@ async fn cancel_removes_subscription() {
     assert!(sub.is_none());
     println!("\n[demo] Cancel: subscription gone ✓");
 }
+
+// ── Test 6: subscription lease expiry cascade ────────────────────────────
+
+#[tokio::test]
+async fn subscription_lease_expiry_cascade() {
+    let lease_store = Arc::new(InMemoryLeaseStore::new());
+    let lease_manager = Arc::new(LeaseManager::new(
+        lease_store,
+        coordin8_core::LeaseConfig::default(),
+    ));
+    let event_store = Arc::new(InMemoryEventStore::new());
+    let (event_tx, _) = broadcast::channel(256);
+    let mgr = Arc::new(EventManager::new(
+        event_store,
+        Arc::clone(&lease_manager),
+        event_tx,
+    ));
+
+    // Subscribe with a 1-second TTL
+    let (reg_id, lease, _) = mgr
+        .subscribe(
+            "test.source".into(),
+            Default::default(),
+            DeliveryMode::Durable,
+            1,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    // Subscription exists
+    assert!(mgr.get_subscription(&reg_id).await.unwrap().is_some());
+    println!("\n[demo] Subscription created: reg_id={reg_id}  lease_id={}", lease.lease_id);
+
+    // Simulate what the reaper + cascade does: unsubscribe by lease
+    let removed = mgr
+        .unsubscribe_by_lease(&lease.lease_id)
+        .await
+        .unwrap();
+    assert_eq!(removed, Some(reg_id.clone()));
+
+    // Subscription should be gone
+    assert!(mgr.get_subscription(&reg_id).await.unwrap().is_none());
+
+    // Mailbox should also be gone (drain returns error)
+    let drain_result = mgr.drain_mailbox(&reg_id).await;
+    assert!(drain_result.is_err());
+    println!("[demo] Lease expiry cascade: subscription + mailbox cleaned up ✓");
+}

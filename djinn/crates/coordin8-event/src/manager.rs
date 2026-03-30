@@ -151,6 +151,21 @@ impl EventManager {
         self.event_tx.subscribe()
     }
 
+    /// Remove the subscription associated with the given lease ID.
+    /// Called by the lease expiry cascade — no need to cancel the lease itself
+    /// since it's already expired.
+    pub async fn unsubscribe_by_lease(&self, lease_id: &str) -> Result<Option<String>, Error> {
+        let removed = self.store.remove_by_lease(lease_id).await?;
+        if let Some(ref sub) = removed {
+            debug!(
+                registration_id = %sub.registration_id,
+                lease_id,
+                "subscription expired (lease cascade)"
+            );
+        }
+        Ok(removed.map(|s| s.registration_id))
+    }
+
     pub async fn cancel_subscription(&self, registration_id: &str) -> Result<(), Error> {
         let sub = self
             .store

@@ -47,6 +47,23 @@ impl EventStore for InMemoryEventStore {
         Ok(())
     }
 
+    async fn remove_by_lease(&self, lease_id: &str) -> Result<Option<SubscriptionRecord>, Error> {
+        // Find the subscription with this lease_id
+        let found = self
+            .subscriptions
+            .iter()
+            .find(|r| r.value().lease_id == lease_id)
+            .map(|r| r.key().clone());
+
+        if let Some(reg_id) = found {
+            let removed = self.subscriptions.remove(&reg_id).map(|(_, v)| v);
+            self.mailboxes.remove(&reg_id);
+            Ok(removed)
+        } else {
+            Ok(None)
+        }
+    }
+
     async fn list_subscriptions(&self) -> Result<Vec<SubscriptionRecord>, Error> {
         Ok(self.subscriptions.iter().map(|r| r.clone()).collect())
     }

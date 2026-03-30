@@ -106,6 +106,17 @@ async fn main() -> Result<()> {
         Arc::clone(&lease_manager),
         event_tx,
     ));
+
+    // Listen for lease expirations relevant to event subscriptions.
+    let event_expiry_mgr = Arc::clone(&event_manager);
+    let mut event_expiry_rx = expiry_tx.subscribe();
+    tokio::spawn(async move {
+        while let Ok(lease) = event_expiry_rx.recv().await {
+            if lease.resource_id.starts_with("event:") {
+                let _ = event_expiry_mgr.unsubscribe_by_lease(&lease.lease_id).await;
+            }
+        }
+    });
     info!("  ✓ EventMgr: ready");
 
     // ── Layer 3: Proxy ───────────────────────────────────────────────────────
