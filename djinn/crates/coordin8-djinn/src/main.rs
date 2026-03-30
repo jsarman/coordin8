@@ -69,6 +69,34 @@ async fn main() -> Result<()> {
     // ── Layer 2a: Registry ───────────────────────────────────────────────────
     let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
     let registry_index = Arc::new(RegistryIndex::new(registry_store.clone()));
+
+    // Listen for lease expirations relevant to Registry entries.
+    let registry_expiry_index = Arc::clone(&registry_index);
+    let registry_expiry_tx = registry_tx.clone();
+    let mut registry_expiry_rx = expiry_tx.subscribe();
+    tokio::spawn(async move {
+        while let Ok(lease) = registry_expiry_rx.recv().await {
+            if lease.resource_id.starts_with("registry:") {
+                if let Ok(Some(entry)) = registry_expiry_index
+                    .unregister_by_lease(&lease.lease_id)
+                    .await
+                {
+                    tracing::debug!(
+                        capability_id = %entry.capability_id,
+                        interface = %entry.interface,
+                        lease_id = %lease.lease_id,
+                        "registry entry expired"
+                    );
+                    let _ = registry_expiry_tx.send(
+                        coordin8_registry::service::RegistryChangedEvent {
+                            event_type: 1, // EXPIRED
+                            entry,
+                        },
+                    );
+                }
+            }
+        }
+    });
     info!("  ✓ Registry: ready");
 
     // ── Layer 2b: EventMgr (peer to Registry) ────────────────────────────────

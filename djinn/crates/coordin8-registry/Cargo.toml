@@ -8,6 +8,7 @@ coordin8-core  = { workspace = true }
 coordin8-proto = { workspace = true }
 coordin8-lease = { workspace = true }
 
+chrono       = { workspace = true }
 async-trait  = { workspace = true }
 tokio        = { workspace = true }
 tonic        = { workspace = true }

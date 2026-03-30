@@ -18,7 +18,22 @@ impl RegistryIndex {
         self.store.insert(entry).await
     }
 
-    pub async fn unregister_by_lease(&self, lease_id: &str) -> Result<(), Error> {
+    /// Update an existing entry in-place. Returns None if capability_id not found.
+    pub async fn update(&self, entry: RegistryEntry) -> Result<Option<RegistryEntry>, Error> {
+        self.store.update(entry).await
+    }
+
+    /// Get an entry by capability_id.
+    pub async fn get(&self, capability_id: &str) -> Result<Option<RegistryEntry>, Error> {
+        self.store.get(capability_id).await
+    }
+
+    /// Get an entry by its lease_id.
+    pub async fn get_by_lease(&self, lease_id: &str) -> Result<Option<RegistryEntry>, Error> {
+        self.store.get_by_lease(lease_id).await
+    }
+
+    pub async fn unregister_by_lease(&self, lease_id: &str) -> Result<Option<RegistryEntry>, Error> {
         self.store.remove_by_lease(lease_id).await
     }
 

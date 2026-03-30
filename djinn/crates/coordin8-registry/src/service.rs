@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use coordin8_core::{RegistryEntry, TransportConfig};
 use coordin8_proto::coordin8::{
-    registry_service_server::RegistryService, Capability, LookupRequest, RegisterRequest,
-    RegistryEvent, RegistryWatchRequest,
+    registry_service_server::RegistryService, Capability, LookupRequest, ModifyAttrsRequest,
+    RegisterRequest, RegisterResponse, RegistryEvent, RegistryWatchRequest,
 };
 use coordin8_proto::coordin8::{Lease, TransportDescriptor};
 
@@ -26,14 +26,21 @@ pub struct RegistryChangedEvent {
 
 pub type RegistryBroadcast = broadcast::Sender<RegistryChangedEvent>;
 
-fn entry_to_capability(e: RegistryEntry) -> Capability {
+fn to_timestamp(dt: chrono::DateTime<chrono::Utc>) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: dt.timestamp(),
+        nanos: dt.timestamp_subsec_nanos() as i32,
+    }
+}
+
+fn entry_to_capability(e: &RegistryEntry) -> Capability {
     Capability {
-        capability_id: e.capability_id,
-        interface: e.interface,
-        attrs: e.attrs,
-        transport: e.transport.map(|t| TransportDescriptor {
-            r#type: t.transport_type,
-            config: t.config,
+        capability_id: e.capability_id.clone(),
+        interface: e.interface.clone(),
+        attrs: e.attrs.clone(),
+        transport: e.transport.as_ref().map(|t| TransportDescriptor {
+            r#type: t.transport_type.clone(),
+            config: t.config.clone(),
         }),
     }
 }
@@ -62,67 +69,174 @@ type BoxStream<T> = Pin<Box<dyn futures_core::Stream<Item = Result<T, Status>> +
 
 #[tonic::async_trait]
 impl RegistryService for RegistryServiceImpl {
-    async fn register(&self, req: Request<RegisterRequest>) -> Result<Response<Lease>, Status> {
+    async fn register(
+        &self,
+        req: Request<RegisterRequest>,
+    ) -> Result<Response<RegisterResponse>, Status> {
         let r = req.into_inner();
-        let capability_id = Uuid::new_v4().to_string();
-        let resource_id = format!("registry:{}", capability_id);
 
-        let lease = self
-            .lease_manager
-            .grant(&resource_id, r.ttl_seconds)
+        let is_reregister = !r.capability_id.is_empty();
+
+        if is_reregister {
+            // Re-registration: update existing entry in-place.
+            let existing = self
+                .index
+                .get(&r.capability_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(|| {
+                    Status::not_found(format!("capability not found: {}", r.capability_id))
+                })?;
+
+            // Renew the existing lease.
+            let lease = self
+                .lease_manager
+                .renew(&existing.lease_id, r.ttl_seconds)
+                .await
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+
+            let entry = RegistryEntry {
+                capability_id: r.capability_id.clone(),
+                lease_id: existing.lease_id,
+                interface: r.interface.clone(),
+                attrs: r.attrs,
+                transport: r.transport.map(|t| TransportConfig {
+                    transport_type: t.r#type,
+                    config: t.config,
+                }),
+            };
+
+            self.index
+                .update(entry.clone())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            debug!(
+                capability_id = %r.capability_id,
+                interface = %r.interface,
+                "service re-registered"
+            );
+
+            let _ = self.event_tx.send(RegistryChangedEvent {
+                event_type: 2, // MODIFIED
+                entry,
+            });
+
+            Ok(Response::new(RegisterResponse {
+                capability_id: r.capability_id,
+                lease: Some(Lease {
+                    lease_id: lease.lease_id,
+                    resource_id: lease.resource_id,
+                    granted_at: Some(to_timestamp(lease.granted_at)),
+                    expires_at: Some(to_timestamp(lease.expires_at)),
+                    ttl_seconds: lease.ttl_seconds,
+                }),
+            }))
+        } else {
+            // New registration.
+            let capability_id = Uuid::new_v4().to_string();
+            let resource_id = format!("registry:{}", capability_id);
+
+            let lease = self
+                .lease_manager
+                .grant(&resource_id, r.ttl_seconds)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            let transport_type = r
+                .transport
+                .as_ref()
+                .map(|t| t.r#type.clone())
+                .unwrap_or_else(|| "none".to_string());
+
+            let entry = RegistryEntry {
+                capability_id: capability_id.clone(),
+                lease_id: lease.lease_id.clone(),
+                interface: r.interface.clone(),
+                attrs: r.attrs,
+                transport: r.transport.map(|t| TransportConfig {
+                    transport_type: t.r#type,
+                    config: t.config,
+                }),
+            };
+
+            self.index
+                .register(entry.clone())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            debug!(
+                capability_id,
+                interface = %entry.interface,
+                lease_id = %lease.lease_id,
+                ttl_secs = r.ttl_seconds,
+                transport = transport_type,
+                "service registered"
+            );
+
+            let _ = self.event_tx.send(RegistryChangedEvent {
+                event_type: 0, // REGISTERED
+                entry,
+            });
+
+            Ok(Response::new(RegisterResponse {
+                capability_id,
+                lease: Some(Lease {
+                    lease_id: lease.lease_id,
+                    resource_id: lease.resource_id,
+                    granted_at: Some(to_timestamp(lease.granted_at)),
+                    expires_at: Some(to_timestamp(lease.expires_at)),
+                    ttl_seconds: lease.ttl_seconds,
+                }),
+            }))
+        }
+    }
+
+    async fn modify_attrs(
+        &self,
+        req: Request<ModifyAttrsRequest>,
+    ) -> Result<Response<Capability>, Status> {
+        let r = req.into_inner();
+
+        let existing = self
+            .index
+            .get(&r.capability_id)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| {
+                Status::not_found(format!("capability not found: {}", r.capability_id))
+            })?;
 
-        let transport_type = r
-            .transport
-            .as_ref()
-            .map(|t| t.r#type.clone())
-            .unwrap_or_else(|| "none".to_string());
+        let mut attrs = existing.attrs.clone();
+        // Remove first, then add — so adds override removes if same key appears in both.
+        for key in &r.remove_attrs {
+            attrs.remove(key);
+        }
+        for (k, v) in r.add_attrs {
+            attrs.insert(k, v);
+        }
 
         let entry = RegistryEntry {
-            capability_id: capability_id.clone(),
-            lease_id: lease.lease_id.clone(),
-            interface: r.interface.clone(),
-            attrs: r.attrs,
-            transport: r.transport.map(|t| TransportConfig {
-                transport_type: t.r#type,
-                config: t.config,
-            }),
+            attrs,
+            ..existing
         };
 
         self.index
-            .register(entry.clone())
+            .update(entry.clone())
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         debug!(
-            capability_id,
-            interface = %entry.interface,
-            lease_id = %lease.lease_id,
-            ttl_secs = r.ttl_seconds,
-            transport = transport_type,
-            "service registered"
+            capability_id = %r.capability_id,
+            "attributes modified"
         );
 
         let _ = self.event_tx.send(RegistryChangedEvent {
-            event_type: 0, // REGISTERED
-            entry,
+            event_type: 2, // MODIFIED
+            entry: entry.clone(),
         });
 
-        use prost_types::Timestamp;
-        Ok(Response::new(Lease {
-            lease_id: lease.lease_id,
-            resource_id: lease.resource_id,
-            granted_at: Some(Timestamp {
-                seconds: lease.granted_at.timestamp(),
-                nanos: lease.granted_at.timestamp_subsec_nanos() as i32,
-            }),
-            expires_at: Some(Timestamp {
-                seconds: lease.expires_at.timestamp(),
-                nanos: lease.expires_at.timestamp_subsec_nanos() as i32,
-            }),
-            ttl_seconds: lease.ttl_seconds,
-        }))
+        Ok(Response::new(entry_to_capability(&entry)))
     }
 
     async fn lookup(&self, req: Request<LookupRequest>) -> Result<Response<Capability>, Status> {
@@ -141,7 +255,7 @@ impl RegistryService for RegistryServiceImpl {
                     ?template,
                     "lookup hit"
                 );
-                Ok(Response::new(entry_to_capability(entry)))
+                Ok(Response::new(entry_to_capability(&entry)))
             }
             None => {
                 debug!(?template, "lookup miss — no matching capability");
@@ -165,7 +279,8 @@ impl RegistryService for RegistryServiceImpl {
 
         debug!(?template, count = entries.len(), "lookup_all");
 
-        let stream = tokio_stream::iter(entries.into_iter().map(|e| Ok(entry_to_capability(e))));
+        let stream =
+            tokio_stream::iter(entries.iter().map(|e| Ok(entry_to_capability(e))).collect::<Vec<_>>());
         Ok(Response::new(Box::pin(stream)))
     }
 
@@ -189,7 +304,7 @@ impl RegistryService for RegistryServiceImpl {
                     if crate::matcher::matches(&ops, &combined) {
                         Some(Ok(RegistryEvent {
                             r#type: evt.event_type,
-                            capability: Some(entry_to_capability(evt.entry)),
+                            capability: Some(entry_to_capability(&evt.entry)),
                         }))
                     } else {
                         None

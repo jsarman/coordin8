@@ -8,7 +8,11 @@ option go_package = "github.com/coordin8/proto/coordin8";
 
 service RegistryService {
     // Register a service. Returns a lease — stop renewing to disappear.
-    rpc Register(RegisterRequest) returns (Lease);
+    // If capability_id is set, updates the existing entry in-place (re-registration).
+    // If empty, creates a new entry with a server-assigned capability_id.
+    rpc Register(RegisterRequest) returns (RegisterResponse);
+    // Modify attributes on an existing registration without re-registering.
+    rpc ModifyAttrs(ModifyAttrsRequest) returns (Capability);
     // Lookup returns the first matching capability.
     rpc Lookup(LookupRequest) returns (Capability);
     // LookupAll streams all currently matching capabilities.
@@ -22,6 +26,21 @@ message RegisterRequest {
     map<string, string> attrs = 2;
     uint64 ttl_seconds = 3;
     TransportDescriptor transport = 4;
+    // Set to update an existing entry (re-registration). Leave empty for new.
+    string capability_id = 5;
+}
+
+message RegisterResponse {
+    string capability_id = 1;
+    Lease lease = 2;
+}
+
+message ModifyAttrsRequest {
+    string capability_id = 1;
+    // Attributes to add or update (merged with existing).
+    map<string, string> add_attrs = 2;
+    // Attribute keys to remove.
+    repeated string remove_attrs = 3;
 }
 
 message LookupRequest {
@@ -52,7 +71,7 @@ message RegistryEvent {
     enum EventType {
         REGISTERED = 0;
         EXPIRED = 1;
-        RENEWED = 2;
+        MODIFIED = 2;
     }
     EventType type = 1;
     Capability capability = 2;
