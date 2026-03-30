@@ -156,11 +156,19 @@ serde_json        = { workspace = true }
 
 ## Session Plan
 
-1. Activate LocalStack in docker-compose, verify it starts
-2. Create the `providers/dynamo/` crate skeleton
-3. Implement `DynamoLeaseStore` with table creation
-4. Test against LocalStack
-5. Checkpoint — decide whether to continue to RegistryStore or stop
+Token-conscious — checkpoint after each milestone, ask to continue.
+
+1. Activate LocalStack in docker-compose, verify it starts → **checkpoint**
+2. Create the `providers/dynamo/` crate skeleton, shared client + table helpers → **checkpoint**
+3. Implement `DynamoLeaseStore` + test against LocalStack → **checkpoint**
+4. Implement `DynamoRegistryStore` + test → **checkpoint**
+5. Implement `DynamoTxnStore` + test → **checkpoint**
+6. Implement `DynamoEventStore` + test → **checkpoint**
+7. Implement `DynamoSpaceStore` + test → **checkpoint**
+8. Wire provider selection in main.rs → **checkpoint**
+9. Full stack test with `COORDIN8_PROVIDER=dynamo` in Docker → **checkpoint**
+
+Each step: implement, test, commit, ask to continue. No hog wild.
 
 ## Risks
 
