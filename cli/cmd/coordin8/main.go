@@ -230,12 +230,12 @@ var registryRegisterCmd = &cobra.Command{
 			}
 		}
 
-		leaseID, err := c.Registry().Register(context.Background(), reg)
+		result, err := c.Registry().Register(context.Background(), reg)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("registered  interface=%-20s  lease_id=%s\n", registryInterface, leaseID)
-		fmt.Printf("lease_id:   %s\n", leaseID)
+		fmt.Printf("registered  interface=%-20s  capability_id=%s\n", registryInterface, result.CapabilityID)
+		fmt.Printf("lease_id:   %s\n", result.LeaseID)
 		fmt.Println("(renew this lease to stay registered; let it expire to disappear)")
 		return nil
 	},

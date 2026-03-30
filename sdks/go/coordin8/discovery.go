@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -95,10 +96,28 @@ func (sd *ServiceDiscovery) refresh(ctx context.Context, key string, tmpl Templa
 }
 
 func (sd *ServiceDiscovery) watch(ctx context.Context, key string, tmpl Template) {
-	ch, err := sd.client.Registry().Watch(ctx, tmpl)
-	if err != nil {
-		return
+	for {
+		ch, err := sd.client.Registry().Watch(ctx, tmpl)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+				continue // reconnect
+			}
+		}
+		sd.consumeWatch(ctx, ch, key, tmpl)
+		// Stream ended — reconnect unless cancelled.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+			continue
+		}
 	}
+}
+
+func (sd *ServiceDiscovery) consumeWatch(ctx context.Context, ch <-chan RegistryEvent, key string, tmpl Template) {
 	for {
 		select {
 		case evt, ok := <-ch:
@@ -122,6 +141,16 @@ func (sd *ServiceDiscovery) watch(ctx context.Context, key string, tmpl Template
 				if stale {
 					_, _ = sd.refresh(ctx, key, tmpl)
 				}
+			case "modified":
+				// Service changed (attrs, transport, re-registration).
+				// Mark stale so the next Get() or a follow-up registered
+				// event triggers a refresh through a fresh proxy.
+				sd.mu.Lock()
+				if entry, exists := sd.cache[key]; exists {
+					entry.stale = true
+				}
+				sd.mu.Unlock()
+				_, _ = sd.refresh(ctx, key, tmpl)
 			}
 		case <-ctx.Done():
 			return

@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RegistryService_Register_FullMethodName  = "/coordin8.RegistryService/Register"
-	RegistryService_Lookup_FullMethodName    = "/coordin8.RegistryService/Lookup"
-	RegistryService_LookupAll_FullMethodName = "/coordin8.RegistryService/LookupAll"
-	RegistryService_Watch_FullMethodName     = "/coordin8.RegistryService/Watch"
+	RegistryService_Register_FullMethodName    = "/coordin8.RegistryService/Register"
+	RegistryService_ModifyAttrs_FullMethodName = "/coordin8.RegistryService/ModifyAttrs"
+	RegistryService_Lookup_FullMethodName      = "/coordin8.RegistryService/Lookup"
+	RegistryService_LookupAll_FullMethodName   = "/coordin8.RegistryService/LookupAll"
+	RegistryService_Watch_FullMethodName       = "/coordin8.RegistryService/Watch"
 )
 
 // RegistryServiceClient is the client API for RegistryService service.
@@ -30,7 +31,11 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type RegistryServiceClient interface {
 	// Register a service. Returns a lease — stop renewing to disappear.
-	Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*Lease, error)
+	// If capability_id is set, updates the existing entry in-place (re-registration).
+	// If empty, creates a new entry with a server-assigned capability_id.
+	Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*RegisterResponse, error)
+	// Modify attributes on an existing registration without re-registering.
+	ModifyAttrs(ctx context.Context, in *ModifyAttrsRequest, opts ...grpc.CallOption) (*Capability, error)
 	// Lookup returns the first matching capability.
 	Lookup(ctx context.Context, in *LookupRequest, opts ...grpc.CallOption) (*Capability, error)
 	// LookupAll streams all currently matching capabilities.
@@ -47,10 +52,20 @@ func NewRegistryServiceClient(cc grpc.ClientConnInterface) RegistryServiceClient
 	return &registryServiceClient{cc}
 }
 
-func (c *registryServiceClient) Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*Lease, error) {
+func (c *registryServiceClient) Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*RegisterResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Lease)
+	out := new(RegisterResponse)
 	err := c.cc.Invoke(ctx, RegistryService_Register_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *registryServiceClient) ModifyAttrs(ctx context.Context, in *ModifyAttrsRequest, opts ...grpc.CallOption) (*Capability, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Capability)
+	err := c.cc.Invoke(ctx, RegistryService_ModifyAttrs_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +125,11 @@ type RegistryService_WatchClient = grpc.ServerStreamingClient[RegistryEvent]
 // for forward compatibility.
 type RegistryServiceServer interface {
 	// Register a service. Returns a lease — stop renewing to disappear.
-	Register(context.Context, *RegisterRequest) (*Lease, error)
+	// If capability_id is set, updates the existing entry in-place (re-registration).
+	// If empty, creates a new entry with a server-assigned capability_id.
+	Register(context.Context, *RegisterRequest) (*RegisterResponse, error)
+	// Modify attributes on an existing registration without re-registering.
+	ModifyAttrs(context.Context, *ModifyAttrsRequest) (*Capability, error)
 	// Lookup returns the first matching capability.
 	Lookup(context.Context, *LookupRequest) (*Capability, error)
 	// LookupAll streams all currently matching capabilities.
@@ -127,8 +146,11 @@ type RegistryServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedRegistryServiceServer struct{}
 
-func (UnimplementedRegistryServiceServer) Register(context.Context, *RegisterRequest) (*Lease, error) {
+func (UnimplementedRegistryServiceServer) Register(context.Context, *RegisterRequest) (*RegisterResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Register not implemented")
+}
+func (UnimplementedRegistryServiceServer) ModifyAttrs(context.Context, *ModifyAttrsRequest) (*Capability, error) {
+	return nil, status.Error(codes.Unimplemented, "method ModifyAttrs not implemented")
 }
 func (UnimplementedRegistryServiceServer) Lookup(context.Context, *LookupRequest) (*Capability, error) {
 	return nil, status.Error(codes.Unimplemented, "method Lookup not implemented")
@@ -174,6 +196,24 @@ func _RegistryService_Register_Handler(srv interface{}, ctx context.Context, dec
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RegistryServiceServer).Register(ctx, req.(*RegisterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RegistryService_ModifyAttrs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ModifyAttrsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RegistryServiceServer).ModifyAttrs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RegistryService_ModifyAttrs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RegistryServiceServer).ModifyAttrs(ctx, req.(*ModifyAttrsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -228,6 +268,10 @@ var RegistryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Register",
 			Handler:    _RegistryService_Register_Handler,
+		},
+		{
+			MethodName: "ModifyAttrs",
+			Handler:    _RegistryService_ModifyAttrs_Handler,
 		},
 		{
 			MethodName: "Lookup",

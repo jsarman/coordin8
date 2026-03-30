@@ -73,7 +73,7 @@ func main() {
 	// ── 3. Register with the Registry ─────────────────────────────────────────
 	// Transport descriptor tells the client how to reach us.
 	// The client never hardcodes this — it comes from the Registry.
-	leaseID, err := djinn.Registry().Register(ctx, coordin8.Registration{
+	reg, err := djinn.Registry().Register(ctx, coordin8.Registration{
 		Interface: "Greeter",
 		Attrs:     map[string]string{"language": "english"},
 		TTL:       leaseTTL,
@@ -89,11 +89,11 @@ func main() {
 	fmt.Printf("  interface:  Greeter\n")
 	fmt.Printf("  language:   english\n")
 	fmt.Printf("  transport:  grpc @ %s:%s\n", advertiseHost, grpcPort)
-	fmt.Printf("  lease:      %s (TTL=%s, auto-renewing)\n", leaseID, leaseTTL)
+	fmt.Printf("  lease:      %s (TTL=%s, auto-renewing)\n", reg.LeaseID, leaseTTL)
 	fmt.Println("Serving... (Ctrl+C to stop)")
 
 	// ── 4. Keep lease alive in background ─────────────────────────────────────
-	go djinn.Leases().KeepAlive(ctx, leaseID, leaseTTL)
+	go djinn.Leases().KeepAlive(ctx, reg.LeaseID, leaseTTL)
 
 	// ── 5. Wait for shutdown signal ───────────────────────────────────────────
 	sigCh := make(chan os.Signal, 1)
@@ -102,7 +102,7 @@ func main() {
 
 	fmt.Println("\nShutting down — cancelling registration lease...")
 	// Cancel explicitly so the Registry clears immediately (no waiting for TTL)
-	_ = djinn.Leases().Cancel(context.Background(), leaseID)
+	_ = djinn.Leases().Cancel(context.Background(), reg.LeaseID)
 	grpcServer.GracefulStop()
 	fmt.Println("Gone.")
 }

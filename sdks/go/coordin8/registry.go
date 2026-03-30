@@ -24,6 +24,9 @@ type Registration struct {
 	Attrs     map[string]string
 	TTL       time.Duration
 	Transport *TransportDescriptor
+	// Set to update an existing registration in-place (re-registration).
+	// Leave empty for a new registration.
+	CapabilityID string
 }
 
 // TransportDescriptor describes how to reach a service.
@@ -60,13 +63,21 @@ func pbToCapability(c *pb.Capability) Capability {
 	return cap
 }
 
-// Register registers a service with the Djinn. Returns the lease ID —
-// renew it to stay registered, let it expire to disappear.
-func (c *RegistryClient) Register(ctx context.Context, reg Registration) (string, error) {
+// RegisterResult holds the server-assigned capability ID and lease ID.
+type RegisterResult struct {
+	CapabilityID string
+	LeaseID      string
+}
+
+// Register registers a service with the Djinn. Returns the server-assigned
+// capability ID and lease ID. Pass the capability ID back on subsequent
+// Register calls to update an existing registration in-place.
+func (c *RegistryClient) Register(ctx context.Context, reg Registration) (RegisterResult, error) {
 	req := &pb.RegisterRequest{
-		Interface:  reg.Interface,
-		Attrs:      reg.Attrs,
-		TtlSeconds: uint64(reg.TTL.Seconds()),
+		Interface:    reg.Interface,
+		Attrs:        reg.Attrs,
+		TtlSeconds:   uint64(reg.TTL.Seconds()),
+		CapabilityId: reg.CapabilityID,
 	}
 	if reg.Transport != nil {
 		req.Transport = &pb.TransportDescriptor{
@@ -76,9 +87,16 @@ func (c *RegistryClient) Register(ctx context.Context, reg Registration) (string
 	}
 	resp, err := c.client.Register(ctx, req)
 	if err != nil {
-		return "", err
+		return RegisterResult{}, err
 	}
-	return resp.LeaseId, nil
+	leaseID := ""
+	if resp.Lease != nil {
+		leaseID = resp.Lease.LeaseId
+	}
+	return RegisterResult{
+		CapabilityID: resp.CapabilityId,
+		LeaseID:      leaseID,
+	}, nil
 }
 
 // Lookup returns the first capability matching template.
@@ -110,9 +128,9 @@ func (c *RegistryClient) LookupAll(ctx context.Context, tmpl Template) ([]Capabi
 	return caps, nil
 }
 
-// RegistryEvent is delivered when a matching service registers or expires.
+// RegistryEvent is delivered when a matching service registers, expires, or is modified.
 type RegistryEvent struct {
-	Type       string // "registered", "expired", "renewed"
+	Type       string // "registered", "expired", "modified"
 	Capability Capability
 }
 
@@ -135,8 +153,8 @@ func (c *RegistryClient) Watch(ctx context.Context, tmpl Template) (<-chan Regis
 			switch evt.Type {
 			case pb.RegistryEvent_EXPIRED:
 				typeStr = "expired"
-			case pb.RegistryEvent_RENEWED:
-				typeStr = "renewed"
+			case pb.RegistryEvent_MODIFIED:
+				typeStr = "modified"
 			}
 			e := RegistryEvent{Type: typeStr}
 			if evt.Capability != nil {

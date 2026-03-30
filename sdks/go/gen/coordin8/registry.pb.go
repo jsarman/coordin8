@@ -26,7 +26,7 @@ type RegistryEvent_EventType int32
 const (
 	RegistryEvent_REGISTERED RegistryEvent_EventType = 0
 	RegistryEvent_EXPIRED    RegistryEvent_EventType = 1
-	RegistryEvent_RENEWED    RegistryEvent_EventType = 2
+	RegistryEvent_MODIFIED   RegistryEvent_EventType = 2
 )
 
 // Enum value maps for RegistryEvent_EventType.
@@ -34,12 +34,12 @@ var (
 	RegistryEvent_EventType_name = map[int32]string{
 		0: "REGISTERED",
 		1: "EXPIRED",
-		2: "RENEWED",
+		2: "MODIFIED",
 	}
 	RegistryEvent_EventType_value = map[string]int32{
 		"REGISTERED": 0,
 		"EXPIRED":    1,
-		"RENEWED":    2,
+		"MODIFIED":   2,
 	}
 )
 
@@ -67,15 +67,17 @@ func (x RegistryEvent_EventType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RegistryEvent_EventType.Descriptor instead.
 func (RegistryEvent_EventType) EnumDescriptor() ([]byte, []int) {
-	return file_coordin8_registry_proto_rawDescGZIP(), []int{5, 0}
+	return file_coordin8_registry_proto_rawDescGZIP(), []int{7, 0}
 }
 
 type RegisterRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Interface     string                 `protobuf:"bytes,1,opt,name=interface,proto3" json:"interface,omitempty"`
-	Attrs         map[string]string      `protobuf:"bytes,2,rep,name=attrs,proto3" json:"attrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	TtlSeconds    uint64                 `protobuf:"varint,3,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
-	Transport     *TransportDescriptor   `protobuf:"bytes,4,opt,name=transport,proto3" json:"transport,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Interface  string                 `protobuf:"bytes,1,opt,name=interface,proto3" json:"interface,omitempty"`
+	Attrs      map[string]string      `protobuf:"bytes,2,rep,name=attrs,proto3" json:"attrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	TtlSeconds uint64                 `protobuf:"varint,3,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
+	Transport  *TransportDescriptor   `protobuf:"bytes,4,opt,name=transport,proto3" json:"transport,omitempty"`
+	// Set to update an existing entry (re-registration). Leave empty for new.
+	CapabilityId  string `protobuf:"bytes,5,opt,name=capability_id,json=capabilityId,proto3" json:"capability_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -138,6 +140,127 @@ func (x *RegisterRequest) GetTransport() *TransportDescriptor {
 	return nil
 }
 
+func (x *RegisterRequest) GetCapabilityId() string {
+	if x != nil {
+		return x.CapabilityId
+	}
+	return ""
+}
+
+type RegisterResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CapabilityId  string                 `protobuf:"bytes,1,opt,name=capability_id,json=capabilityId,proto3" json:"capability_id,omitempty"`
+	Lease         *Lease                 `protobuf:"bytes,2,opt,name=lease,proto3" json:"lease,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterResponse) Reset() {
+	*x = RegisterResponse{}
+	mi := &file_coordin8_registry_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterResponse) ProtoMessage() {}
+
+func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_coordin8_registry_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterResponse.ProtoReflect.Descriptor instead.
+func (*RegisterResponse) Descriptor() ([]byte, []int) {
+	return file_coordin8_registry_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *RegisterResponse) GetCapabilityId() string {
+	if x != nil {
+		return x.CapabilityId
+	}
+	return ""
+}
+
+func (x *RegisterResponse) GetLease() *Lease {
+	if x != nil {
+		return x.Lease
+	}
+	return nil
+}
+
+type ModifyAttrsRequest struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	CapabilityId string                 `protobuf:"bytes,1,opt,name=capability_id,json=capabilityId,proto3" json:"capability_id,omitempty"`
+	// Attributes to add or update (merged with existing).
+	AddAttrs map[string]string `protobuf:"bytes,2,rep,name=add_attrs,json=addAttrs,proto3" json:"add_attrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Attribute keys to remove.
+	RemoveAttrs   []string `protobuf:"bytes,3,rep,name=remove_attrs,json=removeAttrs,proto3" json:"remove_attrs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ModifyAttrsRequest) Reset() {
+	*x = ModifyAttrsRequest{}
+	mi := &file_coordin8_registry_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModifyAttrsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModifyAttrsRequest) ProtoMessage() {}
+
+func (x *ModifyAttrsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_coordin8_registry_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModifyAttrsRequest.ProtoReflect.Descriptor instead.
+func (*ModifyAttrsRequest) Descriptor() ([]byte, []int) {
+	return file_coordin8_registry_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ModifyAttrsRequest) GetCapabilityId() string {
+	if x != nil {
+		return x.CapabilityId
+	}
+	return ""
+}
+
+func (x *ModifyAttrsRequest) GetAddAttrs() map[string]string {
+	if x != nil {
+		return x.AddAttrs
+	}
+	return nil
+}
+
+func (x *ModifyAttrsRequest) GetRemoveAttrs() []string {
+	if x != nil {
+		return x.RemoveAttrs
+	}
+	return nil
+}
+
 type LookupRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Template: missing fields match anything, present fields must match.
@@ -149,7 +272,7 @@ type LookupRequest struct {
 
 func (x *LookupRequest) Reset() {
 	*x = LookupRequest{}
-	mi := &file_coordin8_registry_proto_msgTypes[1]
+	mi := &file_coordin8_registry_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -161,7 +284,7 @@ func (x *LookupRequest) String() string {
 func (*LookupRequest) ProtoMessage() {}
 
 func (x *LookupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_coordin8_registry_proto_msgTypes[1]
+	mi := &file_coordin8_registry_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -174,7 +297,7 @@ func (x *LookupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LookupRequest.ProtoReflect.Descriptor instead.
 func (*LookupRequest) Descriptor() ([]byte, []int) {
-	return file_coordin8_registry_proto_rawDescGZIP(), []int{1}
+	return file_coordin8_registry_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *LookupRequest) GetTemplate() map[string]string {
@@ -193,7 +316,7 @@ type RegistryWatchRequest struct {
 
 func (x *RegistryWatchRequest) Reset() {
 	*x = RegistryWatchRequest{}
-	mi := &file_coordin8_registry_proto_msgTypes[2]
+	mi := &file_coordin8_registry_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -205,7 +328,7 @@ func (x *RegistryWatchRequest) String() string {
 func (*RegistryWatchRequest) ProtoMessage() {}
 
 func (x *RegistryWatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_coordin8_registry_proto_msgTypes[2]
+	mi := &file_coordin8_registry_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -218,7 +341,7 @@ func (x *RegistryWatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegistryWatchRequest.ProtoReflect.Descriptor instead.
 func (*RegistryWatchRequest) Descriptor() ([]byte, []int) {
-	return file_coordin8_registry_proto_rawDescGZIP(), []int{2}
+	return file_coordin8_registry_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *RegistryWatchRequest) GetTemplate() map[string]string {
@@ -240,7 +363,7 @@ type Capability struct {
 
 func (x *Capability) Reset() {
 	*x = Capability{}
-	mi := &file_coordin8_registry_proto_msgTypes[3]
+	mi := &file_coordin8_registry_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -252,7 +375,7 @@ func (x *Capability) String() string {
 func (*Capability) ProtoMessage() {}
 
 func (x *Capability) ProtoReflect() protoreflect.Message {
-	mi := &file_coordin8_registry_proto_msgTypes[3]
+	mi := &file_coordin8_registry_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -265,7 +388,7 @@ func (x *Capability) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Capability.ProtoReflect.Descriptor instead.
 func (*Capability) Descriptor() ([]byte, []int) {
-	return file_coordin8_registry_proto_rawDescGZIP(), []int{3}
+	return file_coordin8_registry_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Capability) GetCapabilityId() string {
@@ -308,7 +431,7 @@ type TransportDescriptor struct {
 
 func (x *TransportDescriptor) Reset() {
 	*x = TransportDescriptor{}
-	mi := &file_coordin8_registry_proto_msgTypes[4]
+	mi := &file_coordin8_registry_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -320,7 +443,7 @@ func (x *TransportDescriptor) String() string {
 func (*TransportDescriptor) ProtoMessage() {}
 
 func (x *TransportDescriptor) ProtoReflect() protoreflect.Message {
-	mi := &file_coordin8_registry_proto_msgTypes[4]
+	mi := &file_coordin8_registry_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -333,7 +456,7 @@ func (x *TransportDescriptor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransportDescriptor.ProtoReflect.Descriptor instead.
 func (*TransportDescriptor) Descriptor() ([]byte, []int) {
-	return file_coordin8_registry_proto_rawDescGZIP(), []int{4}
+	return file_coordin8_registry_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *TransportDescriptor) GetType() string {
@@ -360,7 +483,7 @@ type RegistryEvent struct {
 
 func (x *RegistryEvent) Reset() {
 	*x = RegistryEvent{}
-	mi := &file_coordin8_registry_proto_msgTypes[5]
+	mi := &file_coordin8_registry_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -372,7 +495,7 @@ func (x *RegistryEvent) String() string {
 func (*RegistryEvent) ProtoMessage() {}
 
 func (x *RegistryEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_coordin8_registry_proto_msgTypes[5]
+	mi := &file_coordin8_registry_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -385,7 +508,7 @@ func (x *RegistryEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegistryEvent.ProtoReflect.Descriptor instead.
 func (*RegistryEvent) Descriptor() ([]byte, []int) {
-	return file_coordin8_registry_proto_rawDescGZIP(), []int{5}
+	return file_coordin8_registry_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RegistryEvent) GetType() RegistryEvent_EventType {
@@ -406,15 +529,26 @@ var File_coordin8_registry_proto protoreflect.FileDescriptor
 
 const file_coordin8_registry_proto_rawDesc = "" +
 	"\n" +
-	"\x17coordin8/registry.proto\x12\bcoordin8\x1a\x14coordin8/lease.proto\"\x83\x02\n" +
+	"\x17coordin8/registry.proto\x12\bcoordin8\x1a\x14coordin8/lease.proto\"\xa8\x02\n" +
 	"\x0fRegisterRequest\x12\x1c\n" +
 	"\tinterface\x18\x01 \x01(\tR\tinterface\x12:\n" +
 	"\x05attrs\x18\x02 \x03(\v2$.coordin8.RegisterRequest.AttrsEntryR\x05attrs\x12\x1f\n" +
 	"\vttl_seconds\x18\x03 \x01(\x04R\n" +
 	"ttlSeconds\x12;\n" +
-	"\ttransport\x18\x04 \x01(\v2\x1d.coordin8.TransportDescriptorR\ttransport\x1a8\n" +
+	"\ttransport\x18\x04 \x01(\v2\x1d.coordin8.TransportDescriptorR\ttransport\x12#\n" +
+	"\rcapability_id\x18\x05 \x01(\tR\fcapabilityId\x1a8\n" +
 	"\n" +
 	"AttrsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"^\n" +
+	"\x10RegisterResponse\x12#\n" +
+	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12%\n" +
+	"\x05lease\x18\x02 \x01(\v2\x0f.coordin8.LeaseR\x05lease\"\xe2\x01\n" +
+	"\x12ModifyAttrsRequest\x12#\n" +
+	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12G\n" +
+	"\tadd_attrs\x18\x02 \x03(\v2*.coordin8.ModifyAttrsRequest.AddAttrsEntryR\baddAttrs\x12!\n" +
+	"\fremove_attrs\x18\x03 \x03(\tR\vremoveAttrs\x1a;\n" +
+	"\rAddAttrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8f\x01\n" +
 	"\rLookupRequest\x12A\n" +
@@ -442,19 +576,20 @@ const file_coordin8_registry_proto_rawDesc = "" +
 	"\x06config\x18\x02 \x03(\v2).coordin8.TransportDescriptor.ConfigEntryR\x06config\x1a9\n" +
 	"\vConfigEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb3\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb4\x01\n" +
 	"\rRegistryEvent\x125\n" +
 	"\x04type\x18\x01 \x01(\x0e2!.coordin8.RegistryEvent.EventTypeR\x04type\x124\n" +
 	"\n" +
 	"capability\x18\x02 \x01(\v2\x14.coordin8.CapabilityR\n" +
-	"capability\"5\n" +
+	"capability\"6\n" +
 	"\tEventType\x12\x0e\n" +
 	"\n" +
 	"REGISTERED\x10\x00\x12\v\n" +
-	"\aEXPIRED\x10\x01\x12\v\n" +
-	"\aRENEWED\x10\x022\x84\x02\n" +
-	"\x0fRegistryService\x126\n" +
-	"\bRegister\x12\x19.coordin8.RegisterRequest\x1a\x0f.coordin8.Lease\x127\n" +
+	"\aEXPIRED\x10\x01\x12\f\n" +
+	"\bMODIFIED\x10\x022\xd2\x02\n" +
+	"\x0fRegistryService\x12A\n" +
+	"\bRegister\x12\x19.coordin8.RegisterRequest\x1a\x1a.coordin8.RegisterResponse\x12A\n" +
+	"\vModifyAttrs\x12\x1c.coordin8.ModifyAttrsRequest\x1a\x14.coordin8.Capability\x127\n" +
 	"\x06Lookup\x12\x17.coordin8.LookupRequest\x1a\x14.coordin8.Capability\x12<\n" +
 	"\tLookupAll\x12\x17.coordin8.LookupRequest\x1a\x14.coordin8.Capability0\x01\x12B\n" +
 	"\x05Watch\x12\x1e.coordin8.RegistryWatchRequest\x1a\x17.coordin8.RegistryEvent0\x01B$Z\"github.com/coordin8/proto/coordin8b\x06proto3"
@@ -472,45 +607,52 @@ func file_coordin8_registry_proto_rawDescGZIP() []byte {
 }
 
 var file_coordin8_registry_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_coordin8_registry_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_coordin8_registry_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_coordin8_registry_proto_goTypes = []any{
 	(RegistryEvent_EventType)(0), // 0: coordin8.RegistryEvent.EventType
 	(*RegisterRequest)(nil),      // 1: coordin8.RegisterRequest
-	(*LookupRequest)(nil),        // 2: coordin8.LookupRequest
-	(*RegistryWatchRequest)(nil), // 3: coordin8.RegistryWatchRequest
-	(*Capability)(nil),           // 4: coordin8.Capability
-	(*TransportDescriptor)(nil),  // 5: coordin8.TransportDescriptor
-	(*RegistryEvent)(nil),        // 6: coordin8.RegistryEvent
-	nil,                          // 7: coordin8.RegisterRequest.AttrsEntry
-	nil,                          // 8: coordin8.LookupRequest.TemplateEntry
-	nil,                          // 9: coordin8.RegistryWatchRequest.TemplateEntry
-	nil,                          // 10: coordin8.Capability.AttrsEntry
-	nil,                          // 11: coordin8.TransportDescriptor.ConfigEntry
-	(*Lease)(nil),                // 12: coordin8.Lease
+	(*RegisterResponse)(nil),     // 2: coordin8.RegisterResponse
+	(*ModifyAttrsRequest)(nil),   // 3: coordin8.ModifyAttrsRequest
+	(*LookupRequest)(nil),        // 4: coordin8.LookupRequest
+	(*RegistryWatchRequest)(nil), // 5: coordin8.RegistryWatchRequest
+	(*Capability)(nil),           // 6: coordin8.Capability
+	(*TransportDescriptor)(nil),  // 7: coordin8.TransportDescriptor
+	(*RegistryEvent)(nil),        // 8: coordin8.RegistryEvent
+	nil,                          // 9: coordin8.RegisterRequest.AttrsEntry
+	nil,                          // 10: coordin8.ModifyAttrsRequest.AddAttrsEntry
+	nil,                          // 11: coordin8.LookupRequest.TemplateEntry
+	nil,                          // 12: coordin8.RegistryWatchRequest.TemplateEntry
+	nil,                          // 13: coordin8.Capability.AttrsEntry
+	nil,                          // 14: coordin8.TransportDescriptor.ConfigEntry
+	(*Lease)(nil),                // 15: coordin8.Lease
 }
 var file_coordin8_registry_proto_depIdxs = []int32{
-	7,  // 0: coordin8.RegisterRequest.attrs:type_name -> coordin8.RegisterRequest.AttrsEntry
-	5,  // 1: coordin8.RegisterRequest.transport:type_name -> coordin8.TransportDescriptor
-	8,  // 2: coordin8.LookupRequest.template:type_name -> coordin8.LookupRequest.TemplateEntry
-	9,  // 3: coordin8.RegistryWatchRequest.template:type_name -> coordin8.RegistryWatchRequest.TemplateEntry
-	10, // 4: coordin8.Capability.attrs:type_name -> coordin8.Capability.AttrsEntry
-	5,  // 5: coordin8.Capability.transport:type_name -> coordin8.TransportDescriptor
-	11, // 6: coordin8.TransportDescriptor.config:type_name -> coordin8.TransportDescriptor.ConfigEntry
-	0,  // 7: coordin8.RegistryEvent.type:type_name -> coordin8.RegistryEvent.EventType
-	4,  // 8: coordin8.RegistryEvent.capability:type_name -> coordin8.Capability
-	1,  // 9: coordin8.RegistryService.Register:input_type -> coordin8.RegisterRequest
-	2,  // 10: coordin8.RegistryService.Lookup:input_type -> coordin8.LookupRequest
-	2,  // 11: coordin8.RegistryService.LookupAll:input_type -> coordin8.LookupRequest
-	3,  // 12: coordin8.RegistryService.Watch:input_type -> coordin8.RegistryWatchRequest
-	12, // 13: coordin8.RegistryService.Register:output_type -> coordin8.Lease
-	4,  // 14: coordin8.RegistryService.Lookup:output_type -> coordin8.Capability
-	4,  // 15: coordin8.RegistryService.LookupAll:output_type -> coordin8.Capability
-	6,  // 16: coordin8.RegistryService.Watch:output_type -> coordin8.RegistryEvent
-	13, // [13:17] is the sub-list for method output_type
-	9,  // [9:13] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	9,  // 0: coordin8.RegisterRequest.attrs:type_name -> coordin8.RegisterRequest.AttrsEntry
+	7,  // 1: coordin8.RegisterRequest.transport:type_name -> coordin8.TransportDescriptor
+	15, // 2: coordin8.RegisterResponse.lease:type_name -> coordin8.Lease
+	10, // 3: coordin8.ModifyAttrsRequest.add_attrs:type_name -> coordin8.ModifyAttrsRequest.AddAttrsEntry
+	11, // 4: coordin8.LookupRequest.template:type_name -> coordin8.LookupRequest.TemplateEntry
+	12, // 5: coordin8.RegistryWatchRequest.template:type_name -> coordin8.RegistryWatchRequest.TemplateEntry
+	13, // 6: coordin8.Capability.attrs:type_name -> coordin8.Capability.AttrsEntry
+	7,  // 7: coordin8.Capability.transport:type_name -> coordin8.TransportDescriptor
+	14, // 8: coordin8.TransportDescriptor.config:type_name -> coordin8.TransportDescriptor.ConfigEntry
+	0,  // 9: coordin8.RegistryEvent.type:type_name -> coordin8.RegistryEvent.EventType
+	6,  // 10: coordin8.RegistryEvent.capability:type_name -> coordin8.Capability
+	1,  // 11: coordin8.RegistryService.Register:input_type -> coordin8.RegisterRequest
+	3,  // 12: coordin8.RegistryService.ModifyAttrs:input_type -> coordin8.ModifyAttrsRequest
+	4,  // 13: coordin8.RegistryService.Lookup:input_type -> coordin8.LookupRequest
+	4,  // 14: coordin8.RegistryService.LookupAll:input_type -> coordin8.LookupRequest
+	5,  // 15: coordin8.RegistryService.Watch:input_type -> coordin8.RegistryWatchRequest
+	2,  // 16: coordin8.RegistryService.Register:output_type -> coordin8.RegisterResponse
+	6,  // 17: coordin8.RegistryService.ModifyAttrs:output_type -> coordin8.Capability
+	6,  // 18: coordin8.RegistryService.Lookup:output_type -> coordin8.Capability
+	6,  // 19: coordin8.RegistryService.LookupAll:output_type -> coordin8.Capability
+	8,  // 20: coordin8.RegistryService.Watch:output_type -> coordin8.RegistryEvent
+	16, // [16:21] is the sub-list for method output_type
+	11, // [11:16] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_coordin8_registry_proto_init() }
@@ -525,7 +667,7 @@ func file_coordin8_registry_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_coordin8_registry_proto_rawDesc), len(file_coordin8_registry_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   11,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
