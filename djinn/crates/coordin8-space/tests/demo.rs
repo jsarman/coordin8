@@ -939,17 +939,16 @@ async fn txn_full_isolation_scenario() {
     println!("[demo] Full txn isolation scenario passed ✓");
 }
 
-// ── Test 22: cross-process txn isolation ─────────────────────────────────────
-// Process A writes under txn-writer. Process B can't see it until A commits.
-// After A commits, Process B reads/takes under txn-taker. Both commit → gone.
+// ── Test 22: cross-process shared txn ────────────────────────────────────────
+// Process A and B share the same transaction. A writes, B reads/takes — both
+// under the same txn_id. Outsiders see nothing until commit.
 
 #[tokio::test]
-async fn txn_cross_process_isolation() {
+async fn txn_cross_process_shared_txn() {
     let (mgr, _) = make_manager();
-    let writer_txn = "txn-writer".to_string();
-    let taker_txn = "txn-taker".to_string();
+    let txn = "txn-shared".to_string();
 
-    // ── Process A: write under its own transaction ──────────────────────────
+    // ── Process A: write under the shared transaction ───────────────────────
     let (record, _) = mgr
         .write(
             [("kind".into(), "transfer".into()), ("amount".into(), "500".into())].into(),
@@ -957,80 +956,76 @@ async fn txn_cross_process_isolation() {
             60,
             "process-a".into(),
             None,
-            Some(writer_txn.clone()),
+            Some(txn.clone()),
         )
         .await
         .unwrap();
-    println!("\n[demo] Process A: wrote tuple {} under txn-writer", record.tuple_id);
+    println!("\n[demo] Process A: wrote tuple {} under shared txn", record.tuple_id);
 
-    // ── Process B: try to read with no transaction → nothing ────────────────
+    // ── Outsider: read with no transaction → nothing ────────────────────────
     let r = mgr
         .read([("kind".into(), "transfer".into())].into(), false, 0, None)
         .await
         .unwrap();
-    assert!(r.is_none(), "Process B: non-txn read should see nothing");
-    println!("[demo] Process B: read (no txn) → None ✓");
+    assert!(r.is_none(), "outsider read should see nothing");
+    println!("[demo] Outsider: read (no txn) → None ✓");
 
-    // ── Process B: try to take with no transaction → nothing ────────────────
+    // ── Outsider: take with no transaction → nothing ────────────────────────
     let r = mgr
         .take([("kind".into(), "transfer".into())].into(), false, 0, None)
         .await
         .unwrap();
-    assert!(r.is_none(), "Process B: non-txn take should see nothing");
-    println!("[demo] Process B: take (no txn) → None ✓");
+    assert!(r.is_none(), "outsider take should see nothing");
+    println!("[demo] Outsider: take (no txn) → None ✓");
 
-    // ── Process A: commit → tuple becomes visible ───────────────────────────
-    mgr.commit_space_txn(&writer_txn).await.unwrap();
-    println!("[demo] Process A: committed txn-writer ✓");
-
-    // ── Process B: read with its own transaction → found ────────────────────
+    // ── Process B: read with the SAME transaction → found ───────────────────
     let r = mgr
         .read(
             [("kind".into(), "transfer".into())].into(),
             false,
             0,
-            Some(taker_txn.clone()),
+            Some(txn.clone()),
         )
         .await
         .unwrap();
-    assert!(r.is_some(), "Process B: txn read should find it after writer commits");
+    assert!(r.is_some(), "Process B should see tuple under shared txn");
     assert_eq!(r.unwrap().attrs["amount"], "500");
-    println!("[demo] Process B: read (txn-taker) → found ✓");
+    println!("[demo] Process B: read (shared txn) → found ✓");
 
-    // ── Process B: take with its own transaction → claims it ────────────────
+    // ── Process B: take with the SAME transaction → claims it ───────────────
     let r = mgr
         .take(
             [("kind".into(), "transfer".into())].into(),
             false,
             0,
-            Some(taker_txn.clone()),
+            Some(txn.clone()),
         )
         .await
         .unwrap();
-    assert!(r.is_some(), "Process B: txn take should claim it");
-    println!("[demo] Process B: take (txn-taker) → got it ✓");
+    assert!(r.is_some(), "Process B should take tuple under shared txn");
+    println!("[demo] Process B: take (shared txn) → got it ✓");
 
-    // ── While taker hasn't committed, tuple is invisible to others ──────────
+    // ── Outsider still sees nothing ─────────────────────────────────────────
     let r = mgr
         .read([("kind".into(), "transfer".into())].into(), false, 0, None)
         .await
         .unwrap();
-    assert!(r.is_none(), "tuple should be invisible while taken under txn");
-    println!("[demo] Other: read (no txn) → None (taken, pending commit) ✓");
+    assert!(r.is_none(), "outsider still sees nothing before commit");
+    println!("[demo] Outsider: read (no txn) → None (still uncommitted) ✓");
 
-    // ── Process B: commit → take finalized ──────────────────────────────────
-    mgr.commit_space_txn(&taker_txn).await.unwrap();
-    println!("[demo] Process B: committed txn-taker ✓");
+    // ── Commit the shared transaction ───────────────────────────────────────
+    mgr.commit_space_txn(&txn).await.unwrap();
+    println!("[demo] Committed shared txn ✓");
 
-    // ── Final: tuple is gone ────────────────────────────────────────────────
+    // ── Final: tuple is gone (written + taken under same txn, committed) ────
     let r = mgr
         .read([("kind".into(), "transfer".into())].into(), false, 0, None)
         .await
         .unwrap();
-    assert!(r.is_none(), "tuple should be gone after both commits");
-    println!("[demo] Final: read → None (both committed, tuple consumed) ✓");
+    assert!(r.is_none(), "tuple consumed — written and taken in same txn");
+    println!("[demo] Final: read → None (tuple consumed) ✓");
 
-    println!("[demo] Cross-process txn isolation passed ✓");
+    println!("[demo] Cross-process shared txn passed ✓");
 }
 
 // ── Test 23: contents includes uncommitted under txn ────────────────────────
