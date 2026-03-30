@@ -20,12 +20,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SpaceService_Out_FullMethodName         = "/coordin8.SpaceService/Out"
-	SpaceService_Read_FullMethodName        = "/coordin8.SpaceService/Read"
-	SpaceService_Take_FullMethodName        = "/coordin8.SpaceService/Take"
-	SpaceService_Watch_FullMethodName       = "/coordin8.SpaceService/Watch"
-	SpaceService_RenewTuple_FullMethodName  = "/coordin8.SpaceService/RenewTuple"
-	SpaceService_CancelTuple_FullMethodName = "/coordin8.SpaceService/CancelTuple"
+	SpaceService_Write_FullMethodName    = "/coordin8.SpaceService/Write"
+	SpaceService_Read_FullMethodName     = "/coordin8.SpaceService/Read"
+	SpaceService_Take_FullMethodName     = "/coordin8.SpaceService/Take"
+	SpaceService_Notify_FullMethodName   = "/coordin8.SpaceService/Notify"
+	SpaceService_Contents_FullMethodName = "/coordin8.SpaceService/Contents"
+	SpaceService_Renew_FullMethodName    = "/coordin8.SpaceService/Renew"
+	SpaceService_Cancel_FullMethodName   = "/coordin8.SpaceService/Cancel"
 )
 
 // SpaceServiceClient is the client API for SpaceService service.
@@ -35,22 +36,29 @@ const (
 // SpaceService — distributed reactive tuple store.
 // Modeled after net.jini.space.JavaSpace (JavaSpaces Specification).
 //
-// Producers out() tuples; consumers take() or read() by template;
-// watchers get push streams on match. Every tuple is leased through LeaseMgr.
+// Producers write() tuples; consumers take() or read() by template;
+// watchers get push streams via notify(). Every tuple is leased through LeaseMgr.
 // "Describe what you need, not where it is."
 type SpaceServiceClient interface {
 	// Write a leased tuple into the Space.
-	Out(ctx context.Context, in *OutRequest, opts ...grpc.CallOption) (*OutResponse, error)
+	// Jini: JavaSpace.write(Entry, Transaction, long lease)
+	Write(ctx context.Context, in *WriteRequest, opts ...grpc.CallOption) (*WriteResponse, error)
 	// Non-destructive read by template. Blocking or non-blocking.
+	// Jini: JavaSpace.read() / readIfExists() (collapsed via wait flag)
 	Read(ctx context.Context, in *ReadRequest, opts ...grpc.CallOption) (*ReadResponse, error)
 	// Atomic claim+remove by template. Blocking or non-blocking.
+	// Jini: JavaSpace.take() / takeIfExists() (collapsed via wait flag)
 	Take(ctx context.Context, in *TakeRequest, opts ...grpc.CallOption) (*TakeResponse, error)
 	// Server-streaming push on template match (appearance / expiration events).
-	Watch(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SpaceEvent], error)
+	// Jini: JavaSpace.notify(Entry, Transaction, RemoteEventListener, long lease, MarshalledObject handback)
+	Notify(ctx context.Context, in *NotifyRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SpaceEvent], error)
+	// Bulk read — streams all tuples matching a template without removing them.
+	// Jini: JavaSpace05.contents(Collection, Transaction, long lease, long maxEntries)
+	Contents(ctx context.Context, in *ContentsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Tuple], error)
 	// Renew a tuple's lease.
-	RenewTuple(ctx context.Context, in *RenewTupleRequest, opts ...grpc.CallOption) (*Lease, error)
+	Renew(ctx context.Context, in *RenewTupleRequest, opts ...grpc.CallOption) (*Lease, error)
 	// Cancel a tuple (remove from Space and cancel its lease).
-	CancelTuple(ctx context.Context, in *CancelTupleRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	Cancel(ctx context.Context, in *CancelTupleRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type spaceServiceClient struct {
@@ -61,10 +69,10 @@ func NewSpaceServiceClient(cc grpc.ClientConnInterface) SpaceServiceClient {
 	return &spaceServiceClient{cc}
 }
 
-func (c *spaceServiceClient) Out(ctx context.Context, in *OutRequest, opts ...grpc.CallOption) (*OutResponse, error) {
+func (c *spaceServiceClient) Write(ctx context.Context, in *WriteRequest, opts ...grpc.CallOption) (*WriteResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(OutResponse)
-	err := c.cc.Invoke(ctx, SpaceService_Out_FullMethodName, in, out, cOpts...)
+	out := new(WriteResponse)
+	err := c.cc.Invoke(ctx, SpaceService_Write_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -91,13 +99,13 @@ func (c *spaceServiceClient) Take(ctx context.Context, in *TakeRequest, opts ...
 	return out, nil
 }
 
-func (c *spaceServiceClient) Watch(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SpaceEvent], error) {
+func (c *spaceServiceClient) Notify(ctx context.Context, in *NotifyRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SpaceEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SpaceService_ServiceDesc.Streams[0], SpaceService_Watch_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SpaceService_ServiceDesc.Streams[0], SpaceService_Notify_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[WatchRequest, SpaceEvent]{ClientStream: stream}
+	x := &grpc.GenericClientStream[NotifyRequest, SpaceEvent]{ClientStream: stream}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -108,22 +116,41 @@ func (c *spaceServiceClient) Watch(ctx context.Context, in *WatchRequest, opts .
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type SpaceService_WatchClient = grpc.ServerStreamingClient[SpaceEvent]
+type SpaceService_NotifyClient = grpc.ServerStreamingClient[SpaceEvent]
 
-func (c *spaceServiceClient) RenewTuple(ctx context.Context, in *RenewTupleRequest, opts ...grpc.CallOption) (*Lease, error) {
+func (c *spaceServiceClient) Contents(ctx context.Context, in *ContentsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Tuple], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SpaceService_ServiceDesc.Streams[1], SpaceService_Contents_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ContentsRequest, Tuple]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SpaceService_ContentsClient = grpc.ServerStreamingClient[Tuple]
+
+func (c *spaceServiceClient) Renew(ctx context.Context, in *RenewTupleRequest, opts ...grpc.CallOption) (*Lease, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Lease)
-	err := c.cc.Invoke(ctx, SpaceService_RenewTuple_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, SpaceService_Renew_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *spaceServiceClient) CancelTuple(ctx context.Context, in *CancelTupleRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *spaceServiceClient) Cancel(ctx context.Context, in *CancelTupleRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, SpaceService_CancelTuple_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, SpaceService_Cancel_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -137,22 +164,29 @@ func (c *spaceServiceClient) CancelTuple(ctx context.Context, in *CancelTupleReq
 // SpaceService — distributed reactive tuple store.
 // Modeled after net.jini.space.JavaSpace (JavaSpaces Specification).
 //
-// Producers out() tuples; consumers take() or read() by template;
-// watchers get push streams on match. Every tuple is leased through LeaseMgr.
+// Producers write() tuples; consumers take() or read() by template;
+// watchers get push streams via notify(). Every tuple is leased through LeaseMgr.
 // "Describe what you need, not where it is."
 type SpaceServiceServer interface {
 	// Write a leased tuple into the Space.
-	Out(context.Context, *OutRequest) (*OutResponse, error)
+	// Jini: JavaSpace.write(Entry, Transaction, long lease)
+	Write(context.Context, *WriteRequest) (*WriteResponse, error)
 	// Non-destructive read by template. Blocking or non-blocking.
+	// Jini: JavaSpace.read() / readIfExists() (collapsed via wait flag)
 	Read(context.Context, *ReadRequest) (*ReadResponse, error)
 	// Atomic claim+remove by template. Blocking or non-blocking.
+	// Jini: JavaSpace.take() / takeIfExists() (collapsed via wait flag)
 	Take(context.Context, *TakeRequest) (*TakeResponse, error)
 	// Server-streaming push on template match (appearance / expiration events).
-	Watch(*WatchRequest, grpc.ServerStreamingServer[SpaceEvent]) error
+	// Jini: JavaSpace.notify(Entry, Transaction, RemoteEventListener, long lease, MarshalledObject handback)
+	Notify(*NotifyRequest, grpc.ServerStreamingServer[SpaceEvent]) error
+	// Bulk read — streams all tuples matching a template without removing them.
+	// Jini: JavaSpace05.contents(Collection, Transaction, long lease, long maxEntries)
+	Contents(*ContentsRequest, grpc.ServerStreamingServer[Tuple]) error
 	// Renew a tuple's lease.
-	RenewTuple(context.Context, *RenewTupleRequest) (*Lease, error)
+	Renew(context.Context, *RenewTupleRequest) (*Lease, error)
 	// Cancel a tuple (remove from Space and cancel its lease).
-	CancelTuple(context.Context, *CancelTupleRequest) (*emptypb.Empty, error)
+	Cancel(context.Context, *CancelTupleRequest) (*emptypb.Empty, error)
 	mustEmbedUnimplementedSpaceServiceServer()
 }
 
@@ -163,8 +197,8 @@ type SpaceServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedSpaceServiceServer struct{}
 
-func (UnimplementedSpaceServiceServer) Out(context.Context, *OutRequest) (*OutResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method Out not implemented")
+func (UnimplementedSpaceServiceServer) Write(context.Context, *WriteRequest) (*WriteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Write not implemented")
 }
 func (UnimplementedSpaceServiceServer) Read(context.Context, *ReadRequest) (*ReadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Read not implemented")
@@ -172,14 +206,17 @@ func (UnimplementedSpaceServiceServer) Read(context.Context, *ReadRequest) (*Rea
 func (UnimplementedSpaceServiceServer) Take(context.Context, *TakeRequest) (*TakeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Take not implemented")
 }
-func (UnimplementedSpaceServiceServer) Watch(*WatchRequest, grpc.ServerStreamingServer[SpaceEvent]) error {
-	return status.Error(codes.Unimplemented, "method Watch not implemented")
+func (UnimplementedSpaceServiceServer) Notify(*NotifyRequest, grpc.ServerStreamingServer[SpaceEvent]) error {
+	return status.Error(codes.Unimplemented, "method Notify not implemented")
 }
-func (UnimplementedSpaceServiceServer) RenewTuple(context.Context, *RenewTupleRequest) (*Lease, error) {
-	return nil, status.Error(codes.Unimplemented, "method RenewTuple not implemented")
+func (UnimplementedSpaceServiceServer) Contents(*ContentsRequest, grpc.ServerStreamingServer[Tuple]) error {
+	return status.Error(codes.Unimplemented, "method Contents not implemented")
 }
-func (UnimplementedSpaceServiceServer) CancelTuple(context.Context, *CancelTupleRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method CancelTuple not implemented")
+func (UnimplementedSpaceServiceServer) Renew(context.Context, *RenewTupleRequest) (*Lease, error) {
+	return nil, status.Error(codes.Unimplemented, "method Renew not implemented")
+}
+func (UnimplementedSpaceServiceServer) Cancel(context.Context, *CancelTupleRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method Cancel not implemented")
 }
 func (UnimplementedSpaceServiceServer) mustEmbedUnimplementedSpaceServiceServer() {}
 func (UnimplementedSpaceServiceServer) testEmbeddedByValue()                      {}
@@ -202,20 +239,20 @@ func RegisterSpaceServiceServer(s grpc.ServiceRegistrar, srv SpaceServiceServer)
 	s.RegisterService(&SpaceService_ServiceDesc, srv)
 }
 
-func _SpaceService_Out_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(OutRequest)
+func _SpaceService_Write_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WriteRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(SpaceServiceServer).Out(ctx, in)
+		return srv.(SpaceServiceServer).Write(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: SpaceService_Out_FullMethodName,
+		FullMethod: SpaceService_Write_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SpaceServiceServer).Out(ctx, req.(*OutRequest))
+		return srv.(SpaceServiceServer).Write(ctx, req.(*WriteRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -256,49 +293,60 @@ func _SpaceService_Take_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
-func _SpaceService_Watch_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(WatchRequest)
+func _SpaceService_Notify_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(NotifyRequest)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(SpaceServiceServer).Watch(m, &grpc.GenericServerStream[WatchRequest, SpaceEvent]{ServerStream: stream})
+	return srv.(SpaceServiceServer).Notify(m, &grpc.GenericServerStream[NotifyRequest, SpaceEvent]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type SpaceService_WatchServer = grpc.ServerStreamingServer[SpaceEvent]
+type SpaceService_NotifyServer = grpc.ServerStreamingServer[SpaceEvent]
 
-func _SpaceService_RenewTuple_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _SpaceService_Contents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ContentsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SpaceServiceServer).Contents(m, &grpc.GenericServerStream[ContentsRequest, Tuple]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SpaceService_ContentsServer = grpc.ServerStreamingServer[Tuple]
+
+func _SpaceService_Renew_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RenewTupleRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(SpaceServiceServer).RenewTuple(ctx, in)
+		return srv.(SpaceServiceServer).Renew(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: SpaceService_RenewTuple_FullMethodName,
+		FullMethod: SpaceService_Renew_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SpaceServiceServer).RenewTuple(ctx, req.(*RenewTupleRequest))
+		return srv.(SpaceServiceServer).Renew(ctx, req.(*RenewTupleRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _SpaceService_CancelTuple_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _SpaceService_Cancel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CancelTupleRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(SpaceServiceServer).CancelTuple(ctx, in)
+		return srv.(SpaceServiceServer).Cancel(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: SpaceService_CancelTuple_FullMethodName,
+		FullMethod: SpaceService_Cancel_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SpaceServiceServer).CancelTuple(ctx, req.(*CancelTupleRequest))
+		return srv.(SpaceServiceServer).Cancel(ctx, req.(*CancelTupleRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -311,8 +359,8 @@ var SpaceService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*SpaceServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "Out",
-			Handler:    _SpaceService_Out_Handler,
+			MethodName: "Write",
+			Handler:    _SpaceService_Write_Handler,
 		},
 		{
 			MethodName: "Read",
@@ -323,18 +371,23 @@ var SpaceService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SpaceService_Take_Handler,
 		},
 		{
-			MethodName: "RenewTuple",
-			Handler:    _SpaceService_RenewTuple_Handler,
+			MethodName: "Renew",
+			Handler:    _SpaceService_Renew_Handler,
 		},
 		{
-			MethodName: "CancelTuple",
-			Handler:    _SpaceService_CancelTuple_Handler,
+			MethodName: "Cancel",
+			Handler:    _SpaceService_Cancel_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
-			StreamName:    "Watch",
-			Handler:       _SpaceService_Watch_Handler,
+			StreamName:    "Notify",
+			Handler:       _SpaceService_Notify_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "Contents",
+			Handler:       _SpaceService_Contents_Handler,
 			ServerStreams: true,
 		},
 	},

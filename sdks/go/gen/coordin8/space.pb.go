@@ -205,31 +205,32 @@ func (x *Provenance) GetInputTupleId() string {
 	return ""
 }
 
-type OutRequest struct {
+type WriteRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Attrs         map[string]string      `protobuf:"bytes,1,rep,name=attrs,proto3" json:"attrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Payload       []byte                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
 	TtlSeconds    uint64                 `protobuf:"varint,3,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
 	WrittenBy     string                 `protobuf:"bytes,4,opt,name=written_by,json=writtenBy,proto3" json:"written_by,omitempty"`
 	InputTupleId  string                 `protobuf:"bytes,5,opt,name=input_tuple_id,json=inputTupleId,proto3" json:"input_tuple_id,omitempty"` // optional lineage
+	TxnId         string                 `protobuf:"bytes,6,opt,name=txn_id,json=txnId,proto3" json:"txn_id,omitempty"`                        // optional transaction (reserved for v2)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *OutRequest) Reset() {
-	*x = OutRequest{}
+func (x *WriteRequest) Reset() {
+	*x = WriteRequest{}
 	mi := &file_coordin8_space_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *OutRequest) String() string {
+func (x *WriteRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*OutRequest) ProtoMessage() {}
+func (*WriteRequest) ProtoMessage() {}
 
-func (x *OutRequest) ProtoReflect() protoreflect.Message {
+func (x *WriteRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_coordin8_space_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -241,67 +242,74 @@ func (x *OutRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use OutRequest.ProtoReflect.Descriptor instead.
-func (*OutRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use WriteRequest.ProtoReflect.Descriptor instead.
+func (*WriteRequest) Descriptor() ([]byte, []int) {
 	return file_coordin8_space_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *OutRequest) GetAttrs() map[string]string {
+func (x *WriteRequest) GetAttrs() map[string]string {
 	if x != nil {
 		return x.Attrs
 	}
 	return nil
 }
 
-func (x *OutRequest) GetPayload() []byte {
+func (x *WriteRequest) GetPayload() []byte {
 	if x != nil {
 		return x.Payload
 	}
 	return nil
 }
 
-func (x *OutRequest) GetTtlSeconds() uint64 {
+func (x *WriteRequest) GetTtlSeconds() uint64 {
 	if x != nil {
 		return x.TtlSeconds
 	}
 	return 0
 }
 
-func (x *OutRequest) GetWrittenBy() string {
+func (x *WriteRequest) GetWrittenBy() string {
 	if x != nil {
 		return x.WrittenBy
 	}
 	return ""
 }
 
-func (x *OutRequest) GetInputTupleId() string {
+func (x *WriteRequest) GetInputTupleId() string {
 	if x != nil {
 		return x.InputTupleId
 	}
 	return ""
 }
 
-type OutResponse struct {
+func (x *WriteRequest) GetTxnId() string {
+	if x != nil {
+		return x.TxnId
+	}
+	return ""
+}
+
+type WriteResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Tuple         *Tuple                 `protobuf:"bytes,1,opt,name=tuple,proto3" json:"tuple,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *OutResponse) Reset() {
-	*x = OutResponse{}
+func (x *WriteResponse) Reset() {
+	*x = WriteResponse{}
 	mi := &file_coordin8_space_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *OutResponse) String() string {
+func (x *WriteResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*OutResponse) ProtoMessage() {}
+func (*WriteResponse) ProtoMessage() {}
 
-func (x *OutResponse) ProtoReflect() protoreflect.Message {
+func (x *WriteResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_coordin8_space_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -313,12 +321,12 @@ func (x *OutResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use OutResponse.ProtoReflect.Descriptor instead.
-func (*OutResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use WriteResponse.ProtoReflect.Descriptor instead.
+func (*WriteResponse) Descriptor() ([]byte, []int) {
 	return file_coordin8_space_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *OutResponse) GetTuple() *Tuple {
+func (x *WriteResponse) GetTuple() *Tuple {
 	if x != nil {
 		return x.Tuple
 	}
@@ -330,6 +338,7 @@ type ReadRequest struct {
 	Template      map[string]string      `protobuf:"bytes,1,rep,name=template,proto3" json:"template,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Wait          bool                   `protobuf:"varint,2,opt,name=wait,proto3" json:"wait,omitempty"`                            // false = readIfExists
 	TimeoutMs     uint64                 `protobuf:"varint,3,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"` // 0 + wait=true = indefinite
+	TxnId         string                 `protobuf:"bytes,4,opt,name=txn_id,json=txnId,proto3" json:"txn_id,omitempty"`              // optional transaction (reserved for v2)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -385,6 +394,13 @@ func (x *ReadRequest) GetTimeoutMs() uint64 {
 	return 0
 }
 
+func (x *ReadRequest) GetTxnId() string {
+	if x != nil {
+		return x.TxnId
+	}
+	return ""
+}
+
 type ReadResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Tuple         *Tuple                 `protobuf:"bytes,1,opt,name=tuple,proto3" json:"tuple,omitempty"` // absent = no match (non-blocking)
@@ -434,6 +450,7 @@ type TakeRequest struct {
 	Template      map[string]string      `protobuf:"bytes,1,rep,name=template,proto3" json:"template,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Wait          bool                   `protobuf:"varint,2,opt,name=wait,proto3" json:"wait,omitempty"`
 	TimeoutMs     uint64                 `protobuf:"varint,3,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
+	TxnId         string                 `protobuf:"bytes,4,opt,name=txn_id,json=txnId,proto3" json:"txn_id,omitempty"` // optional transaction (reserved for v2)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -489,6 +506,13 @@ func (x *TakeRequest) GetTimeoutMs() uint64 {
 	return 0
 }
 
+func (x *TakeRequest) GetTxnId() string {
+	if x != nil {
+		return x.TxnId
+	}
+	return ""
+}
+
 type TakeResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Tuple         *Tuple                 `protobuf:"bytes,1,opt,name=tuple,proto3" json:"tuple,omitempty"`
@@ -533,29 +557,31 @@ func (x *TakeResponse) GetTuple() *Tuple {
 	return nil
 }
 
-type WatchRequest struct {
+type NotifyRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Template      map[string]string      `protobuf:"bytes,1,rep,name=template,proto3" json:"template,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	On            SpaceEventType         `protobuf:"varint,2,opt,name=on,proto3,enum=coordin8.SpaceEventType" json:"on,omitempty"`
 	TtlSeconds    uint64                 `protobuf:"varint,3,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"` // lease on the watch itself
+	Handback      []byte                 `protobuf:"bytes,4,opt,name=handback,proto3" json:"handback,omitempty"`                        // opaque; echoed with each event (Jini handback)
+	TxnId         string                 `protobuf:"bytes,5,opt,name=txn_id,json=txnId,proto3" json:"txn_id,omitempty"`                 // optional transaction (reserved for v2)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *WatchRequest) Reset() {
-	*x = WatchRequest{}
+func (x *NotifyRequest) Reset() {
+	*x = NotifyRequest{}
 	mi := &file_coordin8_space_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *WatchRequest) String() string {
+func (x *NotifyRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*WatchRequest) ProtoMessage() {}
+func (*NotifyRequest) ProtoMessage() {}
 
-func (x *WatchRequest) ProtoReflect() protoreflect.Message {
+func (x *NotifyRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_coordin8_space_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -567,30 +593,44 @@ func (x *WatchRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use WatchRequest.ProtoReflect.Descriptor instead.
-func (*WatchRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use NotifyRequest.ProtoReflect.Descriptor instead.
+func (*NotifyRequest) Descriptor() ([]byte, []int) {
 	return file_coordin8_space_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *WatchRequest) GetTemplate() map[string]string {
+func (x *NotifyRequest) GetTemplate() map[string]string {
 	if x != nil {
 		return x.Template
 	}
 	return nil
 }
 
-func (x *WatchRequest) GetOn() SpaceEventType {
+func (x *NotifyRequest) GetOn() SpaceEventType {
 	if x != nil {
 		return x.On
 	}
 	return SpaceEventType_APPEARANCE
 }
 
-func (x *WatchRequest) GetTtlSeconds() uint64 {
+func (x *NotifyRequest) GetTtlSeconds() uint64 {
 	if x != nil {
 		return x.TtlSeconds
 	}
 	return 0
+}
+
+func (x *NotifyRequest) GetHandback() []byte {
+	if x != nil {
+		return x.Handback
+	}
+	return nil
+}
+
+func (x *NotifyRequest) GetTxnId() string {
+	if x != nil {
+		return x.TxnId
+	}
+	return ""
 }
 
 type SpaceEvent struct {
@@ -598,6 +638,7 @@ type SpaceEvent struct {
 	Type          SpaceEventType         `protobuf:"varint,1,opt,name=type,proto3,enum=coordin8.SpaceEventType" json:"type,omitempty"`
 	Tuple         *Tuple                 `protobuf:"bytes,2,opt,name=tuple,proto3" json:"tuple,omitempty"`
 	OccurredAt    *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"`
+	Handback      []byte                 `protobuf:"bytes,4,opt,name=handback,proto3" json:"handback,omitempty"` // echoed from NotifyRequest
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -653,6 +694,65 @@ func (x *SpaceEvent) GetOccurredAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *SpaceEvent) GetHandback() []byte {
+	if x != nil {
+		return x.Handback
+	}
+	return nil
+}
+
+type ContentsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Template      map[string]string      `protobuf:"bytes,1,rep,name=template,proto3" json:"template,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	TxnId         string                 `protobuf:"bytes,2,opt,name=txn_id,json=txnId,proto3" json:"txn_id,omitempty"` // optional transaction (reserved for v2)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ContentsRequest) Reset() {
+	*x = ContentsRequest{}
+	mi := &file_coordin8_space_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ContentsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ContentsRequest) ProtoMessage() {}
+
+func (x *ContentsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_coordin8_space_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ContentsRequest.ProtoReflect.Descriptor instead.
+func (*ContentsRequest) Descriptor() ([]byte, []int) {
+	return file_coordin8_space_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ContentsRequest) GetTemplate() map[string]string {
+	if x != nil {
+		return x.Template
+	}
+	return nil
+}
+
+func (x *ContentsRequest) GetTxnId() string {
+	if x != nil {
+		return x.TxnId
+	}
+	return ""
+}
+
 type RenewTupleRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TupleId       string                 `protobuf:"bytes,1,opt,name=tuple_id,json=tupleId,proto3" json:"tuple_id,omitempty"`
@@ -663,7 +763,7 @@ type RenewTupleRequest struct {
 
 func (x *RenewTupleRequest) Reset() {
 	*x = RenewTupleRequest{}
-	mi := &file_coordin8_space_proto_msgTypes[10]
+	mi := &file_coordin8_space_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -675,7 +775,7 @@ func (x *RenewTupleRequest) String() string {
 func (*RenewTupleRequest) ProtoMessage() {}
 
 func (x *RenewTupleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_coordin8_space_proto_msgTypes[10]
+	mi := &file_coordin8_space_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -688,7 +788,7 @@ func (x *RenewTupleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewTupleRequest.ProtoReflect.Descriptor instead.
 func (*RenewTupleRequest) Descriptor() ([]byte, []int) {
-	return file_coordin8_space_proto_rawDescGZIP(), []int{10}
+	return file_coordin8_space_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RenewTupleRequest) GetTupleId() string {
@@ -714,7 +814,7 @@ type CancelTupleRequest struct {
 
 func (x *CancelTupleRequest) Reset() {
 	*x = CancelTupleRequest{}
-	mi := &file_coordin8_space_proto_msgTypes[11]
+	mi := &file_coordin8_space_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -726,7 +826,7 @@ func (x *CancelTupleRequest) String() string {
 func (*CancelTupleRequest) ProtoMessage() {}
 
 func (x *CancelTupleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_coordin8_space_proto_msgTypes[11]
+	mi := &file_coordin8_space_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -739,7 +839,7 @@ func (x *CancelTupleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTupleRequest.ProtoReflect.Descriptor instead.
 func (*CancelTupleRequest) Descriptor() ([]byte, []int) {
-	return file_coordin8_space_proto_rawDescGZIP(), []int{11}
+	return file_coordin8_space_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CancelTupleRequest) GetTupleId() string {
@@ -772,56 +872,67 @@ const file_coordin8_space_proto_rawDesc = "" +
 	"written_by\x18\x01 \x01(\tR\twrittenBy\x129\n" +
 	"\n" +
 	"written_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\twrittenAt\x12$\n" +
-	"\x0einput_tuple_id\x18\x03 \x01(\tR\finputTupleId\"\xfd\x01\n" +
-	"\n" +
-	"OutRequest\x125\n" +
-	"\x05attrs\x18\x01 \x03(\v2\x1f.coordin8.OutRequest.AttrsEntryR\x05attrs\x12\x18\n" +
+	"\x0einput_tuple_id\x18\x03 \x01(\tR\finputTupleId\"\x98\x02\n" +
+	"\fWriteRequest\x127\n" +
+	"\x05attrs\x18\x01 \x03(\v2!.coordin8.WriteRequest.AttrsEntryR\x05attrs\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload\x12\x1f\n" +
 	"\vttl_seconds\x18\x03 \x01(\x04R\n" +
 	"ttlSeconds\x12\x1d\n" +
 	"\n" +
 	"written_by\x18\x04 \x01(\tR\twrittenBy\x12$\n" +
-	"\x0einput_tuple_id\x18\x05 \x01(\tR\finputTupleId\x1a8\n" +
+	"\x0einput_tuple_id\x18\x05 \x01(\tR\finputTupleId\x12\x15\n" +
+	"\x06txn_id\x18\x06 \x01(\tR\x05txnId\x1a8\n" +
 	"\n" +
 	"AttrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"4\n" +
-	"\vOutResponse\x12%\n" +
-	"\x05tuple\x18\x01 \x01(\v2\x0f.coordin8.TupleR\x05tuple\"\xbe\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"6\n" +
+	"\rWriteResponse\x12%\n" +
+	"\x05tuple\x18\x01 \x01(\v2\x0f.coordin8.TupleR\x05tuple\"\xd5\x01\n" +
 	"\vReadRequest\x12?\n" +
 	"\btemplate\x18\x01 \x03(\v2#.coordin8.ReadRequest.TemplateEntryR\btemplate\x12\x12\n" +
 	"\x04wait\x18\x02 \x01(\bR\x04wait\x12\x1d\n" +
 	"\n" +
-	"timeout_ms\x18\x03 \x01(\x04R\ttimeoutMs\x1a;\n" +
+	"timeout_ms\x18\x03 \x01(\x04R\ttimeoutMs\x12\x15\n" +
+	"\x06txn_id\x18\x04 \x01(\tR\x05txnId\x1a;\n" +
 	"\rTemplateEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"5\n" +
 	"\fReadResponse\x12%\n" +
-	"\x05tuple\x18\x01 \x01(\v2\x0f.coordin8.TupleR\x05tuple\"\xbe\x01\n" +
+	"\x05tuple\x18\x01 \x01(\v2\x0f.coordin8.TupleR\x05tuple\"\xd5\x01\n" +
 	"\vTakeRequest\x12?\n" +
 	"\btemplate\x18\x01 \x03(\v2#.coordin8.TakeRequest.TemplateEntryR\btemplate\x12\x12\n" +
 	"\x04wait\x18\x02 \x01(\bR\x04wait\x12\x1d\n" +
 	"\n" +
-	"timeout_ms\x18\x03 \x01(\x04R\ttimeoutMs\x1a;\n" +
+	"timeout_ms\x18\x03 \x01(\x04R\ttimeoutMs\x12\x15\n" +
+	"\x06txn_id\x18\x04 \x01(\tR\x05txnId\x1a;\n" +
 	"\rTemplateEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"5\n" +
 	"\fTakeResponse\x12%\n" +
-	"\x05tuple\x18\x01 \x01(\v2\x0f.coordin8.TupleR\x05tuple\"\xd8\x01\n" +
-	"\fWatchRequest\x12@\n" +
-	"\btemplate\x18\x01 \x03(\v2$.coordin8.WatchRequest.TemplateEntryR\btemplate\x12(\n" +
+	"\x05tuple\x18\x01 \x01(\v2\x0f.coordin8.TupleR\x05tuple\"\x8d\x02\n" +
+	"\rNotifyRequest\x12A\n" +
+	"\btemplate\x18\x01 \x03(\v2%.coordin8.NotifyRequest.TemplateEntryR\btemplate\x12(\n" +
 	"\x02on\x18\x02 \x01(\x0e2\x18.coordin8.SpaceEventTypeR\x02on\x12\x1f\n" +
 	"\vttl_seconds\x18\x03 \x01(\x04R\n" +
-	"ttlSeconds\x1a;\n" +
+	"ttlSeconds\x12\x1a\n" +
+	"\bhandback\x18\x04 \x01(\fR\bhandback\x12\x15\n" +
+	"\x06txn_id\x18\x05 \x01(\tR\x05txnId\x1a;\n" +
 	"\rTemplateEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9e\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xba\x01\n" +
 	"\n" +
 	"SpaceEvent\x12,\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x18.coordin8.SpaceEventTypeR\x04type\x12%\n" +
 	"\x05tuple\x18\x02 \x01(\v2\x0f.coordin8.TupleR\x05tuple\x12;\n" +
 	"\voccurred_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"occurredAt\"O\n" +
+	"occurredAt\x12\x1a\n" +
+	"\bhandback\x18\x04 \x01(\fR\bhandback\"\xaa\x01\n" +
+	"\x0fContentsRequest\x12C\n" +
+	"\btemplate\x18\x01 \x03(\v2'.coordin8.ContentsRequest.TemplateEntryR\btemplate\x12\x15\n" +
+	"\x06txn_id\x18\x02 \x01(\tR\x05txnId\x1a;\n" +
+	"\rTemplateEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"O\n" +
 	"\x11RenewTupleRequest\x12\x19\n" +
 	"\btuple_id\x18\x01 \x01(\tR\atupleId\x12\x1f\n" +
 	"\vttl_seconds\x18\x02 \x01(\x04R\n" +
@@ -832,15 +943,15 @@ const file_coordin8_space_proto_rawDesc = "" +
 	"\n" +
 	"APPEARANCE\x10\x00\x12\x0e\n" +
 	"\n" +
-	"EXPIRATION\x10\x012\xea\x02\n" +
-	"\fSpaceService\x122\n" +
-	"\x03Out\x12\x14.coordin8.OutRequest\x1a\x15.coordin8.OutResponse\x125\n" +
+	"EXPIRATION\x10\x012\xa2\x03\n" +
+	"\fSpaceService\x128\n" +
+	"\x05Write\x12\x16.coordin8.WriteRequest\x1a\x17.coordin8.WriteResponse\x125\n" +
 	"\x04Read\x12\x15.coordin8.ReadRequest\x1a\x16.coordin8.ReadResponse\x125\n" +
-	"\x04Take\x12\x15.coordin8.TakeRequest\x1a\x16.coordin8.TakeResponse\x127\n" +
-	"\x05Watch\x12\x16.coordin8.WatchRequest\x1a\x14.coordin8.SpaceEvent0\x01\x12:\n" +
-	"\n" +
-	"RenewTuple\x12\x1b.coordin8.RenewTupleRequest\x1a\x0f.coordin8.Lease\x12C\n" +
-	"\vCancelTuple\x12\x1c.coordin8.CancelTupleRequest\x1a\x16.google.protobuf.EmptyB$Z\"github.com/coordin8/proto/coordin8b\x06proto3"
+	"\x04Take\x12\x15.coordin8.TakeRequest\x1a\x16.coordin8.TakeResponse\x129\n" +
+	"\x06Notify\x12\x17.coordin8.NotifyRequest\x1a\x14.coordin8.SpaceEvent0\x01\x128\n" +
+	"\bContents\x12\x19.coordin8.ContentsRequest\x1a\x0f.coordin8.Tuple0\x01\x125\n" +
+	"\x05Renew\x12\x1b.coordin8.RenewTupleRequest\x1a\x0f.coordin8.Lease\x12>\n" +
+	"\x06Cancel\x12\x1c.coordin8.CancelTupleRequest\x1a\x16.google.protobuf.EmptyB$Z\"github.com/coordin8/proto/coordin8b\x06proto3"
 
 var (
 	file_coordin8_space_proto_rawDescOnce sync.Once
@@ -855,63 +966,68 @@ func file_coordin8_space_proto_rawDescGZIP() []byte {
 }
 
 var file_coordin8_space_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_coordin8_space_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_coordin8_space_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_coordin8_space_proto_goTypes = []any{
 	(SpaceEventType)(0),           // 0: coordin8.SpaceEventType
 	(*Tuple)(nil),                 // 1: coordin8.Tuple
 	(*Provenance)(nil),            // 2: coordin8.Provenance
-	(*OutRequest)(nil),            // 3: coordin8.OutRequest
-	(*OutResponse)(nil),           // 4: coordin8.OutResponse
+	(*WriteRequest)(nil),          // 3: coordin8.WriteRequest
+	(*WriteResponse)(nil),         // 4: coordin8.WriteResponse
 	(*ReadRequest)(nil),           // 5: coordin8.ReadRequest
 	(*ReadResponse)(nil),          // 6: coordin8.ReadResponse
 	(*TakeRequest)(nil),           // 7: coordin8.TakeRequest
 	(*TakeResponse)(nil),          // 8: coordin8.TakeResponse
-	(*WatchRequest)(nil),          // 9: coordin8.WatchRequest
+	(*NotifyRequest)(nil),         // 9: coordin8.NotifyRequest
 	(*SpaceEvent)(nil),            // 10: coordin8.SpaceEvent
-	(*RenewTupleRequest)(nil),     // 11: coordin8.RenewTupleRequest
-	(*CancelTupleRequest)(nil),    // 12: coordin8.CancelTupleRequest
-	nil,                           // 13: coordin8.Tuple.AttrsEntry
-	nil,                           // 14: coordin8.OutRequest.AttrsEntry
-	nil,                           // 15: coordin8.ReadRequest.TemplateEntry
-	nil,                           // 16: coordin8.TakeRequest.TemplateEntry
-	nil,                           // 17: coordin8.WatchRequest.TemplateEntry
-	(*Lease)(nil),                 // 18: coordin8.Lease
-	(*timestamppb.Timestamp)(nil), // 19: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),         // 20: google.protobuf.Empty
+	(*ContentsRequest)(nil),       // 11: coordin8.ContentsRequest
+	(*RenewTupleRequest)(nil),     // 12: coordin8.RenewTupleRequest
+	(*CancelTupleRequest)(nil),    // 13: coordin8.CancelTupleRequest
+	nil,                           // 14: coordin8.Tuple.AttrsEntry
+	nil,                           // 15: coordin8.WriteRequest.AttrsEntry
+	nil,                           // 16: coordin8.ReadRequest.TemplateEntry
+	nil,                           // 17: coordin8.TakeRequest.TemplateEntry
+	nil,                           // 18: coordin8.NotifyRequest.TemplateEntry
+	nil,                           // 19: coordin8.ContentsRequest.TemplateEntry
+	(*Lease)(nil),                 // 20: coordin8.Lease
+	(*timestamppb.Timestamp)(nil), // 21: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),         // 22: google.protobuf.Empty
 }
 var file_coordin8_space_proto_depIdxs = []int32{
-	13, // 0: coordin8.Tuple.attrs:type_name -> coordin8.Tuple.AttrsEntry
+	14, // 0: coordin8.Tuple.attrs:type_name -> coordin8.Tuple.AttrsEntry
 	2,  // 1: coordin8.Tuple.provenance:type_name -> coordin8.Provenance
-	18, // 2: coordin8.Tuple.lease:type_name -> coordin8.Lease
-	19, // 3: coordin8.Provenance.written_at:type_name -> google.protobuf.Timestamp
-	14, // 4: coordin8.OutRequest.attrs:type_name -> coordin8.OutRequest.AttrsEntry
-	1,  // 5: coordin8.OutResponse.tuple:type_name -> coordin8.Tuple
-	15, // 6: coordin8.ReadRequest.template:type_name -> coordin8.ReadRequest.TemplateEntry
+	20, // 2: coordin8.Tuple.lease:type_name -> coordin8.Lease
+	21, // 3: coordin8.Provenance.written_at:type_name -> google.protobuf.Timestamp
+	15, // 4: coordin8.WriteRequest.attrs:type_name -> coordin8.WriteRequest.AttrsEntry
+	1,  // 5: coordin8.WriteResponse.tuple:type_name -> coordin8.Tuple
+	16, // 6: coordin8.ReadRequest.template:type_name -> coordin8.ReadRequest.TemplateEntry
 	1,  // 7: coordin8.ReadResponse.tuple:type_name -> coordin8.Tuple
-	16, // 8: coordin8.TakeRequest.template:type_name -> coordin8.TakeRequest.TemplateEntry
+	17, // 8: coordin8.TakeRequest.template:type_name -> coordin8.TakeRequest.TemplateEntry
 	1,  // 9: coordin8.TakeResponse.tuple:type_name -> coordin8.Tuple
-	17, // 10: coordin8.WatchRequest.template:type_name -> coordin8.WatchRequest.TemplateEntry
-	0,  // 11: coordin8.WatchRequest.on:type_name -> coordin8.SpaceEventType
+	18, // 10: coordin8.NotifyRequest.template:type_name -> coordin8.NotifyRequest.TemplateEntry
+	0,  // 11: coordin8.NotifyRequest.on:type_name -> coordin8.SpaceEventType
 	0,  // 12: coordin8.SpaceEvent.type:type_name -> coordin8.SpaceEventType
 	1,  // 13: coordin8.SpaceEvent.tuple:type_name -> coordin8.Tuple
-	19, // 14: coordin8.SpaceEvent.occurred_at:type_name -> google.protobuf.Timestamp
-	3,  // 15: coordin8.SpaceService.Out:input_type -> coordin8.OutRequest
-	5,  // 16: coordin8.SpaceService.Read:input_type -> coordin8.ReadRequest
-	7,  // 17: coordin8.SpaceService.Take:input_type -> coordin8.TakeRequest
-	9,  // 18: coordin8.SpaceService.Watch:input_type -> coordin8.WatchRequest
-	11, // 19: coordin8.SpaceService.RenewTuple:input_type -> coordin8.RenewTupleRequest
-	12, // 20: coordin8.SpaceService.CancelTuple:input_type -> coordin8.CancelTupleRequest
-	4,  // 21: coordin8.SpaceService.Out:output_type -> coordin8.OutResponse
-	6,  // 22: coordin8.SpaceService.Read:output_type -> coordin8.ReadResponse
-	8,  // 23: coordin8.SpaceService.Take:output_type -> coordin8.TakeResponse
-	10, // 24: coordin8.SpaceService.Watch:output_type -> coordin8.SpaceEvent
-	18, // 25: coordin8.SpaceService.RenewTuple:output_type -> coordin8.Lease
-	20, // 26: coordin8.SpaceService.CancelTuple:output_type -> google.protobuf.Empty
-	21, // [21:27] is the sub-list for method output_type
-	15, // [15:21] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	21, // 14: coordin8.SpaceEvent.occurred_at:type_name -> google.protobuf.Timestamp
+	19, // 15: coordin8.ContentsRequest.template:type_name -> coordin8.ContentsRequest.TemplateEntry
+	3,  // 16: coordin8.SpaceService.Write:input_type -> coordin8.WriteRequest
+	5,  // 17: coordin8.SpaceService.Read:input_type -> coordin8.ReadRequest
+	7,  // 18: coordin8.SpaceService.Take:input_type -> coordin8.TakeRequest
+	9,  // 19: coordin8.SpaceService.Notify:input_type -> coordin8.NotifyRequest
+	11, // 20: coordin8.SpaceService.Contents:input_type -> coordin8.ContentsRequest
+	12, // 21: coordin8.SpaceService.Renew:input_type -> coordin8.RenewTupleRequest
+	13, // 22: coordin8.SpaceService.Cancel:input_type -> coordin8.CancelTupleRequest
+	4,  // 23: coordin8.SpaceService.Write:output_type -> coordin8.WriteResponse
+	6,  // 24: coordin8.SpaceService.Read:output_type -> coordin8.ReadResponse
+	8,  // 25: coordin8.SpaceService.Take:output_type -> coordin8.TakeResponse
+	10, // 26: coordin8.SpaceService.Notify:output_type -> coordin8.SpaceEvent
+	1,  // 27: coordin8.SpaceService.Contents:output_type -> coordin8.Tuple
+	20, // 28: coordin8.SpaceService.Renew:output_type -> coordin8.Lease
+	22, // 29: coordin8.SpaceService.Cancel:output_type -> google.protobuf.Empty
+	23, // [23:30] is the sub-list for method output_type
+	16, // [16:23] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_coordin8_space_proto_init() }
@@ -926,7 +1042,7 @@ func file_coordin8_space_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_coordin8_space_proto_rawDesc), len(file_coordin8_space_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   17,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
