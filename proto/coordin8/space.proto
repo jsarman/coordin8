@@ -11,27 +11,35 @@ option go_package = "github.com/coordin8/proto/coordin8";
 // SpaceService — distributed reactive tuple store.
 // Modeled after net.jini.space.JavaSpace (JavaSpaces Specification).
 //
-// Producers out() tuples; consumers take() or read() by template;
-// watchers get push streams on match. Every tuple is leased through LeaseMgr.
+// Producers write() tuples; consumers take() or read() by template;
+// watchers get push streams via notify(). Every tuple is leased through LeaseMgr.
 // "Describe what you need, not where it is."
 service SpaceService {
     // Write a leased tuple into the Space.
-    rpc Out(OutRequest)                   returns (OutResponse);
+    // Jini: JavaSpace.write(Entry, Transaction, long lease)
+    rpc Write(WriteRequest)               returns (WriteResponse);
 
     // Non-destructive read by template. Blocking or non-blocking.
+    // Jini: JavaSpace.read() / readIfExists() (collapsed via wait flag)
     rpc Read(ReadRequest)                 returns (ReadResponse);
 
     // Atomic claim+remove by template. Blocking or non-blocking.
+    // Jini: JavaSpace.take() / takeIfExists() (collapsed via wait flag)
     rpc Take(TakeRequest)                 returns (TakeResponse);
 
     // Server-streaming push on template match (appearance / expiration events).
-    rpc Watch(WatchRequest)               returns (stream SpaceEvent);
+    // Jini: JavaSpace.notify(Entry, Transaction, RemoteEventListener, long lease, MarshalledObject handback)
+    rpc Notify(NotifyRequest)             returns (stream SpaceEvent);
+
+    // Bulk read — streams all tuples matching a template without removing them.
+    // Jini: JavaSpace05.contents(Collection, Transaction, long lease, long maxEntries)
+    rpc Contents(ContentsRequest)         returns (stream Tuple);
 
     // Renew a tuple's lease.
-    rpc RenewTuple(RenewTupleRequest)     returns (Lease);
+    rpc Renew(RenewTupleRequest)          returns (Lease);
 
     // Cancel a tuple (remove from Space and cancel its lease).
-    rpc CancelTuple(CancelTupleRequest)   returns (google.protobuf.Empty);
+    rpc Cancel(CancelTupleRequest)        returns (google.protobuf.Empty);
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -50,15 +58,16 @@ message Provenance {
     string                    input_tuple_id = 3;  // lineage — which tuple produced this one
 }
 
-message OutRequest {
+message WriteRequest {
     map<string, string> attrs          = 1;
     bytes               payload        = 2;
     uint64              ttl_seconds    = 3;
     string              written_by     = 4;
     string              input_tuple_id = 5;  // optional lineage
+    string              txn_id         = 6;  // optional transaction (reserved for v2)
 }
 
-message OutResponse {
+message WriteResponse {
     Tuple tuple = 1;
 }
 
@@ -66,6 +75,7 @@ message ReadRequest {
     map<string, string> template   = 1;
     bool                wait       = 2;  // false = readIfExists
     uint64              timeout_ms = 3;  // 0 + wait=true = indefinite
+    string              txn_id     = 4;  // optional transaction (reserved for v2)
 }
 
 message ReadResponse {
@@ -76,29 +86,40 @@ message TakeRequest {
     map<string, string> template   = 1;
     bool                wait       = 2;
     uint64              timeout_ms = 3;
+    string              txn_id     = 4;  // optional transaction (reserved for v2)
 }
 
 message TakeResponse {
     Tuple tuple = 1;
 }
 
-// ── Watch ────────────────────────────────────────────────────────────────────
+// ── Notify ──────────────────────────────────────────────────────────────────
 
 enum SpaceEventType {
     APPEARANCE = 0;
     EXPIRATION = 1;
 }
 
-message WatchRequest {
+message NotifyRequest {
     map<string, string> template     = 1;
     SpaceEventType      on           = 2;
     uint64              ttl_seconds  = 3;  // lease on the watch itself
+    bytes               handback     = 4;  // opaque; echoed with each event (Jini handback)
+    string              txn_id       = 5;  // optional transaction (reserved for v2)
 }
 
 message SpaceEvent {
     SpaceEventType                type        = 1;
     Tuple                         tuple       = 2;
     google.protobuf.Timestamp     occurred_at = 3;
+    bytes                         handback    = 4;  // echoed from NotifyRequest
+}
+
+// ── Contents ────────────────────────────────────────────────────────────────
+
+message ContentsRequest {
+    map<string, string> template     = 1;
+    string              txn_id       = 2;  // optional transaction (reserved for v2)
 }
 
 // ── Lease management ─────────────────────────────────────────────────────────

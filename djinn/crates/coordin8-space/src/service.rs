@@ -9,9 +9,9 @@ use tracing::debug;
 
 use coordin8_core::SpaceEventKind;
 use coordin8_proto::coordin8::{
-    space_service_server::SpaceService, CancelTupleRequest, Lease, OutRequest, OutResponse,
+    space_service_server::SpaceService, CancelTupleRequest, ContentsRequest, Lease, NotifyRequest,
     Provenance, ReadRequest, ReadResponse, RenewTupleRequest, SpaceEvent, SpaceEventType,
-    TakeRequest, TakeResponse, Tuple, WatchRequest,
+    TakeRequest, TakeResponse, Tuple, WriteRequest, WriteResponse,
 };
 use coordin8_registry::matcher::{matches, parse_template};
 
@@ -52,7 +52,7 @@ type BoxStream<T> = Pin<Box<dyn futures_core::Stream<Item = Result<T, Status>> +
 
 #[tonic::async_trait]
 impl SpaceService for SpaceServiceImpl {
-    async fn out(&self, req: Request<OutRequest>) -> Result<Response<OutResponse>, Status> {
+    async fn write(&self, req: Request<WriteRequest>) -> Result<Response<WriteResponse>, Status> {
         let r = req.into_inner();
         let input_tuple_id = if r.input_tuple_id.is_empty() {
             None
@@ -62,11 +62,11 @@ impl SpaceService for SpaceServiceImpl {
 
         let (record, lease_record) = self
             .manager
-            .out(r.attrs, r.payload, r.ttl_seconds, r.written_by, input_tuple_id)
+            .write(r.attrs, r.payload, r.ttl_seconds, r.written_by, input_tuple_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        debug!(tuple_id = %record.tuple_id, "out rpc");
+        debug!(tuple_id = %record.tuple_id, "write rpc");
 
         let lease = Some(Lease {
             lease_id: lease_record.lease_id,
@@ -76,7 +76,7 @@ impl SpaceService for SpaceServiceImpl {
             ttl_seconds: lease_record.ttl_seconds,
         });
 
-        Ok(Response::new(OutResponse {
+        Ok(Response::new(WriteResponse {
             tuple: Some(tuple_record_to_proto(&record, lease)),
         }))
     }
@@ -107,12 +107,12 @@ impl SpaceService for SpaceServiceImpl {
         }))
     }
 
-    type WatchStream = BoxStream<SpaceEvent>;
+    type NotifyStream = BoxStream<SpaceEvent>;
 
-    async fn watch(
+    async fn notify(
         &self,
-        req: Request<WatchRequest>,
-    ) -> Result<Response<Self::WatchStream>, Status> {
+        req: Request<NotifyRequest>,
+    ) -> Result<Response<Self::NotifyStream>, Status> {
         let r = req.into_inner();
         let on = match r.on {
             x if x == SpaceEventType::Expiration as i32 => SpaceEventKind::Expiration,
@@ -121,7 +121,7 @@ impl SpaceService for SpaceServiceImpl {
 
         let (_, _lease_id) = self
             .manager
-            .watch(r.template.clone(), on.clone(), r.ttl_seconds)
+            .notify(r.template.clone(), on.clone(), r.ttl_seconds, r.handback.clone())
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -137,6 +137,7 @@ impl SpaceService for SpaceServiceImpl {
         };
 
         let template = r.template;
+        let handback = r.handback;
         let (tx, rx) = mpsc::channel::<Result<SpaceEvent, Status>>(64);
 
         tokio::spawn(async move {
@@ -157,6 +158,7 @@ impl SpaceService for SpaceServiceImpl {
                     r#type: event_type,
                     tuple: Some(tuple_record_to_proto(&tuple, None)),
                     occurred_at: Some(to_timestamp(chrono::Utc::now())),
+                    handback: handback.clone(),
                 };
 
                 if tx.send(Ok(event)).await.is_err() {
@@ -168,14 +170,41 @@ impl SpaceService for SpaceServiceImpl {
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
-    async fn renew_tuple(
+    type ContentsStream = BoxStream<Tuple>;
+
+    async fn contents(
+        &self,
+        req: Request<ContentsRequest>,
+    ) -> Result<Response<Self::ContentsStream>, Status> {
+        let r = req.into_inner();
+        let tuples = self
+            .manager
+            .contents(r.template)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let (tx, rx) = mpsc::channel::<Result<Tuple, Status>>(64);
+
+        tokio::spawn(async move {
+            for record in &tuples {
+                let proto = tuple_record_to_proto(record, None);
+                if tx.send(Ok(proto)).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+    }
+
+    async fn renew(
         &self,
         req: Request<RenewTupleRequest>,
     ) -> Result<Response<Lease>, Status> {
         let r = req.into_inner();
         let record = self
             .manager
-            .renew_tuple(&r.tuple_id, r.ttl_seconds)
+            .renew(&r.tuple_id, r.ttl_seconds)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -188,13 +217,13 @@ impl SpaceService for SpaceServiceImpl {
         }))
     }
 
-    async fn cancel_tuple(
+    async fn cancel(
         &self,
         req: Request<CancelTupleRequest>,
     ) -> Result<Response<()>, Status> {
         let tuple_id = req.into_inner().tuple_id;
         self.manager
-            .cancel_tuple(&tuple_id)
+            .cancel(&tuple_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 

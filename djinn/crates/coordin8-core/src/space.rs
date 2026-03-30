@@ -24,6 +24,7 @@ pub struct SpaceWatchRecord {
     pub template: HashMap<String, String>,
     pub on: SpaceEventKind,
     pub lease_id: String,
+    pub handback: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +59,12 @@ pub trait SpaceStore: Send + Sync {
         &self,
         template: &HashMap<String, String>,
     ) -> Result<Option<TupleRecord>, Error>;
+
+    /// Find all tuples matching the template (non-destructive).
+    async fn find_all_matches(
+        &self,
+        template: &HashMap<String, String>,
+    ) -> Result<Vec<TupleRecord>, Error>;
 
     /// List all tuples (for debugging/tests).
     async fn list_all(&self) -> Result<Vec<TupleRecord>, Error>;

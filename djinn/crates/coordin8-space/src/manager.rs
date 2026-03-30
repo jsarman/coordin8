@@ -34,7 +34,8 @@ impl SpaceManager {
     }
 
     /// Write a leased tuple into the Space. Returns both the tuple and its lease.
-    pub async fn out(
+    /// Jini: JavaSpace.write(Entry, Transaction, long lease)
+    pub async fn write(
         &self,
         attrs: HashMap<String, String>,
         payload: Vec<u8>,
@@ -67,6 +68,7 @@ impl SpaceManager {
     }
 
     /// Non-destructive read by template. Blocking or non-blocking.
+    /// Jini: JavaSpace.read() (wait=true) / readIfExists() (wait=false)
     pub async fn read(
         &self,
         template: HashMap<String, String>,
@@ -112,6 +114,7 @@ impl SpaceManager {
     }
 
     /// Atomic claim+remove by template. Blocking or non-blocking.
+    /// Jini: JavaSpace.take() (wait=true) / takeIfExists() (wait=false)
     pub async fn take(
         &self,
         template: HashMap<String, String>,
@@ -172,12 +175,23 @@ impl SpaceManager {
         }
     }
 
-    /// Create a watch subscription. Returns (watch_id, lease_id).
-    pub async fn watch(
+    /// Bulk read — returns all tuples matching the template without removing them.
+    /// Jini: JavaSpace05.contents()
+    pub async fn contents(
+        &self,
+        template: HashMap<String, String>,
+    ) -> Result<Vec<TupleRecord>, Error> {
+        self.store.find_all_matches(&template).await
+    }
+
+    /// Create a notification subscription. Returns (watch_id, lease_id).
+    /// Jini: JavaSpace.notify()
+    pub async fn notify(
         &self,
         template: HashMap<String, String>,
         on: SpaceEventKind,
         ttl_secs: u64,
+        handback: Vec<u8>,
     ) -> Result<(String, String), Error> {
         let watch_id = Uuid::new_v4().to_string();
         let resource_id = format!("space-watch:{}", watch_id);
@@ -188,11 +202,12 @@ impl SpaceManager {
             template,
             on,
             lease_id: lease.lease_id.clone(),
+            handback,
         };
 
         self.store.create_watch(record).await?;
 
-        debug!(watch_id, lease_id = %lease.lease_id, "space watch created");
+        debug!(watch_id, lease_id = %lease.lease_id, "space notification created");
 
         Ok((watch_id, lease.lease_id))
     }
@@ -218,12 +233,12 @@ impl SpaceManager {
     /// Called by the lease expiry listener when a space-watch: lease expires.
     pub async fn on_watch_expired(&self, lease_id: &str) {
         if let Ok(Some(watch)) = self.store.remove_watch_by_lease(lease_id).await {
-            debug!(watch_id = %watch.watch_id, lease_id, "space watch expired");
+            debug!(watch_id = %watch.watch_id, lease_id, "space notification expired");
         }
     }
 
     /// Cancel a tuple — remove from Space and cancel its lease.
-    pub async fn cancel_tuple(&self, tuple_id: &str) -> Result<(), Error> {
+    pub async fn cancel(&self, tuple_id: &str) -> Result<(), Error> {
         let record = self
             .store
             .remove(tuple_id)
@@ -237,7 +252,7 @@ impl SpaceManager {
     }
 
     /// Renew a tuple's lease.
-    pub async fn renew_tuple(
+    pub async fn renew(
         &self,
         tuple_id: &str,
         ttl_secs: u64,

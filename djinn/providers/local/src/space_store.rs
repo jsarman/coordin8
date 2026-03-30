@@ -103,6 +103,20 @@ impl SpaceStore for InMemorySpaceStore {
         }
     }
 
+    async fn find_all_matches(
+        &self,
+        template: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<TupleRecord>, Error> {
+        let ops = parse_template(template);
+        let mut results = Vec::new();
+        for entry in self.tuples.iter() {
+            if ops.is_empty() || matches(&ops, &entry.attrs) {
+                results.push(entry.clone());
+            }
+        }
+        Ok(results)
+    }
+
     async fn list_all(&self) -> Result<Vec<TupleRecord>, Error> {
         Ok(self.tuples.iter().map(|r| r.clone()).collect())
     }

@@ -1,7 +1,7 @@
 /// Space demo — runs in-process, no gRPC needed.
 ///
 /// Demonstrates the full cycle:
-///   out → read → take → blocking take → watch → lease expiry
+///   write → read → take → blocking take → notify → contents → lease expiry
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -63,14 +63,14 @@ fn make_manager_with_reaper() -> Arc<SpaceManager> {
     mgr
 }
 
-// ── Test 1: out and read ────────────────────────────────────────────────────
+// ── Test 1: write and read ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn out_and_read() {
+async fn write_and_read() {
     let (mgr, _) = make_manager();
 
     let (record, _lease) = mgr
-        .out(
+        .write(
             [("kind".into(), "price".into()), ("ticker".into(), "AAPL".into())].into(),
             b"{\"price\": 189}".to_vec(),
             60,
@@ -80,7 +80,7 @@ async fn out_and_read() {
         .await
         .unwrap();
 
-    println!("\n[demo] Out: tuple_id={}", record.tuple_id);
+    println!("\n[demo] Write: tuple_id={}", record.tuple_id);
 
     // Read by template
     let found = mgr
@@ -95,13 +95,13 @@ async fn out_and_read() {
     println!("[demo] Read: found tuple_id={} ✓", found.tuple_id);
 }
 
-// ── Test 2: out and take ────────────────────────────────────────────────────
+// ── Test 2: write and take ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn out_and_take() {
+async fn write_and_take() {
     let (mgr, _) = make_manager();
 
-    mgr.out(
+    mgr.write(
         [("kind".into(), "task".into()), ("name".into(), "build".into())].into(),
         vec![],
         60,
@@ -156,10 +156,10 @@ async fn take_nonblocking_empty() {
     println!("\n[demo] Take non-blocking empty: None ✓");
 }
 
-// ── Test 5: blocking take unblocks on out ───────────────────────────────────
+// ── Test 5: blocking take unblocks on write ─────────────────────────────────
 
 #[tokio::test]
-async fn take_blocking_unblocks_on_out() {
+async fn take_blocking_unblocks_on_write() {
     let (mgr, _) = make_manager();
     let mgr2 = Arc::clone(&mgr);
 
@@ -173,8 +173,8 @@ async fn take_blocking_unblocks_on_out() {
     // Give the taker time to subscribe
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Out a matching tuple
-    mgr.out(
+    // Write a matching tuple
+    mgr.write(
         [("kind".into(), "job".into()), ("id".into(), "42".into())].into(),
         vec![],
         60,
@@ -187,7 +187,7 @@ async fn take_blocking_unblocks_on_out() {
     let result = taker.await.unwrap();
     assert!(result.is_some());
     assert_eq!(result.unwrap().attrs["id"], "42");
-    println!("\n[demo] Blocking take unblocked on out ✓");
+    println!("\n[demo] Blocking take unblocked on write ✓");
 }
 
 // ── Test 6: read blocking timeout ───────────────────────────────────────────
@@ -213,7 +213,7 @@ async fn read_blocking_timeout() {
 async fn template_matching() {
     let (mgr, _) = make_manager();
 
-    mgr.out(
+    mgr.write(
         [
             ("kind".into(), "sensor".into()),
             ("location".into(), "tampa-east-7".into()),
@@ -284,7 +284,7 @@ async fn template_matching() {
 async fn tuple_lease_expiry() {
     let mgr = make_manager_with_reaper();
 
-    mgr.out(
+    mgr.write(
         [("kind".into(), "ephemeral".into())].into(),
         vec![],
         1, // 1 second TTL
@@ -312,19 +312,20 @@ async fn tuple_lease_expiry() {
     println!("\n[demo] Tuple lease expiry: gone after TTL ✓");
 }
 
-// ── Test 9: watch appearance ────────────────────────────────────────────────
+// ── Test 9: notify appearance ───────────────────────────────────────────────
 
 #[tokio::test]
-async fn watch_appearance() {
+async fn notify_appearance() {
     let (mgr, _) = make_manager();
     let mgr2 = Arc::clone(&mgr);
 
-    // Create a watch
+    // Create a notification
     let (_watch_id, _lease_id) = mgr
-        .watch(
+        .notify(
             [("kind".into(), "alert".into())].into(),
             SpaceEventKind::Appearance,
             60,
+            b"my-handback".to_vec(),
         )
         .await
         .unwrap();
@@ -332,8 +333,8 @@ async fn watch_appearance() {
     // Subscribe to the broadcast to verify events flow
     let mut rx = mgr.subscribe_tuple_broadcast();
 
-    // Out a matching tuple
-    mgr2.out(
+    // Write a matching tuple
+    mgr2.write(
         [("kind".into(), "alert".into()), ("level".into(), "critical".into())].into(),
         b"disk full".to_vec(),
         60,
@@ -350,7 +351,7 @@ async fn watch_appearance() {
 
     assert_eq!(event.attrs["kind"], "alert");
     assert_eq!(event.attrs["level"], "critical");
-    println!("\n[demo] Watch appearance: received event ✓");
+    println!("\n[demo] Notify appearance: received event ✓");
 }
 
 // ── Test 10: concurrent take — one winner ───────────────────────────────────
@@ -359,7 +360,7 @@ async fn watch_appearance() {
 async fn take_race_one_winner() {
     let (mgr, _) = make_manager();
 
-    mgr.out(
+    mgr.write(
         [("kind".into(), "token".into())].into(),
         vec![],
         60,
@@ -403,7 +404,7 @@ async fn cancel_tuple_removes() {
     let (mgr, _) = make_manager();
 
     let (record, _lease) = mgr
-        .out(
+        .write(
             [("kind".into(), "temp".into())].into(),
             vec![],
             60,
@@ -413,7 +414,7 @@ async fn cancel_tuple_removes() {
         .await
         .unwrap();
 
-    mgr.cancel_tuple(&record.tuple_id).await.unwrap();
+    mgr.cancel(&record.tuple_id).await.unwrap();
 
     let gone = mgr
         .read([("kind".into(), "temp".into())].into(), false, 0)
@@ -429,9 +430,9 @@ async fn cancel_tuple_removes() {
 async fn provenance_tracking() {
     let (mgr, _) = make_manager();
 
-    // Out an input tuple
+    // Write an input tuple
     let (input, _lease) = mgr
-        .out(
+        .write(
             [("kind".into(), "raw".into())].into(),
             b"raw data".to_vec(),
             60,
@@ -441,9 +442,9 @@ async fn provenance_tracking() {
         .await
         .unwrap();
 
-    // Out a derived tuple with lineage
+    // Write a derived tuple with lineage
     let (derived, _lease) = mgr
-        .out(
+        .write(
             [("kind".into(), "processed".into())].into(),
             b"processed data".to_vec(),
             60,
@@ -456,4 +457,57 @@ async fn provenance_tracking() {
     assert_eq!(derived.written_by, "pipeline");
     assert_eq!(derived.input_tuple_id, Some(input.tuple_id));
     println!("\n[demo] Provenance: lineage tracked ✓");
+}
+
+// ── Test 13: contents — bulk read ───────────────────────────────────────────
+
+#[tokio::test]
+async fn contents_bulk_read() {
+    let (mgr, _) = make_manager();
+
+    // Write 3 price tuples and 1 task tuple
+    for ticker in &["AAPL", "TSLA", "GOOG"] {
+        mgr.write(
+            [("kind".into(), "price".into()), ("ticker".into(), ticker.to_string())].into(),
+            vec![],
+            60,
+            "feed".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    mgr.write(
+        [("kind".into(), "task".into())].into(),
+        vec![],
+        60,
+        "scheduler".into(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Contents with price template should return 3
+    let prices = mgr
+        .contents([("kind".into(), "price".into())].into())
+        .await
+        .unwrap();
+    assert_eq!(prices.len(), 3);
+    println!("\n[demo] Contents: got {} price tuples ✓", prices.len());
+
+    // Contents with empty template should return all 4
+    let all = mgr
+        .contents(Default::default())
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 4);
+    println!("[demo] Contents: got {} total tuples ✓", all.len());
+
+    // Contents with no-match template should return 0
+    let none = mgr
+        .contents([("kind".into(), "nope".into())].into())
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+    println!("[demo] Contents: empty for no-match ✓");
 }
