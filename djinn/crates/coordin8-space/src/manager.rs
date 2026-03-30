@@ -227,15 +227,21 @@ impl SpaceManager {
 
     /// Abort a transaction's Space operations: discard uncommitted writes (cancel
     /// their leases) and restore taken tuples back to the visible store.
+    /// Restored tuples are broadcast to wake any blocked readers/takers.
     pub async fn abort_space_txn(&self, txn_id: &str) -> Result<(), Error> {
-        let discarded = self.store.abort_txn(txn_id).await?;
+        let (discarded, restored) = self.store.abort_txn(txn_id).await?;
 
         // Cancel leases on discarded uncommitted tuples.
         for record in &discarded {
             let _ = self.lease_manager.cancel(&record.lease_id).await;
         }
 
-        debug!(txn_id, discarded = discarded.len(), "space txn aborted");
+        // Broadcast restored tuples — wake blocked read/take waiters.
+        for record in &restored {
+            let _ = self.tuple_tx.send(record.clone());
+        }
+
+        debug!(txn_id, discarded = discarded.len(), restored = restored.len(), "space txn aborted");
         Ok(())
     }
 

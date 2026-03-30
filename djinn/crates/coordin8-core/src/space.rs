@@ -82,8 +82,9 @@ pub trait SpaceStore: Send + Sync {
     async fn commit_txn(&self, txn_id: &str) -> Result<Vec<TupleRecord>, Error>;
 
     /// Abort a transaction: discard uncommitted writes, restore taken tuples.
-    /// Returns the discarded uncommitted tuples (for lease cleanup).
-    async fn abort_txn(&self, txn_id: &str) -> Result<Vec<TupleRecord>, Error>;
+    /// Returns (discarded_uncommitted, restored_taken).
+    /// Discarded tuples need lease cleanup; restored tuples need broadcasting.
+    async fn abort_txn(&self, txn_id: &str) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error>;
 
     /// Check if this store has any uncommitted state for the given transaction.
     async fn has_txn(&self, txn_id: &str) -> Result<bool, Error>;

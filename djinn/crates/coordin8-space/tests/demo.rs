@@ -1028,7 +1028,221 @@ async fn txn_cross_process_shared_txn() {
     println!("[demo] Cross-process shared txn passed ✓");
 }
 
-// ── Test 23: contents includes uncommitted under txn ────────────────────────
+// ── Test 23: shared txn abort — writer writes, taker takes, txn aborts ──────
+// Both operate under the same txn. Abort = tuple never existed. The taker's
+// application must handle the abort (retry, compensate, etc).
+
+#[tokio::test]
+async fn txn_shared_abort_voids_everything() {
+    let (mgr, _) = make_manager();
+    let txn = "txn-doomed".to_string();
+
+    // ── Writer writes under shared txn ──────────────────────────────────────
+    mgr.write(
+        [("kind".into(), "payment".into()), ("id".into(), "99".into())].into(),
+        b"$500".to_vec(),
+        60,
+        "writer".into(),
+        None,
+        Some(txn.clone()),
+    )
+    .await
+    .unwrap();
+    println!("\n[demo] Writer: wrote payment under shared txn");
+
+    // ── Taker takes under same txn → gets it ────────────────────────────────
+    let taken = mgr
+        .take(
+            [("kind".into(), "payment".into())].into(),
+            false,
+            0,
+            Some(txn.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(taken.is_some(), "taker should get tuple under shared txn");
+    assert_eq!(taken.unwrap().attrs["id"], "99");
+    println!("[demo] Taker: took payment under shared txn ✓");
+
+    // ── Abort the shared transaction ────────────────────────────────────────
+    // Writer decided to abort. Everything under this txn evaporates.
+    mgr.abort_space_txn(&txn).await.unwrap();
+    println!("[demo] Shared txn aborted ✓");
+
+    // ── Tuple never existed — nothing to see anywhere ───────────────────────
+    let r = mgr
+        .read([("kind".into(), "payment".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(r.is_none(), "tuple never existed after abort");
+
+    let r = mgr
+        .read(
+            [("kind".into(), "payment".into())].into(),
+            false,
+            0,
+            Some(txn.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(r.is_none(), "tuple gone even under the aborted txn");
+
+    println!("[demo] Final: tuple never existed — taker's work is void ✓");
+    println!("[demo] Shared txn abort passed ✓");
+}
+
+// ── Test 24: separate txns — writer commits, taker aborts → tuple restored ──
+// Writer writes + commits (tuple visible). Taker takes under its own txn, then
+// aborts → tuple goes back. The take never happened.
+
+#[tokio::test]
+async fn txn_taker_abort_restores_committed_tuple() {
+    let (mgr, _) = make_manager();
+    let writer_txn = "txn-writer".to_string();
+    let taker_txn = "txn-taker".to_string();
+
+    // ── Writer writes under its txn and commits ─────────────────────────────
+    mgr.write(
+        [("kind".into(), "invoice".into()), ("id".into(), "777".into())].into(),
+        b"invoice data".to_vec(),
+        60,
+        "billing".into(),
+        None,
+        Some(writer_txn.clone()),
+    )
+    .await
+    .unwrap();
+
+    // Not visible yet
+    let r = mgr
+        .read([("kind".into(), "invoice".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(r.is_none(), "not visible before writer commits");
+    println!("\n[demo] Writer: wrote invoice, not yet visible ✓");
+
+    // Writer commits
+    mgr.commit_space_txn(&writer_txn).await.unwrap();
+    println!("[demo] Writer: committed ✓");
+
+    // Now visible
+    let r = mgr
+        .read([("kind".into(), "invoice".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(r.is_some(), "visible after writer commits");
+    println!("[demo] Invoice now visible ✓");
+
+    // ── Taker takes under its own txn ───────────────────────────────────────
+    let taken = mgr
+        .take(
+            [("kind".into(), "invoice".into())].into(),
+            false,
+            0,
+            Some(taker_txn.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(taken.is_some(), "taker claims invoice under its own txn");
+    println!("[demo] Taker: took invoice under taker txn ✓");
+
+    // Tuple invisible to outsiders (taken, pending taker's commit)
+    let r = mgr
+        .read([("kind".into(), "invoice".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(r.is_none(), "invisible while taken under txn");
+    println!("[demo] Outsider: can't see it (taken, pending) ✓");
+
+    // ── Taker aborts — tuple restored to committed store ────────────────────
+    mgr.abort_space_txn(&taker_txn).await.unwrap();
+    println!("[demo] Taker: aborted ✓");
+
+    // Tuple is back
+    let r = mgr
+        .read([("kind".into(), "invoice".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(r.is_some(), "tuple restored after taker abort");
+    assert_eq!(r.unwrap().attrs["id"], "777");
+    println!("[demo] Invoice restored — take never happened ✓");
+
+    println!("[demo] Taker abort restores committed tuple passed ✓");
+}
+
+// ── Test 25: blocked taker unblocks when txn take aborts ────────────────────
+// Writer writes (committed). Taker 1 takes under txn. Taker 2 blocks (no match).
+// Taker 1 aborts → tuple restored → taker 2 wakes up and claims it.
+
+#[tokio::test]
+async fn txn_abort_unblocks_waiting_taker() {
+    let (mgr, _) = make_manager();
+    let taker1_txn = "txn-taker1".to_string();
+
+    // ── Writer writes a committed tuple ─────────────────────────────────────
+    mgr.write(
+        [("kind".into(), "job".into()), ("id".into(), "101".into())].into(),
+        vec![],
+        60,
+        "dispatcher".into(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    println!("\n[demo] Writer: wrote job 101 (committed)");
+
+    // ── Taker 1: takes under its txn ────────────────────────────────────────
+    let taken = mgr
+        .take(
+            [("kind".into(), "job".into())].into(),
+            false,
+            0,
+            Some(taker1_txn.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(taken.is_some());
+    println!("[demo] Taker 1: took job under txn ✓");
+
+    // ── Taker 2: blocking take (no txn) — nothing available, will block ────
+    let mgr2 = Arc::clone(&mgr);
+    let taker2 = tokio::spawn(async move {
+        mgr2.take([("kind".into(), "job".into())].into(), true, 5000, None)
+            .await
+            .unwrap()
+    });
+
+    // Give taker 2 time to subscribe to the broadcast
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    println!("[demo] Taker 2: blocking, waiting for a job...");
+
+    // ── Taker 1: aborts → tuple restored → broadcast → taker 2 wakes ───────
+    mgr.abort_space_txn(&taker1_txn).await.unwrap();
+    println!("[demo] Taker 1: aborted ✓");
+
+    // ── Taker 2: should wake up and get the tuple ───────────────────────────
+    let result = tokio::time::timeout(Duration::from_secs(2), taker2)
+        .await
+        .expect("taker 2 should not timeout")
+        .unwrap();
+
+    assert!(result.is_some(), "taker 2 should get the restored tuple");
+    assert_eq!(result.unwrap().attrs["id"], "101");
+    println!("[demo] Taker 2: woke up and got job 101 ✓");
+
+    // ── Tuple is now gone (taker 2 took it) ─────────────────────────────────
+    let r = mgr
+        .read([("kind".into(), "job".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(r.is_none(), "tuple consumed by taker 2");
+    println!("[demo] Final: job consumed by taker 2 ✓");
+
+    println!("[demo] Abort-unblocks-waiting-taker passed ✓");
+}
+
+// ── Test 26: contents includes uncommitted under txn ────────────────────────
 
 #[tokio::test]
 async fn txn_contents_includes_uncommitted() {

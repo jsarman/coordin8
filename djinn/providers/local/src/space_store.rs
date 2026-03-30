@@ -201,7 +201,7 @@ impl SpaceStore for InMemorySpaceStore {
         Ok(flushed)
     }
 
-    async fn abort_txn(&self, txn_id: &str) -> Result<Vec<TupleRecord>, Error> {
+    async fn abort_txn(&self, txn_id: &str) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error> {
         // Discard uncommitted writes — return them for lease cleanup.
         let discarded = if let Some((_, tuples)) = self.uncommitted.remove(txn_id) {
             tuples
@@ -210,16 +210,19 @@ impl SpaceStore for InMemorySpaceStore {
         };
 
         // Restore taken tuples back to the committed store.
-        if let Some((_, taken)) = self.txn_taken.remove(txn_id) {
-            for record in taken {
+        let restored = if let Some((_, taken)) = self.txn_taken.remove(txn_id) {
+            for record in &taken {
                 let tuple_id = record.tuple_id.clone();
                 let lease_id = record.lease_id.clone();
-                self.tuples.insert(tuple_id.clone(), record);
+                self.tuples.insert(tuple_id.clone(), record.clone());
                 self.lease_index.insert(lease_id, tuple_id);
             }
-        }
+            taken
+        } else {
+            vec![]
+        };
 
-        Ok(discarded)
+        Ok((discarded, restored))
     }
 
     async fn has_txn(&self, txn_id: &str) -> Result<bool, Error> {
