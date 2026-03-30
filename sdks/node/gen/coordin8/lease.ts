@@ -49,7 +49,14 @@ export interface Lease {
   leaseId: string;
   resourceId: string;
   grantedAt: Date | undefined;
-  expiresAt: Date | undefined;
+  expiresAt:
+    | Date
+    | undefined;
+  /**
+   * The TTL actually granted by the server (may be less than requested).
+   * 0 = FOREVER (no expiry).
+   */
+  ttlSeconds: number;
 }
 
 export interface ExpiryEvent {
@@ -321,7 +328,7 @@ export const WatchExpiryRequest = {
 };
 
 function createBaseLease(): Lease {
-  return { leaseId: "", resourceId: "", grantedAt: undefined, expiresAt: undefined };
+  return { leaseId: "", resourceId: "", grantedAt: undefined, expiresAt: undefined, ttlSeconds: 0 };
 }
 
 export const Lease = {
@@ -337,6 +344,9 @@ export const Lease = {
     }
     if (message.expiresAt !== undefined) {
       Timestamp.encode(toTimestamp(message.expiresAt), writer.uint32(34).fork()).ldelim();
+    }
+    if (message.ttlSeconds !== 0) {
+      writer.uint32(40).uint64(message.ttlSeconds);
     }
     return writer;
   },
@@ -376,6 +386,13 @@ export const Lease = {
 
           message.expiresAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
           continue;
+        case 5:
+          if (tag !== 40) {
+            break;
+          }
+
+          message.ttlSeconds = longToNumber(reader.uint64() as Long);
+          continue;
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -391,6 +408,7 @@ export const Lease = {
       resourceId: isSet(object.resourceId) ? globalThis.String(object.resourceId) : "",
       grantedAt: isSet(object.grantedAt) ? fromJsonTimestamp(object.grantedAt) : undefined,
       expiresAt: isSet(object.expiresAt) ? fromJsonTimestamp(object.expiresAt) : undefined,
+      ttlSeconds: isSet(object.ttlSeconds) ? globalThis.Number(object.ttlSeconds) : 0,
     };
   },
 
@@ -408,6 +426,9 @@ export const Lease = {
     if (message.expiresAt !== undefined) {
       obj.expiresAt = message.expiresAt.toISOString();
     }
+    if (message.ttlSeconds !== 0) {
+      obj.ttlSeconds = Math.round(message.ttlSeconds);
+    }
     return obj;
   },
 
@@ -420,6 +441,7 @@ export const Lease = {
     message.resourceId = object.resourceId ?? "";
     message.grantedAt = object.grantedAt ?? undefined;
     message.expiresAt = object.expiresAt ?? undefined;
+    message.ttlSeconds = object.ttlSeconds ?? 0;
     return message;
   },
 };

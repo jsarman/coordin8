@@ -7,6 +7,7 @@ export interface Lease {
   resourceId: string;
   grantedAt?: Date;
   expiresAt?: Date;
+  ttlSeconds: number;
 }
 
 function toLease(r: ProtoLease): Lease {
@@ -15,6 +16,7 @@ function toLease(r: ProtoLease): Lease {
     resourceId: r.resourceId,
     grantedAt: r.grantedAt ?? undefined,
     expiresAt: r.expiresAt ?? undefined,
+    ttlSeconds: r.ttlSeconds,
   };
 }
 

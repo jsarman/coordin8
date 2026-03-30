@@ -29,10 +29,32 @@ export interface RegisterRequest {
   interface: string;
   attrs: { [key: string]: string };
   ttlSeconds: number;
-  transport: TransportDescriptor | undefined;
+  transport:
+    | TransportDescriptor
+    | undefined;
+  /** Set to update an existing entry (re-registration). Leave empty for new. */
+  capabilityId: string;
 }
 
 export interface RegisterRequest_AttrsEntry {
+  key: string;
+  value: string;
+}
+
+export interface RegisterResponse {
+  capabilityId: string;
+  lease: Lease | undefined;
+}
+
+export interface ModifyAttrsRequest {
+  capabilityId: string;
+  /** Attributes to add or update (merged with existing). */
+  addAttrs: { [key: string]: string };
+  /** Attribute keys to remove. */
+  removeAttrs: string[];
+}
+
+export interface ModifyAttrsRequest_AddAttrsEntry {
   key: string;
   value: string;
 }
@@ -91,7 +113,7 @@ export interface RegistryEvent {
 export enum RegistryEvent_EventType {
   REGISTERED = 0,
   EXPIRED = 1,
-  RENEWED = 2,
+  MODIFIED = 2,
   UNRECOGNIZED = -1,
 }
 
@@ -104,8 +126,8 @@ export function registryEvent_EventTypeFromJSON(object: any): RegistryEvent_Even
     case "EXPIRED":
       return RegistryEvent_EventType.EXPIRED;
     case 2:
-    case "RENEWED":
-      return RegistryEvent_EventType.RENEWED;
+    case "MODIFIED":
+      return RegistryEvent_EventType.MODIFIED;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -119,8 +141,8 @@ export function registryEvent_EventTypeToJSON(object: RegistryEvent_EventType): 
       return "REGISTERED";
     case RegistryEvent_EventType.EXPIRED:
       return "EXPIRED";
-    case RegistryEvent_EventType.RENEWED:
-      return "RENEWED";
+    case RegistryEvent_EventType.MODIFIED:
+      return "MODIFIED";
     case RegistryEvent_EventType.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -128,7 +150,7 @@ export function registryEvent_EventTypeToJSON(object: RegistryEvent_EventType): 
 }
 
 function createBaseRegisterRequest(): RegisterRequest {
-  return { interface: "", attrs: {}, ttlSeconds: 0, transport: undefined };
+  return { interface: "", attrs: {}, ttlSeconds: 0, transport: undefined, capabilityId: "" };
 }
 
 export const RegisterRequest = {
@@ -144,6 +166,9 @@ export const RegisterRequest = {
     }
     if (message.transport !== undefined) {
       TransportDescriptor.encode(message.transport, writer.uint32(34).fork()).ldelim();
+    }
+    if (message.capabilityId !== "") {
+      writer.uint32(42).string(message.capabilityId);
     }
     return writer;
   },
@@ -186,6 +211,13 @@ export const RegisterRequest = {
 
           message.transport = TransportDescriptor.decode(reader, reader.uint32());
           continue;
+        case 5:
+          if (tag !== 42) {
+            break;
+          }
+
+          message.capabilityId = reader.string();
+          continue;
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -206,6 +238,7 @@ export const RegisterRequest = {
         : {},
       ttlSeconds: isSet(object.ttlSeconds) ? globalThis.Number(object.ttlSeconds) : 0,
       transport: isSet(object.transport) ? TransportDescriptor.fromJSON(object.transport) : undefined,
+      capabilityId: isSet(object.capabilityId) ? globalThis.String(object.capabilityId) : "",
     };
   },
 
@@ -229,6 +262,9 @@ export const RegisterRequest = {
     if (message.transport !== undefined) {
       obj.transport = TransportDescriptor.toJSON(message.transport);
     }
+    if (message.capabilityId !== "") {
+      obj.capabilityId = message.capabilityId;
+    }
     return obj;
   },
 
@@ -248,6 +284,7 @@ export const RegisterRequest = {
     message.transport = (object.transport !== undefined && object.transport !== null)
       ? TransportDescriptor.fromPartial(object.transport)
       : undefined;
+    message.capabilityId = object.capabilityId ?? "";
     return message;
   },
 };
@@ -320,6 +357,268 @@ export const RegisterRequest_AttrsEntry = {
   },
   fromPartial<I extends Exact<DeepPartial<RegisterRequest_AttrsEntry>, I>>(object: I): RegisterRequest_AttrsEntry {
     const message = createBaseRegisterRequest_AttrsEntry();
+    message.key = object.key ?? "";
+    message.value = object.value ?? "";
+    return message;
+  },
+};
+
+function createBaseRegisterResponse(): RegisterResponse {
+  return { capabilityId: "", lease: undefined };
+}
+
+export const RegisterResponse = {
+  encode(message: RegisterResponse, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.capabilityId !== "") {
+      writer.uint32(10).string(message.capabilityId);
+    }
+    if (message.lease !== undefined) {
+      Lease.encode(message.lease, writer.uint32(18).fork()).ldelim();
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): RegisterResponse {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRegisterResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag !== 10) {
+            break;
+          }
+
+          message.capabilityId = reader.string();
+          continue;
+        case 2:
+          if (tag !== 18) {
+            break;
+          }
+
+          message.lease = Lease.decode(reader, reader.uint32());
+          continue;
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RegisterResponse {
+    return {
+      capabilityId: isSet(object.capabilityId) ? globalThis.String(object.capabilityId) : "",
+      lease: isSet(object.lease) ? Lease.fromJSON(object.lease) : undefined,
+    };
+  },
+
+  toJSON(message: RegisterResponse): unknown {
+    const obj: any = {};
+    if (message.capabilityId !== "") {
+      obj.capabilityId = message.capabilityId;
+    }
+    if (message.lease !== undefined) {
+      obj.lease = Lease.toJSON(message.lease);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RegisterResponse>, I>>(base?: I): RegisterResponse {
+    return RegisterResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RegisterResponse>, I>>(object: I): RegisterResponse {
+    const message = createBaseRegisterResponse();
+    message.capabilityId = object.capabilityId ?? "";
+    message.lease = (object.lease !== undefined && object.lease !== null) ? Lease.fromPartial(object.lease) : undefined;
+    return message;
+  },
+};
+
+function createBaseModifyAttrsRequest(): ModifyAttrsRequest {
+  return { capabilityId: "", addAttrs: {}, removeAttrs: [] };
+}
+
+export const ModifyAttrsRequest = {
+  encode(message: ModifyAttrsRequest, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.capabilityId !== "") {
+      writer.uint32(10).string(message.capabilityId);
+    }
+    Object.entries(message.addAttrs).forEach(([key, value]) => {
+      ModifyAttrsRequest_AddAttrsEntry.encode({ key: key as any, value }, writer.uint32(18).fork()).ldelim();
+    });
+    for (const v of message.removeAttrs) {
+      writer.uint32(26).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): ModifyAttrsRequest {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseModifyAttrsRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag !== 10) {
+            break;
+          }
+
+          message.capabilityId = reader.string();
+          continue;
+        case 2:
+          if (tag !== 18) {
+            break;
+          }
+
+          const entry2 = ModifyAttrsRequest_AddAttrsEntry.decode(reader, reader.uint32());
+          if (entry2.value !== undefined) {
+            message.addAttrs[entry2.key] = entry2.value;
+          }
+          continue;
+        case 3:
+          if (tag !== 26) {
+            break;
+          }
+
+          message.removeAttrs.push(reader.string());
+          continue;
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ModifyAttrsRequest {
+    return {
+      capabilityId: isSet(object.capabilityId) ? globalThis.String(object.capabilityId) : "",
+      addAttrs: isObject(object.addAttrs)
+        ? Object.entries(object.addAttrs).reduce<{ [key: string]: string }>((acc, [key, value]) => {
+          acc[key] = String(value);
+          return acc;
+        }, {})
+        : {},
+      removeAttrs: globalThis.Array.isArray(object?.removeAttrs)
+        ? object.removeAttrs.map((e: any) => globalThis.String(e))
+        : [],
+    };
+  },
+
+  toJSON(message: ModifyAttrsRequest): unknown {
+    const obj: any = {};
+    if (message.capabilityId !== "") {
+      obj.capabilityId = message.capabilityId;
+    }
+    if (message.addAttrs) {
+      const entries = Object.entries(message.addAttrs);
+      if (entries.length > 0) {
+        obj.addAttrs = {};
+        entries.forEach(([k, v]) => {
+          obj.addAttrs[k] = v;
+        });
+      }
+    }
+    if (message.removeAttrs?.length) {
+      obj.removeAttrs = message.removeAttrs;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ModifyAttrsRequest>, I>>(base?: I): ModifyAttrsRequest {
+    return ModifyAttrsRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ModifyAttrsRequest>, I>>(object: I): ModifyAttrsRequest {
+    const message = createBaseModifyAttrsRequest();
+    message.capabilityId = object.capabilityId ?? "";
+    message.addAttrs = Object.entries(object.addAttrs ?? {}).reduce<{ [key: string]: string }>((acc, [key, value]) => {
+      if (value !== undefined) {
+        acc[key] = globalThis.String(value);
+      }
+      return acc;
+    }, {});
+    message.removeAttrs = object.removeAttrs?.map((e) => e) || [];
+    return message;
+  },
+};
+
+function createBaseModifyAttrsRequest_AddAttrsEntry(): ModifyAttrsRequest_AddAttrsEntry {
+  return { key: "", value: "" };
+}
+
+export const ModifyAttrsRequest_AddAttrsEntry = {
+  encode(message: ModifyAttrsRequest_AddAttrsEntry, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.key !== "") {
+      writer.uint32(10).string(message.key);
+    }
+    if (message.value !== "") {
+      writer.uint32(18).string(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): ModifyAttrsRequest_AddAttrsEntry {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseModifyAttrsRequest_AddAttrsEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag !== 10) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        case 2:
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = reader.string();
+          continue;
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ModifyAttrsRequest_AddAttrsEntry {
+    return {
+      key: isSet(object.key) ? globalThis.String(object.key) : "",
+      value: isSet(object.value) ? globalThis.String(object.value) : "",
+    };
+  },
+
+  toJSON(message: ModifyAttrsRequest_AddAttrsEntry): unknown {
+    const obj: any = {};
+    if (message.key !== "") {
+      obj.key = message.key;
+    }
+    if (message.value !== "") {
+      obj.value = message.value;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ModifyAttrsRequest_AddAttrsEntry>, I>>(
+    base?: I,
+  ): ModifyAttrsRequest_AddAttrsEntry {
+    return ModifyAttrsRequest_AddAttrsEntry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ModifyAttrsRequest_AddAttrsEntry>, I>>(
+    object: I,
+  ): ModifyAttrsRequest_AddAttrsEntry {
+    const message = createBaseModifyAttrsRequest_AddAttrsEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "";
     return message;
@@ -1080,15 +1379,29 @@ export const RegistryEvent = {
 
 export type RegistryServiceService = typeof RegistryServiceService;
 export const RegistryServiceService = {
-  /** Register a service. Returns a lease — stop renewing to disappear. */
+  /**
+   * Register a service. Returns a lease — stop renewing to disappear.
+   * If capability_id is set, updates the existing entry in-place (re-registration).
+   * If empty, creates a new entry with a server-assigned capability_id.
+   */
   register: {
     path: "/coordin8.RegistryService/Register",
     requestStream: false,
     responseStream: false,
     requestSerialize: (value: RegisterRequest) => Buffer.from(RegisterRequest.encode(value).finish()),
     requestDeserialize: (value: Buffer) => RegisterRequest.decode(value),
-    responseSerialize: (value: Lease) => Buffer.from(Lease.encode(value).finish()),
-    responseDeserialize: (value: Buffer) => Lease.decode(value),
+    responseSerialize: (value: RegisterResponse) => Buffer.from(RegisterResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => RegisterResponse.decode(value),
+  },
+  /** Modify attributes on an existing registration without re-registering. */
+  modifyAttrs: {
+    path: "/coordin8.RegistryService/ModifyAttrs",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: ModifyAttrsRequest) => Buffer.from(ModifyAttrsRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => ModifyAttrsRequest.decode(value),
+    responseSerialize: (value: Capability) => Buffer.from(Capability.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => Capability.decode(value),
   },
   /** Lookup returns the first matching capability. */
   lookup: {
@@ -1123,8 +1436,14 @@ export const RegistryServiceService = {
 } as const;
 
 export interface RegistryServiceServer extends UntypedServiceImplementation {
-  /** Register a service. Returns a lease — stop renewing to disappear. */
-  register: handleUnaryCall<RegisterRequest, Lease>;
+  /**
+   * Register a service. Returns a lease — stop renewing to disappear.
+   * If capability_id is set, updates the existing entry in-place (re-registration).
+   * If empty, creates a new entry with a server-assigned capability_id.
+   */
+  register: handleUnaryCall<RegisterRequest, RegisterResponse>;
+  /** Modify attributes on an existing registration without re-registering. */
+  modifyAttrs: handleUnaryCall<ModifyAttrsRequest, Capability>;
   /** Lookup returns the first matching capability. */
   lookup: handleUnaryCall<LookupRequest, Capability>;
   /** LookupAll streams all currently matching capabilities. */
@@ -1134,18 +1453,41 @@ export interface RegistryServiceServer extends UntypedServiceImplementation {
 }
 
 export interface RegistryServiceClient extends Client {
-  /** Register a service. Returns a lease — stop renewing to disappear. */
-  register(request: RegisterRequest, callback: (error: ServiceError | null, response: Lease) => void): ClientUnaryCall;
+  /**
+   * Register a service. Returns a lease — stop renewing to disappear.
+   * If capability_id is set, updates the existing entry in-place (re-registration).
+   * If empty, creates a new entry with a server-assigned capability_id.
+   */
+  register(
+    request: RegisterRequest,
+    callback: (error: ServiceError | null, response: RegisterResponse) => void,
+  ): ClientUnaryCall;
   register(
     request: RegisterRequest,
     metadata: Metadata,
-    callback: (error: ServiceError | null, response: Lease) => void,
+    callback: (error: ServiceError | null, response: RegisterResponse) => void,
   ): ClientUnaryCall;
   register(
     request: RegisterRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
-    callback: (error: ServiceError | null, response: Lease) => void,
+    callback: (error: ServiceError | null, response: RegisterResponse) => void,
+  ): ClientUnaryCall;
+  /** Modify attributes on an existing registration without re-registering. */
+  modifyAttrs(
+    request: ModifyAttrsRequest,
+    callback: (error: ServiceError | null, response: Capability) => void,
+  ): ClientUnaryCall;
+  modifyAttrs(
+    request: ModifyAttrsRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: Capability) => void,
+  ): ClientUnaryCall;
+  modifyAttrs(
+    request: ModifyAttrsRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: Capability) => void,
   ): ClientUnaryCall;
   /** Lookup returns the first matching capability. */
   lookup(request: LookupRequest, callback: (error: ServiceError | null, response: Capability) => void): ClientUnaryCall;
