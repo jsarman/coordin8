@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package coordin8;
+
+import "coordin8/lease.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/coordin8/proto/coordin8";
+
+// SpaceService — distributed reactive tuple store.
+// Modeled after net.jini.space.JavaSpace (JavaSpaces Specification).
+//
+// Producers out() tuples; consumers take() or read() by template;
+// watchers get push streams on match. Every tuple is leased through LeaseMgr.
+// "Describe what you need, not where it is."
+service SpaceService {
+    // Write a leased tuple into the Space.
+    rpc Out(OutRequest)                   returns (OutResponse);
+
+    // Non-destructive read by template. Blocking or non-blocking.
+    rpc Read(ReadRequest)                 returns (ReadResponse);
+
+    // Atomic claim+remove by template. Blocking or non-blocking.
+    rpc Take(TakeRequest)                 returns (TakeResponse);
+
+    // Server-streaming push on template match (appearance / expiration events).
+    rpc Watch(WatchRequest)               returns (stream SpaceEvent);
+
+    // Renew a tuple's lease.
+    rpc RenewTuple(RenewTupleRequest)     returns (Lease);
+
+    // Cancel a tuple (remove from Space and cancel its lease).
+    rpc CancelTuple(CancelTupleRequest)   returns (google.protobuf.Empty);
+}
+
+// ── Messages ─────────────────────────────────────────────────────────────────
+
+message Tuple {
+    string              tuple_id   = 1;
+    map<string, string> attrs      = 2;   // indexed fields, template matching target
+    bytes               payload    = 3;   // opaque data handle (optional)
+    Provenance          provenance = 4;
+    Lease               lease      = 5;
+}
+
+message Provenance {
+    string                    written_by     = 1;
+    google.protobuf.Timestamp written_at     = 2;
+    string                    input_tuple_id = 3;  // lineage — which tuple produced this one
+}
+
+message OutRequest {
+    map<string, string> attrs          = 1;
+    bytes               payload        = 2;
+    uint64              ttl_seconds    = 3;
+    string              written_by     = 4;
+    string              input_tuple_id = 5;  // optional lineage
+}
+
+message OutResponse {
+    Tuple tuple = 1;
+}
+
+message ReadRequest {
+    map<string, string> template   = 1;
+    bool                wait       = 2;  // false = readIfExists
+    uint64              timeout_ms = 3;  // 0 + wait=true = indefinite
+}
+
+message ReadResponse {
+    Tuple tuple = 1;  // absent = no match (non-blocking)
+}
+
+message TakeRequest {
+    map<string, string> template   = 1;
+    bool                wait       = 2;
+    uint64              timeout_ms = 3;
+}
+
+message TakeResponse {
+    Tuple tuple = 1;
+}
+
+// ── Watch ────────────────────────────────────────────────────────────────────
+
+enum SpaceEventType {
+    APPEARANCE = 0;
+    EXPIRATION = 1;
+}
+
+message WatchRequest {
+    map<string, string> template     = 1;
+    SpaceEventType      on           = 2;
+    uint64              ttl_seconds  = 3;  // lease on the watch itself
+}
+
+message SpaceEvent {
+    SpaceEventType                type        = 1;
+    Tuple                         tuple       = 2;
+    google.protobuf.Timestamp     occurred_at = 3;
+}
+
+// ── Lease management ─────────────────────────────────────────────────────────
+
+message RenewTupleRequest {
+    string tuple_id    = 1;
+    uint64 ttl_seconds = 2;
+}
+
+message CancelTupleRequest {
+    string tuple_id = 1;
+}

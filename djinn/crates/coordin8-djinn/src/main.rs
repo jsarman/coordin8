@@ -12,13 +12,16 @@ use coordin8_proto::coordin8::event_service_server::EventServiceServer;
 use coordin8_proto::coordin8::lease_service_server::LeaseServiceServer;
 use coordin8_proto::coordin8::proxy_service_server::ProxyServiceServer;
 use coordin8_proto::coordin8::registry_service_server::RegistryServiceServer;
+use coordin8_proto::coordin8::space_service_server::SpaceServiceServer;
 use coordin8_proto::coordin8::transaction_service_server::TransactionServiceServer;
 use coordin8_provider_local::{
-    InMemoryEventStore, InMemoryLeaseStore, InMemoryRegistryStore, InMemoryTxnStore,
+    InMemoryEventStore, InMemoryLeaseStore, InMemoryRegistryStore, InMemorySpaceStore,
+    InMemoryTxnStore,
 };
 use coordin8_proxy::{ProxyConfig, ProxyManager, ProxyServiceImpl};
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
+use coordin8_space::{SpaceManager, SpaceServiceImpl};
 use coordin8_txn::{TxnManager, TxnServiceImpl};
 
 /// Coordin8 boot sequence:
@@ -45,6 +48,7 @@ async fn main() -> Result<()> {
     let registry_store = Arc::new(InMemoryRegistryStore::new());
     let event_store = Arc::new(InMemoryEventStore::new());
     let txn_store = Arc::new(InMemoryTxnStore::new());
+    let space_store = Arc::new(InMemorySpaceStore::new());
     info!("  ✓ Provider: local (in-memory)");
 
     // ── Layer 1: LeaseMgr ────────────────────────────────────────────────────
@@ -81,12 +85,37 @@ async fn main() -> Result<()> {
     let txn_manager = Arc::new(TxnManager::new(txn_store, Arc::clone(&lease_manager)));
     info!("  ✓ TransactionMgr: ready");
 
+    // ── Layer 2c: Space (peer with Registry + EventMgr) ─────────────────────
+    let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
+    let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
+    let space_manager = Arc::new(SpaceManager::new(
+        space_store,
+        Arc::clone(&lease_manager),
+        space_tuple_tx,
+        space_expiry_tx,
+    ));
+
+    // Listen for lease expirations relevant to Space tuples and watches.
+    let space_expiry_mgr = Arc::clone(&space_manager);
+    let mut space_expiry_rx = expiry_tx.subscribe();
+    tokio::spawn(async move {
+        while let Ok(lease) = space_expiry_rx.recv().await {
+            if lease.resource_id.starts_with("space:") {
+                space_expiry_mgr.on_tuple_expired(&lease.lease_id).await;
+            } else if lease.resource_id.starts_with("space-watch:") {
+                space_expiry_mgr.on_watch_expired(&lease.lease_id).await;
+            }
+        }
+    });
+    info!("  ✓ Space: ready");
+
     // ── gRPC servers ─────────────────────────────────────────────────────────
     let lease_addr    = "0.0.0.0:9001".parse()?;
     let registry_addr = "0.0.0.0:9002".parse()?;
     let proxy_addr    = "0.0.0.0:9003".parse()?;
     let txn_addr      = "0.0.0.0:9004".parse()?;
     let event_addr    = "0.0.0.0:9005".parse()?;
+    let space_addr    = "0.0.0.0:9006".parse()?;
 
     let lease_svc =
         LeaseServiceServer::new(LeaseServiceImpl::new(Arc::clone(&lease_manager), expiry_tx));
@@ -98,12 +127,14 @@ async fn main() -> Result<()> {
     let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
     let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(txn_manager));
     let event_svc = EventServiceServer::new(EventServiceImpl::new(event_manager));
+    let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(space_manager));
 
     info!("  ✓ LeaseMgr:      listening on {}", lease_addr);
     info!("  ✓ Registry:      listening on {}", registry_addr);
     info!("  ✓ Proxy:         listening on {}", proxy_addr);
     info!("  ✓ TransactionMgr: listening on {}", txn_addr);
     info!("  ✓ EventMgr:      listening on {}", event_addr);
+    info!("  ✓ Space:         listening on {}", space_addr);
     info!("Djinn ready.");
 
     tokio::try_join!(
@@ -112,6 +143,7 @@ async fn main() -> Result<()> {
         Server::builder().add_service(proxy_svc).serve(proxy_addr),
         Server::builder().add_service(txn_svc).serve(txn_addr),
         Server::builder().add_service(event_svc).serve(event_addr),
+        Server::builder().add_service(space_svc).serve(space_addr),
     )?;
 
     Ok(())

@@ -76,22 +76,27 @@ Jini-inspired one-liner client. Caches proxies by template.
 
 ## Space (Tuple Store)
 
-Distributed reactive coordination store. `out/take/read/watch`.
+Distributed reactive coordination store. `out/take/read/watch`. See `.claude/plans/space/` for full detail.
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Proto: SpaceService definition | Not started | Napkin lines 606-612 |
-| Rust: Space crate | Not started | Reuse template matcher from Registry |
-| out(tuple, txn, ttl) | Not started | Write a fact into the space |
-| take(template, txn, wait) | Not started | Atomic claim + remove |
-| read(template, txn, wait) | Not started | Non-destructive read |
-| watch(template, on) | Not started | Reactive push, appearance + expiry |
-| TTL / lease on tuples | Not started | |
-| Provenance metadata | Not started | Who, when, from what input |
-| Go SDK | Not started | |
-| Java SDK | Not started | |
-| Node SDK | Not started | |
-| CLI: spaces list, read, out, watch | Not started | |
+| Proto: SpaceService definition | Done | `proto/coordin8/space.proto` — 6 RPCs |
+| Rust: Space crate | Done | `coordin8-space` — boots Layer 2c, port 9006 |
+| out(attrs, payload, ttl, written_by, lineage) | Done | Leased, broadcasts to wake blockers |
+| take(template, wait, timeout_ms) | Done | Atomic claim+remove, blocking with race handling |
+| read(template, wait, timeout_ms) | Done | Non-destructive, blocking or non-blocking |
+| watch(template, on, ttl) | Done | Server-streaming push, appearance + expiration |
+| RenewTuple / CancelTuple | Done | Lease management on stored tuples |
+| TTL / lease on tuples + watches | Done | Reaper integration via expiry_tx listener |
+| Provenance metadata | Done | written_by, written_at, input_tuple_id (lineage) |
+| Template matching | Done | Reuses `coordin8_registry::matcher` |
+| InMemorySpaceStore | Done | Race-safe take_match, lease_index for reaper |
+| Integration tests (12) | Done | Full coverage — blocking, race, expiry, template ops |
+| Transaction support (v2) | **Deferred** | txn_id on operations, Space as 2PC participant |
+| Go SDK | **Gap** | |
+| Java SDK | **Gap** | |
+| Node SDK | **Gap** | |
+| CLI: spaces list, read, out, watch | **Gap** | Blocked on SDK |
 
 ---
 
@@ -156,7 +161,7 @@ Pluggable storage backends.
 | InMemoryRegistryStore | Done | |
 | InMemoryEventStore | Done | DashMap + VecDeque mailbox per subscription |
 | InMemoryTxnStore | Done | Participants embedded in TransactionRecord |
-| InMemorySpaceStore | Not started | Needed for Space |
+| InMemorySpaceStore | Done | DashMap + lease_index, race-safe take_match |
 | SQLite (local persistence) | Not started | Napkin mentions, not prioritized |
 | AWS: DynamoDB | Not started | Phase 8 — primary prod provider |
 | AWS: SQS (durable events) | Not started | Phase 8 |
@@ -171,7 +176,7 @@ Pluggable storage backends.
 |------|--------|-------|
 | Dockerfile.djinn | Done | Multi-stage Rust build, protoc v28.3 |
 | Dockerfile.greeter | Done | Multi-stage Go build |
-| docker-compose.yml | Done | Djinn + greeter, ports 9001–9005 + proxy range |
+| docker-compose.yml | Done | Djinn + greeter, ports 9001–9006 + proxy range |
 | host.docker.internal | Done | `extra_hosts: host-gateway` on djinn — 2PC callback routing |
 | .dockerignore | Done | |
 | LocalStack service | Stubbed | Commented out in compose, ready to activate |
@@ -216,7 +221,7 @@ Pluggable storage backends.
 | lease grant/renew/cancel/watch | Done | |
 | registry list/register/lookup/watch | Done | |
 | proxy commands | Not started | Low priority — accessed via SDK |
-| spaces list/read/out/watch | Not started | Blocked on Space |
+| spaces list/read/out/watch | Not started | Blocked on Space SDK |
 | trace \<tuple-id\> | Not started | Blocked on provenance |
 
 ---
@@ -234,7 +239,7 @@ Pluggable storage backends.
 
 ## Higher-Order Patterns
 
-Not in core — built on Space/EventMgr primitives. Blocked until those exist.
+Not in core — built on Space/EventMgr primitives. **Unblocked** — Space v1 and EventMgr are both done.
 
 | Pattern | Status | Description |
 |---------|--------|-------------|
@@ -250,8 +255,10 @@ Not in core — built on Space/EventMgr primitives. Blocked until those exist.
 
 ## Suggested Priority Order
 
-1. **SDK parity gaps** — Java/Node missing keepAlive, watch, registry refresh; EventMgr + TxnMgr SDK clients
-2. **Space** — unlocks the core coordination model (out/take/read/watch)
-3. **AWS Provider** — DynamoDB/SQS/EventBridge for production
-4. **Dashboard** — observability UI
-5. **Higher-order patterns** — Lens, Reflex, Sentry (built on Space + EventMgr)
+1. **Phase 2: Spec Alignment** — Systems test what we have, then align each service to Jini specs bottom-up (Lease → Registry → ServiceDiscovery → Events → Transactions → Space). See `.claude/plans/phase2-spec-alignment/session-1-prep.md`
+2. **SDK parity gaps** — Java/Node missing keepAlive, watch, registry refresh; Space/EventMgr/TxnMgr SDK clients
+3. **Space SDKs + CLI** — Go SpaceClient, then Java/Node, then CLI commands
+4. **AWS Provider** — DynamoDB/SQS/EventBridge for production
+5. **Space v2: Transactions** — txn_id on operations, Space as 2PC participant
+6. **Higher-order patterns** — Lens, Reflex, Sentry (now unblocked by Space + EventMgr)
+7. **Dashboard** — observability UI

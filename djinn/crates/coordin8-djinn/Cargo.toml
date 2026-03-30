@@ -15,6 +15,7 @@ coordin8-registry         = { workspace = true }
 coordin8-proxy            = { workspace = true }
 coordin8-event            = { workspace = true }
 coordin8-txn              = { workspace = true }
+coordin8-space            = { workspace = true }
 coordin8-provider-local   = { workspace = true }
 
 tokio              = { workspace = true }

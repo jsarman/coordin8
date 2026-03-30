@@ -15,7 +15,8 @@ proto: ## Regenerate proto code for all languages
 		$(PROTO_DIR)/coordin8/registry.proto \
 		$(PROTO_DIR)/coordin8/common.proto \
 		$(PROTO_DIR)/coordin8/event.proto \
-		$(PROTO_DIR)/coordin8/transaction.proto
+		$(PROTO_DIR)/coordin8/transaction.proto \
+		$(PROTO_DIR)/coordin8/space.proto
 	@mkdir -p examples/hello-coordin8/go/gen
 	protoc \
 		--go_out=examples/hello-coordin8/go/gen --go_opt=paths=source_relative \

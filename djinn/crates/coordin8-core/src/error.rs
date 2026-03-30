@@ -32,6 +32,12 @@ pub enum Error {
     #[error("transaction aborted: {0}")]
     TransactionAborted(String),
 
+    #[error("tuple not found: {0}")]
+    TupleNotFound(String),
+
+    #[error("watch not found: {0}")]
+    WatchNotFound(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
