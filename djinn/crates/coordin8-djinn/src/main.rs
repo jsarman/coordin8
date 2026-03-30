@@ -21,7 +21,8 @@ use coordin8_provider_local::{
 use coordin8_proxy::{ProxyConfig, ProxyManager, ProxyServiceImpl};
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
-use coordin8_space::{SpaceManager, SpaceServiceImpl};
+use coordin8_proto::coordin8::participant_service_server::ParticipantServiceServer;
+use coordin8_space::{SpaceManager, SpaceParticipantService, SpaceServiceImpl};
 use coordin8_txn::{TxnManager, TxnServiceImpl};
 
 /// Coordin8 boot sequence:
@@ -183,7 +184,8 @@ async fn main() -> Result<()> {
     let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
     let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(txn_manager));
     let event_svc = EventServiceServer::new(EventServiceImpl::new(event_manager));
-    let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(space_manager));
+    let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(Arc::clone(&space_manager)));
+    let space_participant_svc = ParticipantServiceServer::new(SpaceParticipantService::new(space_manager));
 
     info!("  ✓ LeaseMgr:      listening on {}", lease_addr);
     info!("  ✓ Registry:      listening on {}", registry_addr);
@@ -199,7 +201,7 @@ async fn main() -> Result<()> {
         Server::builder().add_service(proxy_svc).serve(proxy_addr),
         Server::builder().add_service(txn_svc).serve(txn_addr),
         Server::builder().add_service(event_svc).serve(event_addr),
-        Server::builder().add_service(space_svc).serve(space_addr),
+        Server::builder().add_service(space_svc).add_service(space_participant_svc).serve(space_addr),
     )?;
 
     Ok(())

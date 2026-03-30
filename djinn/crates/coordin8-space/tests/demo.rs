@@ -2,6 +2,7 @@
 ///
 /// Demonstrates the full cycle:
 ///   write → read → take → blocking take → notify → contents → lease expiry
+///   transactional isolation: uncommitted writes, commit, abort
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,6 +77,7 @@ async fn write_and_read() {
             60,
             "test".into(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -84,7 +86,7 @@ async fn write_and_read() {
 
     // Read by template
     let found = mgr
-        .read([("kind".into(), "price".into())].into(), false, 0)
+        .read([("kind".into(), "price".into())].into(), false, 0, None)
         .await
         .unwrap();
 
@@ -107,13 +109,14 @@ async fn write_and_take() {
         60,
         "producer".into(),
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Take it
     let taken = mgr
-        .take([("kind".into(), "task".into())].into(), false, 0)
+        .take([("kind".into(), "task".into())].into(), false, 0, None)
         .await
         .unwrap();
     assert!(taken.is_some());
@@ -121,7 +124,7 @@ async fn write_and_take() {
 
     // Second take should return None
     let second = mgr
-        .take([("kind".into(), "task".into())].into(), false, 0)
+        .take([("kind".into(), "task".into())].into(), false, 0, None)
         .await
         .unwrap();
     assert!(second.is_none());
@@ -135,7 +138,7 @@ async fn read_nonblocking_empty() {
     let (mgr, _) = make_manager();
 
     let result = mgr
-        .read([("kind".into(), "nope".into())].into(), false, 0)
+        .read([("kind".into(), "nope".into())].into(), false, 0, None)
         .await
         .unwrap();
     assert!(result.is_none());
@@ -149,7 +152,7 @@ async fn take_nonblocking_empty() {
     let (mgr, _) = make_manager();
 
     let result = mgr
-        .take([("kind".into(), "nope".into())].into(), false, 0)
+        .take([("kind".into(), "nope".into())].into(), false, 0, None)
         .await
         .unwrap();
     assert!(result.is_none());
@@ -165,7 +168,7 @@ async fn take_blocking_unblocks_on_write() {
 
     // Spawn a blocking taker
     let taker = tokio::spawn(async move {
-        mgr2.take([("kind".into(), "job".into())].into(), true, 5000)
+        mgr2.take([("kind".into(), "job".into())].into(), true, 5000, None)
             .await
             .unwrap()
     });
@@ -179,6 +182,7 @@ async fn take_blocking_unblocks_on_write() {
         vec![],
         60,
         "dispatcher".into(),
+        None,
         None,
     )
     .await
@@ -198,7 +202,7 @@ async fn read_blocking_timeout() {
 
     let start = std::time::Instant::now();
     let result = mgr
-        .read([("kind".into(), "ghost".into())].into(), true, 100)
+        .read([("kind".into(), "ghost".into())].into(), true, 100, None)
         .await
         .unwrap();
 
@@ -224,13 +228,14 @@ async fn template_matching() {
         60,
         "test".into(),
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Exact match
     let exact = mgr
-        .read([("kind".into(), "sensor".into())].into(), false, 0)
+        .read([("kind".into(), "sensor".into())].into(), false, 0, None)
         .await
         .unwrap();
     assert!(exact.is_some());
@@ -241,6 +246,7 @@ async fn template_matching() {
             [("metrics".into(), "contains:humidity".into())].into(),
             false,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -252,6 +258,7 @@ async fn template_matching() {
             [("location".into(), "starts_with:tampa".into())].into(),
             false,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -263,6 +270,7 @@ async fn template_matching() {
             [("kind".into(), "sensor".into()), ("location".into(), "*".into())].into(),
             false,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -270,7 +278,7 @@ async fn template_matching() {
 
     // No match
     let miss = mgr
-        .read([("kind".into(), "camera".into())].into(), false, 0)
+        .read([("kind".into(), "camera".into())].into(), false, 0, None)
         .await
         .unwrap();
     assert!(miss.is_none());
@@ -290,13 +298,14 @@ async fn tuple_lease_expiry() {
         1, // 1 second TTL
         "test".into(),
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Should exist immediately
     let exists = mgr
-        .read([("kind".into(), "ephemeral".into())].into(), false, 0)
+        .read([("kind".into(), "ephemeral".into())].into(), false, 0, None)
         .await
         .unwrap();
     assert!(exists.is_some());
@@ -305,7 +314,7 @@ async fn tuple_lease_expiry() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let gone = mgr
-        .read([("kind".into(), "ephemeral".into())].into(), false, 0)
+        .read([("kind".into(), "ephemeral".into())].into(), false, 0, None)
         .await
         .unwrap();
     assert!(gone.is_none());
@@ -340,6 +349,7 @@ async fn notify_appearance() {
         60,
         "monitor".into(),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -366,6 +376,7 @@ async fn take_race_one_winner() {
         60,
         "test".into(),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -374,12 +385,12 @@ async fn take_race_one_winner() {
     let mgr2 = Arc::clone(&mgr);
 
     let t1 = tokio::spawn(async move {
-        mgr1.take([("kind".into(), "token".into())].into(), false, 0)
+        mgr1.take([("kind".into(), "token".into())].into(), false, 0, None)
             .await
             .unwrap()
     });
     let t2 = tokio::spawn(async move {
-        mgr2.take([("kind".into(), "token".into())].into(), false, 0)
+        mgr2.take([("kind".into(), "token".into())].into(), false, 0, None)
             .await
             .unwrap()
     });
@@ -410,6 +421,7 @@ async fn cancel_tuple_removes() {
             60,
             "test".into(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -417,7 +429,7 @@ async fn cancel_tuple_removes() {
     mgr.cancel(&record.tuple_id).await.unwrap();
 
     let gone = mgr
-        .read([("kind".into(), "temp".into())].into(), false, 0)
+        .read([("kind".into(), "temp".into())].into(), false, 0, None)
         .await
         .unwrap();
     assert!(gone.is_none());
@@ -438,6 +450,7 @@ async fn provenance_tracking() {
             60,
             "sensor".into(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -450,6 +463,7 @@ async fn provenance_tracking() {
             60,
             "pipeline".into(),
             Some(input.tuple_id.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -473,6 +487,7 @@ async fn contents_bulk_read() {
             60,
             "feed".into(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -483,13 +498,14 @@ async fn contents_bulk_read() {
         60,
         "scheduler".into(),
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Contents with price template should return 3
     let prices = mgr
-        .contents([("kind".into(), "price".into())].into())
+        .contents([("kind".into(), "price".into())].into(), None)
         .await
         .unwrap();
     assert_eq!(prices.len(), 3);
@@ -497,7 +513,7 @@ async fn contents_bulk_read() {
 
     // Contents with empty template should return all 4
     let all = mgr
-        .contents(Default::default())
+        .contents(Default::default(), None)
         .await
         .unwrap();
     assert_eq!(all.len(), 4);
@@ -505,9 +521,454 @@ async fn contents_bulk_read() {
 
     // Contents with no-match template should return 0
     let none = mgr
-        .contents([("kind".into(), "nope".into())].into())
+        .contents([("kind".into(), "nope".into())].into(), None)
         .await
         .unwrap();
     assert!(none.is_empty());
     println!("[demo] Contents: empty for no-match ✓");
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Transactional isolation tests
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Test 14: write under txn → read without txn → None (isolation) ──────────
+
+#[tokio::test]
+async fn txn_write_invisible_without_txn() {
+    let (mgr, _) = make_manager();
+    let txn_id = "txn-001".to_string();
+
+    // Write under transaction
+    mgr.write(
+        [("kind".into(), "secret".into())].into(),
+        b"hidden".to_vec(),
+        60,
+        "writer".into(),
+        None,
+        Some(txn_id.clone()),
+    )
+    .await
+    .unwrap();
+
+    // Read WITHOUT txn → should NOT see the tuple
+    let result = mgr
+        .read([("kind".into(), "secret".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(result.is_none(), "uncommitted tuple should be invisible without txn");
+
+    // Take WITHOUT txn → should NOT see the tuple
+    let result = mgr
+        .take([("kind".into(), "secret".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(result.is_none(), "uncommitted tuple should not be takeable without txn");
+
+    println!("\n[demo] Txn isolation: uncommitted write invisible to non-txn reads ✓");
+}
+
+// ── Test 15: write under txn → read WITH txn → found ───────────────────────
+
+#[tokio::test]
+async fn txn_write_visible_with_txn() {
+    let (mgr, _) = make_manager();
+    let txn_id = "txn-002".to_string();
+
+    // Write under transaction
+    mgr.write(
+        [("kind".into(), "secret".into()), ("data".into(), "classified".into())].into(),
+        b"payload".to_vec(),
+        60,
+        "writer".into(),
+        None,
+        Some(txn_id.clone()),
+    )
+    .await
+    .unwrap();
+
+    // Read WITH same txn → should see it
+    let result = mgr
+        .read(
+            [("kind".into(), "secret".into())].into(),
+            false,
+            0,
+            Some(txn_id.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(result.is_some(), "uncommitted tuple should be visible within its own txn");
+    assert_eq!(result.unwrap().attrs["data"], "classified");
+
+    println!("\n[demo] Txn isolation: uncommitted write visible to own txn ✓");
+}
+
+// ── Test 16: write under txn → commit → read without txn → found ───────────
+
+#[tokio::test]
+async fn txn_commit_makes_visible() {
+    let (mgr, _) = make_manager();
+    let txn_id = "txn-003".to_string();
+
+    // Write under transaction
+    mgr.write(
+        [("kind".into(), "committed".into())].into(),
+        vec![],
+        60,
+        "writer".into(),
+        None,
+        Some(txn_id.clone()),
+    )
+    .await
+    .unwrap();
+
+    // Not visible before commit
+    let before = mgr
+        .read([("kind".into(), "committed".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(before.is_none());
+
+    // Commit
+    mgr.commit_space_txn(&txn_id).await.unwrap();
+
+    // Now visible
+    let after = mgr
+        .read([("kind".into(), "committed".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(after.is_some(), "tuple should be visible after commit");
+
+    println!("\n[demo] Txn commit: tuple visible after commit ✓");
+}
+
+// ── Test 17: write under txn → abort → read without txn → None ─────────────
+
+#[tokio::test]
+async fn txn_abort_discards_writes() {
+    let (mgr, _) = make_manager();
+    let txn_id = "txn-004".to_string();
+
+    // Write under transaction
+    mgr.write(
+        [("kind".into(), "doomed".into())].into(),
+        vec![],
+        60,
+        "writer".into(),
+        None,
+        Some(txn_id.clone()),
+    )
+    .await
+    .unwrap();
+
+    // Abort
+    mgr.abort_space_txn(&txn_id).await.unwrap();
+
+    // Should not exist anywhere
+    let result = mgr
+        .read([("kind".into(), "doomed".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(result.is_none(), "aborted tuple should be gone");
+
+    // Also not visible under the (now-dead) txn
+    let result = mgr
+        .read(
+            [("kind".into(), "doomed".into())].into(),
+            false,
+            0,
+            Some(txn_id),
+        )
+        .await
+        .unwrap();
+    assert!(result.is_none(), "aborted tuple should be gone even under txn");
+
+    println!("\n[demo] Txn abort: uncommitted writes discarded ✓");
+}
+
+// ── Test 18: take under txn → commit → gone ────────────────────────────────
+
+#[tokio::test]
+async fn txn_take_then_commit() {
+    let (mgr, _) = make_manager();
+    let txn_id = "txn-005".to_string();
+
+    // Write under txn, then take under same txn
+    mgr.write(
+        [("kind".into(), "takeable".into())].into(),
+        vec![],
+        60,
+        "writer".into(),
+        None,
+        Some(txn_id.clone()),
+    )
+    .await
+    .unwrap();
+
+    let taken = mgr
+        .take(
+            [("kind".into(), "takeable".into())].into(),
+            false,
+            0,
+            Some(txn_id.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(taken.is_some(), "should be able to take own uncommitted tuple");
+
+    // Commit
+    mgr.commit_space_txn(&txn_id).await.unwrap();
+
+    // Should be gone (was taken before commit, nothing to flush)
+    let result = mgr
+        .read([("kind".into(), "takeable".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(result.is_none(), "taken-then-committed tuple should be gone");
+
+    println!("\n[demo] Txn take+commit: tuple consumed ✓");
+}
+
+// ── Test 19: isolation between different transactions ───────────────────────
+
+#[tokio::test]
+async fn txn_isolation_between_txns() {
+    let (mgr, _) = make_manager();
+
+    // Two transactions writing different tuples
+    mgr.write(
+        [("kind".into(), "alpha".into())].into(),
+        vec![],
+        60,
+        "txn-a".into(),
+        None,
+        Some("txn-A".to_string()),
+    )
+    .await
+    .unwrap();
+
+    mgr.write(
+        [("kind".into(), "beta".into())].into(),
+        vec![],
+        60,
+        "txn-b".into(),
+        None,
+        Some("txn-B".to_string()),
+    )
+    .await
+    .unwrap();
+
+    // txn-A can see alpha but not beta
+    let sees_alpha = mgr
+        .read(
+            [("kind".into(), "alpha".into())].into(),
+            false,
+            0,
+            Some("txn-A".to_string()),
+        )
+        .await
+        .unwrap();
+    assert!(sees_alpha.is_some(), "txn-A should see its own write");
+
+    let sees_beta = mgr
+        .read(
+            [("kind".into(), "beta".into())].into(),
+            false,
+            0,
+            Some("txn-A".to_string()),
+        )
+        .await
+        .unwrap();
+    assert!(sees_beta.is_none(), "txn-A should NOT see txn-B's write");
+
+    // txn-B can see beta but not alpha
+    let sees_beta = mgr
+        .read(
+            [("kind".into(), "beta".into())].into(),
+            false,
+            0,
+            Some("txn-B".to_string()),
+        )
+        .await
+        .unwrap();
+    assert!(sees_beta.is_some(), "txn-B should see its own write");
+
+    let sees_alpha = mgr
+        .read(
+            [("kind".into(), "alpha".into())].into(),
+            false,
+            0,
+            Some("txn-B".to_string()),
+        )
+        .await
+        .unwrap();
+    assert!(sees_alpha.is_none(), "txn-B should NOT see txn-A's write");
+
+    println!("\n[demo] Txn isolation: transactions can't see each other's writes ✓");
+}
+
+// ── Test 20: take from committed under txn → abort → restored ──────────────
+
+#[tokio::test]
+async fn txn_take_committed_abort_restores() {
+    let (mgr, _) = make_manager();
+    let txn_id = "txn-006".to_string();
+
+    // Write a committed tuple (no txn)
+    mgr.write(
+        [("kind".into(), "restoreable".into())].into(),
+        vec![],
+        60,
+        "writer".into(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Take it under a transaction
+    let taken = mgr
+        .take(
+            [("kind".into(), "restoreable".into())].into(),
+            false,
+            0,
+            Some(txn_id.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(taken.is_some(), "should take committed tuple under txn");
+
+    // Non-transactional read should NOT see it (it's been taken)
+    let gone = mgr
+        .read([("kind".into(), "restoreable".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(gone.is_none(), "taken tuple should be invisible");
+
+    // Abort the transaction — tuple should be restored
+    mgr.abort_space_txn(&txn_id).await.unwrap();
+
+    // Now it should be visible again
+    let restored = mgr
+        .read([("kind".into(), "restoreable".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(restored.is_some(), "tuple should be restored after abort");
+
+    println!("\n[demo] Txn abort: committed take restored ✓");
+}
+
+// ── Test 21: the full user scenario ────────────────────────────────────────
+// "write with transaction → read without → nothing → take without → nothing
+//  → read with txn → found → take with txn → commit → read → nothing"
+
+#[tokio::test]
+async fn txn_full_isolation_scenario() {
+    let (mgr, _) = make_manager();
+    let txn_id = "txn-full".to_string();
+
+    // 1. Write a tuple under the transaction
+    let (record, _) = mgr
+        .write(
+            [("kind".into(), "order".into()), ("id".into(), "42".into())].into(),
+            b"order payload".to_vec(),
+            60,
+            "producer".into(),
+            None,
+            Some(txn_id.clone()),
+        )
+        .await
+        .unwrap();
+    println!("\n[demo] 1. Wrote tuple {} under txn", record.tuple_id);
+
+    // 2. Read WITHOUT txn → Nothing
+    let r = mgr
+        .read([("kind".into(), "order".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(r.is_none(), "step 2: non-txn read should see nothing");
+    println!("[demo] 2. Read without txn → None ✓");
+
+    // 3. Take WITHOUT txn → Nothing
+    let r = mgr
+        .take([("kind".into(), "order".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(r.is_none(), "step 3: non-txn take should see nothing");
+    println!("[demo] 3. Take without txn → None ✓");
+
+    // 4. Read WITH txn → Found
+    let r = mgr
+        .read(
+            [("kind".into(), "order".into())].into(),
+            false,
+            0,
+            Some(txn_id.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(r.is_some(), "step 4: txn read should find it");
+    assert_eq!(r.unwrap().attrs["id"], "42");
+    println!("[demo] 4. Read with txn → found ✓");
+
+    // 5. Take WITH txn → Gets the tuple
+    let r = mgr
+        .take(
+            [("kind".into(), "order".into())].into(),
+            false,
+            0,
+            Some(txn_id.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(r.is_some(), "step 5: txn take should get it");
+    println!("[demo] 5. Take with txn → got it ✓");
+
+    // 6. Commit
+    mgr.commit_space_txn(&txn_id).await.unwrap();
+    println!("[demo] 6. Committed ✓");
+
+    // 7. Read → Nothing (taken before commit, nothing flushed)
+    let r = mgr
+        .read([("kind".into(), "order".into())].into(), false, 0, None)
+        .await
+        .unwrap();
+    assert!(r.is_none(), "step 7: should be gone after take+commit");
+    println!("[demo] 7. Read after commit → None ✓");
+
+    println!("[demo] Full txn isolation scenario passed ✓");
+}
+
+// ── Test 22: contents includes uncommitted under txn ────────────────────────
+
+#[tokio::test]
+async fn txn_contents_includes_uncommitted() {
+    let (mgr, _) = make_manager();
+    let txn_id = "txn-contents".to_string();
+
+    // Write 2 committed tuples
+    mgr.write(
+        [("kind".into(), "item".into()), ("id".into(), "1".into())].into(),
+        vec![], 60, "w".into(), None, None,
+    ).await.unwrap();
+    mgr.write(
+        [("kind".into(), "item".into()), ("id".into(), "2".into())].into(),
+        vec![], 60, "w".into(), None, None,
+    ).await.unwrap();
+
+    // Write 1 uncommitted under txn
+    mgr.write(
+        [("kind".into(), "item".into()), ("id".into(), "3".into())].into(),
+        vec![], 60, "w".into(), None, Some(txn_id.clone()),
+    ).await.unwrap();
+
+    // Contents without txn → 2
+    let without = mgr.contents([("kind".into(), "item".into())].into(), None).await.unwrap();
+    assert_eq!(without.len(), 2, "contents without txn should see 2");
+
+    // Contents with txn → 3
+    let with = mgr.contents([("kind".into(), "item".into())].into(), Some(txn_id)).await.unwrap();
+    assert_eq!(with.len(), 3, "contents with txn should see 3");
+
+    println!("\n[demo] Txn contents: includes uncommitted ✓");
 }

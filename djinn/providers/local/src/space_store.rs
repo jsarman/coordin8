@@ -9,6 +9,10 @@ pub struct InMemorySpaceStore {
     lease_index: DashMap<String, String>,       // lease_id → tuple_id
     watches: DashMap<String, SpaceWatchRecord>,
     watch_lease_index: DashMap<String, String>,  // lease_id → watch_id
+
+    // Transaction isolation buffers
+    uncommitted: DashMap<String, Vec<TupleRecord>>,   // txn_id → written tuples (not yet visible)
+    txn_taken: DashMap<String, Vec<TupleRecord>>,     // txn_id → tuples taken from committed (restore on abort)
 }
 
 impl InMemorySpaceStore {
@@ -18,6 +22,8 @@ impl InMemorySpaceStore {
             lease_index: DashMap::new(),
             watches: DashMap::new(),
             watch_lease_index: DashMap::new(),
+            uncommitted: DashMap::new(),
+            txn_taken: DashMap::new(),
         }
     }
 }
@@ -35,6 +41,14 @@ impl SpaceStore for InMemorySpaceStore {
         let lease_id = record.lease_id.clone();
         self.tuples.insert(tuple_id.clone(), record);
         self.lease_index.insert(lease_id, tuple_id);
+        Ok(())
+    }
+
+    async fn insert_uncommitted(&self, txn_id: &str, record: TupleRecord) -> Result<(), Error> {
+        self.uncommitted
+            .entry(txn_id.to_string())
+            .or_default()
+            .push(record);
         Ok(())
     }
 
@@ -63,23 +77,49 @@ impl SpaceStore for InMemorySpaceStore {
     async fn find_match(
         &self,
         template: &std::collections::HashMap<String, String>,
+        txn_id: Option<&str>,
     ) -> Result<Option<TupleRecord>, Error> {
         let ops = parse_template(template);
+
+        // Search committed tuples first.
         for entry in self.tuples.iter() {
             if matches(&ops, &entry.attrs) {
                 return Ok(Some(entry.clone()));
             }
         }
+
+        // If txn_id provided, also search that transaction's uncommitted buffer.
+        if let Some(tid) = txn_id {
+            if let Some(buf) = self.uncommitted.get(tid) {
+                for record in buf.iter() {
+                    if matches(&ops, &record.attrs) {
+                        return Ok(Some(record.clone()));
+                    }
+                }
+            }
+        }
+
         Ok(None)
     }
 
     async fn take_match(
         &self,
         template: &std::collections::HashMap<String, String>,
+        txn_id: Option<&str>,
     ) -> Result<Option<TupleRecord>, Error> {
         let ops = parse_template(template);
-        // Scan for a match, then atomically remove it.
-        // If the remove returns None (raced with another taker), continue scanning.
+
+        // If txn_id provided, search uncommitted buffer first.
+        if let Some(tid) = txn_id {
+            if let Some(mut buf) = self.uncommitted.get_mut(tid) {
+                if let Some(pos) = buf.iter().position(|r| matches(&ops, &r.attrs)) {
+                    let record = buf.remove(pos);
+                    return Ok(Some(record));
+                }
+            }
+        }
+
+        // Search committed tuples.
         loop {
             let candidate = self.tuples.iter().find_map(|entry| {
                 if matches(&ops, &entry.attrs) {
@@ -93,6 +133,15 @@ impl SpaceStore for InMemorySpaceStore {
                 Some(tuple_id) => {
                     if let Some((_, record)) = self.tuples.remove(&tuple_id) {
                         self.lease_index.remove(&record.lease_id);
+
+                        // Under a transaction, track the taken tuple for restore-on-abort.
+                        if let Some(tid) = txn_id {
+                            self.txn_taken
+                                .entry(tid.to_string())
+                                .or_default()
+                                .push(record.clone());
+                        }
+
                         return Ok(Some(record));
                     }
                     // Raced — someone else took it, loop and try next match
@@ -106,15 +155,77 @@ impl SpaceStore for InMemorySpaceStore {
     async fn find_all_matches(
         &self,
         template: &std::collections::HashMap<String, String>,
+        txn_id: Option<&str>,
     ) -> Result<Vec<TupleRecord>, Error> {
         let ops = parse_template(template);
         let mut results = Vec::new();
+
+        // Committed tuples.
         for entry in self.tuples.iter() {
             if ops.is_empty() || matches(&ops, &entry.attrs) {
                 results.push(entry.clone());
             }
         }
+
+        // Uncommitted tuples for this transaction.
+        if let Some(tid) = txn_id {
+            if let Some(buf) = self.uncommitted.get(tid) {
+                for record in buf.iter() {
+                    if ops.is_empty() || matches(&ops, &record.attrs) {
+                        results.push(record.clone());
+                    }
+                }
+            }
+        }
+
         Ok(results)
+    }
+
+    async fn commit_txn(&self, txn_id: &str) -> Result<Vec<TupleRecord>, Error> {
+        // Flush uncommitted writes to the visible store.
+        let flushed = if let Some((_, tuples)) = self.uncommitted.remove(txn_id) {
+            for record in &tuples {
+                let tuple_id = record.tuple_id.clone();
+                let lease_id = record.lease_id.clone();
+                self.tuples.insert(tuple_id.clone(), record.clone());
+                self.lease_index.insert(lease_id, tuple_id);
+            }
+            tuples
+        } else {
+            vec![]
+        };
+
+        // Finalize takes — they stay removed, just clean up the tracking buffer.
+        self.txn_taken.remove(txn_id);
+
+        Ok(flushed)
+    }
+
+    async fn abort_txn(&self, txn_id: &str) -> Result<Vec<TupleRecord>, Error> {
+        // Discard uncommitted writes — return them for lease cleanup.
+        let discarded = if let Some((_, tuples)) = self.uncommitted.remove(txn_id) {
+            tuples
+        } else {
+            vec![]
+        };
+
+        // Restore taken tuples back to the committed store.
+        if let Some((_, taken)) = self.txn_taken.remove(txn_id) {
+            for record in taken {
+                let tuple_id = record.tuple_id.clone();
+                let lease_id = record.lease_id.clone();
+                self.tuples.insert(tuple_id.clone(), record);
+                self.lease_index.insert(lease_id, tuple_id);
+            }
+        }
+
+        Ok(discarded)
+    }
+
+    async fn has_txn(&self, txn_id: &str) -> Result<bool, Error> {
+        let has_writes = self.uncommitted.get(txn_id).map_or(false, |v| !v.is_empty());
+        let has_takes = self.txn_taken.contains_key(txn_id);
+        Ok(has_writes || has_takes)
     }
 
     async fn list_all(&self) -> Result<Vec<TupleRecord>, Error> {

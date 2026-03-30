@@ -38,6 +38,11 @@ fn tuple_record_to_proto(r: &coordin8_core::TupleRecord, lease: Option<Lease>) -
     }
 }
 
+/// Parse txn_id from proto: empty string → None.
+fn parse_txn_id(txn_id: String) -> Option<String> {
+    if txn_id.is_empty() { None } else { Some(txn_id) }
+}
+
 pub struct SpaceServiceImpl {
     manager: Arc<SpaceManager>,
 }
@@ -59,10 +64,11 @@ impl SpaceService for SpaceServiceImpl {
         } else {
             Some(r.input_tuple_id)
         };
+        let txn_id = parse_txn_id(r.txn_id);
 
         let (record, lease_record) = self
             .manager
-            .write(r.attrs, r.payload, r.ttl_seconds, r.written_by, input_tuple_id)
+            .write(r.attrs, r.payload, r.ttl_seconds, r.written_by, input_tuple_id, txn_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -83,9 +89,11 @@ impl SpaceService for SpaceServiceImpl {
 
     async fn read(&self, req: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
         let r = req.into_inner();
+        let txn_id = parse_txn_id(r.txn_id);
+
         let result = self
             .manager
-            .read(r.template, r.wait, r.timeout_ms)
+            .read(r.template, r.wait, r.timeout_ms, txn_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -96,9 +104,11 @@ impl SpaceService for SpaceServiceImpl {
 
     async fn take(&self, req: Request<TakeRequest>) -> Result<Response<TakeResponse>, Status> {
         let r = req.into_inner();
+        let txn_id = parse_txn_id(r.txn_id);
+
         let result = self
             .manager
-            .take(r.template, r.wait, r.timeout_ms)
+            .take(r.template, r.wait, r.timeout_ms, txn_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -177,9 +187,11 @@ impl SpaceService for SpaceServiceImpl {
         req: Request<ContentsRequest>,
     ) -> Result<Response<Self::ContentsStream>, Status> {
         let r = req.into_inner();
+        let txn_id = parse_txn_id(r.txn_id);
+
         let tuples = self
             .manager
-            .contents(r.template)
+            .contents(r.template, txn_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
