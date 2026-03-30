@@ -126,6 +126,19 @@ async fn main() -> Result<()> {
 
     // ── Layer 4: TransactionMgr ───────────────────────────────────────────────
     let txn_manager = Arc::new(TxnManager::new(txn_store, Arc::clone(&lease_manager)));
+
+    // Listen for lease expirations relevant to transactions.
+    // Lease expiry = auto-abort (per Jini spec: "let the lease expire and
+    // the transaction auto-aborts").
+    let txn_expiry_mgr = Arc::clone(&txn_manager);
+    let mut txn_expiry_rx = expiry_tx.subscribe();
+    tokio::spawn(async move {
+        while let Ok(lease) = txn_expiry_rx.recv().await {
+            if let Some(txn_id) = lease.resource_id.strip_prefix("txn:") {
+                let _ = txn_expiry_mgr.abort_expired(txn_id).await;
+            }
+        }
+    });
     info!("  ✓ TransactionMgr: ready");
 
     // ── Layer 2c: Space (peer with Registry + EventMgr) ─────────────────────

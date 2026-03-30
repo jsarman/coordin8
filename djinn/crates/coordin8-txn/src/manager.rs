@@ -82,6 +82,27 @@ impl TxnManager {
         Ok(txn.state)
     }
 
+    /// Abort a transaction due to lease expiry. Does not cancel the lease
+    /// (it's already expired). Called by the lease expiry cascade.
+    pub async fn abort_expired(&self, txn_id: &str) -> Result<(), Error> {
+        let txn = match self.store.get(txn_id).await? {
+            Some(t) => t,
+            None => return Ok(()), // already cleaned up
+        };
+
+        match txn.state {
+            TransactionState::Committed | TransactionState::Aborted => return Ok(()),
+            _ => {}
+        }
+
+        self.store
+            .update_state(txn_id, TransactionState::Aborted)
+            .await?;
+        Self::do_abort_participants(txn_id, &txn.participants).await;
+        debug!(txn_id, "transaction aborted (lease expired)");
+        Ok(())
+    }
+
     pub async fn abort(&self, txn_id: &str) -> Result<(), Error> {
         let txn = self
             .store

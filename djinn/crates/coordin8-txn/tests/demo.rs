@@ -289,7 +289,38 @@ async fn notchanged_voter_skipped_at_commit() {
     println!("  ✓ COMMITTED. Writer got commit. Read-only participant skipped.");
 }
 
-// ── Test 6: Zero participants — trivial commit ────────────────────────────────
+// ── Test 6: Lease expiry auto-aborts transaction ──────────────────────────────
+
+#[tokio::test]
+async fn lease_expiry_auto_aborts() {
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  Test 6: Lease expiry → auto-abort");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    let mgr = make_manager();
+    let (ep_a, committed_a, aborted_a) = spawn_participant("store-A", 0 /* PREPARED */).await;
+
+    let (txn_id, _lease) = mgr.begin(60).await.unwrap();
+    println!("  Begin:  txn={}", &txn_id[..8]);
+
+    mgr.enlist(&txn_id, ep_a, 0).await.unwrap();
+    println!("  Enlist: store-A enlisted");
+
+    // Simulate lease expiry cascade
+    println!("  [cascade] Lease expired — calling abort_expired...");
+    mgr.abort_expired(&txn_id).await.unwrap();
+
+    let state = mgr.get_state(&txn_id).await.unwrap();
+    println!("  State:  {:?}", state);
+    println!("  store-A committed={} aborted={}", committed_a.load(Ordering::SeqCst), aborted_a.load(Ordering::SeqCst));
+
+    assert_eq!(state, TransactionState::Aborted);
+    assert!(!committed_a.load(Ordering::SeqCst), "store-A must NOT have committed");
+    assert!(aborted_a.load(Ordering::SeqCst),   "store-A should have received abort");
+    println!("  ✓ Lease expired → ABORTED. Participant got abort call. No commits.");
+}
+
+// ── Test 7: Zero participants — trivial commit ────────────────────────────────
 
 #[tokio::test]
 async fn zero_participants_trivial_commit() {
