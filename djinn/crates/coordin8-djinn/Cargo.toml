@@ -17,6 +17,7 @@ coordin8-event            = { workspace = true }
 coordin8-txn              = { workspace = true }
 coordin8-space            = { workspace = true }
 coordin8-provider-local   = { workspace = true }
+coordin8-provider-dynamo  = { workspace = true }
 
 tokio              = { workspace = true }
 tonic              = { workspace = true }

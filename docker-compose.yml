@@ -18,6 +18,11 @@ services:
       PROXY_BIND_HOST: "0.0.0.0"
       PROXY_PORT_MIN: "9100"
       PROXY_PORT_MAX: "9200"
+      COORDIN8_PROVIDER: "${COORDIN8_PROVIDER:-local}"
+      DYNAMODB_ENDPOINT: "http://localstack:4566"
+    depends_on:
+      localstack:
+        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"  # lets Djinn call back to host (2PC participants)
     networks:

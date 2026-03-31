@@ -14,6 +14,7 @@ use coordin8_proto::coordin8::proxy_service_server::ProxyServiceServer;
 use coordin8_proto::coordin8::registry_service_server::RegistryServiceServer;
 use coordin8_proto::coordin8::space_service_server::SpaceServiceServer;
 use coordin8_proto::coordin8::transaction_service_server::TransactionServiceServer;
+use coordin8_core::{EventStore, LeaseStore, RegistryStore, SpaceStore, TxnStore};
 use coordin8_provider_local::{
     InMemoryEventStore, InMemoryLeaseStore, InMemoryRegistryStore, InMemorySpaceStore,
     InMemoryTxnStore,
@@ -45,12 +46,50 @@ async fn main() -> Result<()> {
     info!("Djinn starting...");
 
     // ── Layer 0: Provider ────────────────────────────────────────────────────
-    let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let registry_store = Arc::new(InMemoryRegistryStore::new());
-    let event_store = Arc::new(InMemoryEventStore::new());
-    let txn_store = Arc::new(InMemoryTxnStore::new());
-    let space_store = Arc::new(InMemorySpaceStore::new());
-    info!("  ✓ Provider: local (in-memory)");
+    let provider = std::env::var("COORDIN8_PROVIDER").unwrap_or_else(|_| "local".into());
+
+    // These are Arc<dyn TraitName> — the type erases the concrete provider
+    let (lease_store, registry_store, event_store, txn_store, space_store): (
+        Arc<dyn LeaseStore>,
+        Arc<dyn RegistryStore>,
+        Arc<dyn EventStore>,
+        Arc<dyn TxnStore>,
+        Arc<dyn SpaceStore>,
+    ) = match provider.as_str() {
+        "dynamo" => {
+            let client = coordin8_provider_dynamo::make_dynamo_client().await;
+
+            let lease_store = Arc::new(coordin8_provider_dynamo::DynamoLeaseStore::new(client.clone()));
+            lease_store.init().await?;
+
+            let registry_store = Arc::new(coordin8_provider_dynamo::DynamoRegistryStore::new(client.clone()));
+            registry_store.init().await?;
+
+            // TODO: DynamoEventStore, DynamoTxnStore, DynamoSpaceStore not yet implemented
+            // For now, fall back to InMemory for unimplemented stores
+            let event_store = Arc::new(InMemoryEventStore::new());
+            let txn_store = Arc::new(InMemoryTxnStore::new());
+            let space_store = Arc::new(InMemorySpaceStore::new());
+
+            info!("  ✓ Provider: dynamo (DynamoDB)");
+            info!("    lease_store: DynamoDB");
+            info!("    registry_store: DynamoDB");
+            info!("    event_store: local (in-memory) — not yet implemented");
+            info!("    txn_store: local (in-memory) — not yet implemented");
+            info!("    space_store: local (in-memory) — not yet implemented");
+
+            (lease_store, registry_store, event_store, txn_store, space_store)
+        }
+        _ => {
+            let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+            let registry_store: Arc<dyn RegistryStore> = Arc::new(InMemoryRegistryStore::new());
+            let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+            let txn_store: Arc<dyn TxnStore> = Arc::new(InMemoryTxnStore::new());
+            let space_store: Arc<dyn SpaceStore> = Arc::new(InMemorySpaceStore::new());
+            info!("  ✓ Provider: local (in-memory)");
+            (lease_store, registry_store, event_store, txn_store, space_store)
+        }
+    };
 
     // ── Layer 1: LeaseMgr ────────────────────────────────────────────────────
     let (expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);
