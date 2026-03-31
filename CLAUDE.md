@@ -10,6 +10,10 @@ Coordin8 is a distributed coordination platform inspired by Jini/JavaSpaces (Sun
 
 The full vision (Space, EventMgr, TransactionMgr, AWS provider, higher-order patterns) is in `coordin8-design-napkin.md`. Session plans live in `.claude/plans/`.
 
+> **Workflow:** If a `WORKFLOW.md` exists at the repo root, read it at session start. It contains developer-specific pacing and coordination preferences. This file is gitignored — each developer may have their own or none at all.
+
+> **Blackboard:** `.claude/state/current.md` holds ephemeral session state — what's running, what's active, decisions in flight. Read it at session start for context. Write to it when the user says "save state" or at natural checkpoints. This file is gitignored.
+
 ## Architecture
 
 ### Djinn Services

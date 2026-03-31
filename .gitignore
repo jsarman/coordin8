@@ -5,7 +5,10 @@ Cargo.lock
 
 # Go binaries
 djinn/coordin8
+cli/coordin8
 examples/*/bin/
+examples/double-entry/double-entry
+examples/market-watch/market-watch
 
 # Go module cache artifacts
 vendor/
@@ -34,6 +37,12 @@ npm-debug.log*
 .vscode/
 *.swp
 *.swo
+
+# Personal workflow
+WORKFLOW.md
+
+# Blackboard state
+.claude/state/
 
 # OS
 .DS_Store
