@@ -20,9 +20,12 @@ services:
       PROXY_PORT_MAX: "9200"
       COORDIN8_PROVIDER: "${COORDIN8_PROVIDER:-local}"
       DYNAMODB_ENDPOINT: "http://localstack:4566"
+      AWS_ACCESS_KEY_ID: "test"
+      AWS_SECRET_ACCESS_KEY: "test"
+      AWS_DEFAULT_REGION: "us-east-1"
     depends_on:
       localstack:
-        condition: service_started
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"  # lets Djinn call back to host (2PC participants)
     networks:
@@ -61,6 +64,11 @@ services:
       - localstack-data:/var/lib/localstack
     networks:
       - coordin8-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"dynamodb\": \"available\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   # Dashboard — Coordin8 observability UI (Phase 9)
   # dashboard:
