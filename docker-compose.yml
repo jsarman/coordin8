@@ -44,16 +44,18 @@ services:
     networks:
       - coordin8-net
 
-  # LocalStack — AWS emulation for integration testing (Phase 8)
-  # localstack:
-  #   image: localstack/localstack:3
-  #   ports:
-  #     - "4566:4566"
-  #   environment:
-  #     - SERVICES=dynamodb,sqs,events
-  #     - DEFAULT_REGION=us-east-1
-  #   volumes:
-  #     - localstack-data:/var/lib/localstack
+  # LocalStack — AWS emulation for integration testing
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=dynamodb
+      - DEFAULT_REGION=us-east-1
+    volumes:
+      - localstack-data:/var/lib/localstack
+    networks:
+      - coordin8-net
 
   # Dashboard — Coordin8 observability UI (Phase 9)
   # dashboard:

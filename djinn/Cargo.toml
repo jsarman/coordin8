@@ -11,6 +11,7 @@ members = [
     "crates/coordin8-space",
     "crates/coordin8-djinn",
     "providers/local",
+    "providers/dynamo",
 ]
 
 [workspace.dependencies]
@@ -24,6 +25,9 @@ coordin8-event   = { path = "crates/coordin8-event" }
 coordin8-txn     = { path = "crates/coordin8-txn" }
 coordin8-space   = { path = "crates/coordin8-space" }
 coordin8-provider-local = { path = "providers/local" }
+coordin8-provider-dynamo = { path = "providers/dynamo" }
+aws-config = "1"
+aws-sdk-dynamodb = "1"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
