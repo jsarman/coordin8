@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 coordin8-core = { workspace = true }
+coordin8-registry = { path = "../../crates/coordin8-registry" }
 aws-sdk-dynamodb = { workspace = true }
 aws-config = { workspace = true }
 async-trait = { workspace = true }

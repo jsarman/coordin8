@@ -65,18 +65,16 @@ async fn main() -> Result<()> {
             let registry_store = Arc::new(coordin8_provider_dynamo::DynamoRegistryStore::new(client.clone()));
             registry_store.init().await?;
 
-            // TODO: DynamoEventStore, DynamoTxnStore, DynamoSpaceStore not yet implemented
-            // For now, fall back to InMemory for unimplemented stores
-            let event_store = Arc::new(InMemoryEventStore::new());
-            let txn_store = Arc::new(InMemoryTxnStore::new());
-            let space_store = Arc::new(InMemorySpaceStore::new());
+            let event_store = Arc::new(coordin8_provider_dynamo::DynamoEventStore::new(client.clone()));
+            event_store.init().await?;
+
+            let txn_store = Arc::new(coordin8_provider_dynamo::DynamoTxnStore::new(client.clone()));
+            txn_store.init().await?;
+
+            let space_store = Arc::new(coordin8_provider_dynamo::DynamoSpaceStore::new(client.clone()));
+            space_store.init().await?;
 
             info!("  ✓ Provider: dynamo (DynamoDB)");
-            info!("    lease_store: DynamoDB");
-            info!("    registry_store: DynamoDB");
-            info!("    event_store: local (in-memory) — not yet implemented");
-            info!("    txn_store: local (in-memory) — not yet implemented");
-            info!("    space_store: local (in-memory) — not yet implemented");
 
             (lease_store, registry_store, event_store, txn_store, space_store)
         }
