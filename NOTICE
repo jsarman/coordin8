@@ -1,0 +1,6 @@
+Coordin8
+Copyright 2026 John Sarman
+
+This project is a modern reimagining of the coordination patterns
+pioneered by Jini (Sun Microsystems, 1999). It is an independent
+implementation — no code from the original Jini project was used.
