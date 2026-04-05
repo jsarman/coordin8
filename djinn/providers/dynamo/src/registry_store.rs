@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn insert_and_get_with_transport() {
         let (store, table_name, client) = setup().await;
 
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn insert_with_none_transport() {
         let (store, table_name, client) = setup().await;
 
@@ -385,7 +385,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn update_existing() {
         let (store, table_name, client) = setup().await;
 
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn update_non_existent_returns_none() {
         let (store, table_name, client) = setup().await;
 
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn remove_by_lease() {
         let (store, table_name, client) = setup().await;
 
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn remove_by_lease_non_existent_returns_none() {
         let (store, table_name, client) = setup().await;
 
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn get_by_lease() {
         let (store, table_name, client) = setup().await;
 
@@ -474,7 +474,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn list_all() {
         let (store, table_name, client) = setup().await;
 
@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn update_changes_lease_id() {
         let (store, table_name, client) = setup().await;
 

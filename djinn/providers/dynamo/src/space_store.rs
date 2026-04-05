@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn insert_and_get() {
         let (store, tables, client) = setup().await;
 
@@ -783,7 +783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn remove_returns_old() {
         let (store, tables, client) = setup().await;
 
@@ -797,7 +797,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn remove_by_lease() {
         let (store, tables, client) = setup().await;
 
@@ -810,7 +810,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn find_match() {
         let (store, tables, client) = setup().await;
 
@@ -831,7 +831,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn take_match_atomic() {
         let (store, tables, client) = setup().await;
 
@@ -855,7 +855,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn txn_uncommitted_visible_within_txn() {
         let (store, tables, client) = setup().await;
 
@@ -876,7 +876,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn commit_flushes_uncommitted() {
         let (store, tables, client) = setup().await;
 
@@ -897,7 +897,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn abort_discards_uncommitted_restores_taken() {
         let (store, tables, client) = setup().await;
 
@@ -938,7 +938,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn watches_crud() {
         let (store, tables, client) = setup().await;
 
@@ -973,7 +973,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn has_txn() {
         let (store, tables, client) = setup().await;
 

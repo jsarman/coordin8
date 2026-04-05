@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn create_and_get() {
         let (store, table_name, client) = setup().await;
 
@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn update_state() {
         let (store, table_name, client) = setup().await;
 
@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn update_state_not_found() {
         let (store, table_name, client) = setup().await;
 
@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn add_participant() {
         let (store, table_name, client) = setup().await;
 
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn remove() {
         let (store, table_name, client) = setup().await;
 
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn list_all() {
         let (store, table_name, client) = setup().await;
 

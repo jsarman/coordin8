@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn create_and_get_subscription() {
         let (store, sub_table, mailbox_table, client) = setup().await;
 
@@ -589,7 +589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn remove_subscription() {
         let (store, sub_table, mailbox_table, client) = setup().await;
 
@@ -601,7 +601,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn remove_by_lease() {
         let (store, sub_table, mailbox_table, client) = setup().await;
 
@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn enqueue_and_dequeue() {
         let (store, sub_table, mailbox_table, client) = setup().await;
 
@@ -647,7 +647,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn list_subscriptions() {
         let (store, sub_table, mailbox_table, client) = setup().await;
 

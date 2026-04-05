@@ -12,7 +12,7 @@ Cleanly shut down the Coordin8 development stack and optionally kill the tmux se
 
 - `/stack-down` — tear down everything and kill the tmux session
 - `/stack-down docker` — stop docker-compose only
-- `/stack-down localstack` — stop LocalStack only  
+- `/stack-down ministack` — stop MiniStack only  
 - `/stack-down djinn` — stop the local Djinn only
 - `/stack-down keep-session` — stop services but keep the tmux session alive
 
@@ -36,9 +36,9 @@ sleep 2
 tmux send-keys -t coordin8:docker 'docker compose down' Enter
 ```
 
-**LocalStack:**
+**MiniStack:**
 ```bash
-tmux send-keys -t coordin8:localstack 'docker compose down localstack' Enter
+tmux send-keys -t coordin8:ministack 'docker compose down ministack' Enter
 ```
 
 **Local Djinn:**
@@ -58,7 +58,7 @@ tmux kill-session -t coordin8
 If keeping the session, just close the service windows:
 ```bash
 tmux kill-window -t coordin8:docker
-tmux kill-window -t coordin8:localstack
+tmux kill-window -t coordin8:ministack
 tmux kill-window -t coordin8:djinn
 ```
 

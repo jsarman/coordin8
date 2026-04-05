@@ -16,9 +16,9 @@ You ensure infrastructure is running, execute tests in tmux so the user can watc
 
 Before running tests, verify what's needed is up:
 
-**LocalStack (DynamoDB tests):**
+**MiniStack (DynamoDB tests):**
 ```bash
-curl -sf http://localhost:4566/_localstack/health && echo "UP" || echo "DOWN"
+curl -sf http://localhost:4566/_ministack/health && echo "UP" || echo "DOWN"
 ```
 
 **Docker stack (Djinn + services):**
@@ -32,9 +32,9 @@ If infrastructure is down, start it in the `coordin8` tmux session:
 # Ensure tmux session exists
 tmux has-session -t coordin8 2>/dev/null || tmux new-session -d -s coordin8 -n main
 
-# LocalStack
-tmux new-window -t coordin8 -n localstack 2>/dev/null || true
-tmux send-keys -t coordin8:localstack 'docker compose -f /home/jsarman/code/coordin8/docker-compose.yml up localstack 2>&1' Enter
+# MiniStack
+tmux new-window -t coordin8 -n ministack 2>/dev/null || true
+tmux send-keys -t coordin8:ministack 'docker compose -f /home/jsarman/code/coordin8/docker-compose.yml up ministack 2>&1' Enter
 
 # Docker full stack
 tmux new-window -t coordin8 -n docker 2>/dev/null || true
@@ -43,8 +43,8 @@ tmux send-keys -t coordin8:docker 'docker compose -f /home/jsarman/code/coordin8
 
 Poll for readiness before running tests:
 ```bash
-# LocalStack
-for i in $(seq 1 20); do curl -sf http://localhost:4566/_localstack/health && break || sleep 3; done
+# MiniStack
+for i in $(seq 1 20); do curl -sf http://localhost:4566/_ministack/health && break || sleep 3; done
 
 # Djinn
 for i in $(seq 1 20); do nc -z localhost 9001 && break || sleep 3; done
@@ -66,10 +66,10 @@ tmux send-keys -t coordin8:{window}.1 '<test command>' Enter
 **Test commands by scope:**
 
 ```bash
-# All Rust tests (unit only, no LocalStack needed)
+# All Rust tests (unit only, no MiniStack needed)
 cd /home/jsarman/code/coordin8/djinn && cargo test 2>&1
 
-# DynamoDB provider integration tests (needs LocalStack)
+# DynamoDB provider integration tests (needs MiniStack)
 cd /home/jsarman/code/coordin8/djinn && cargo test -p coordin8-provider-dynamo -- --ignored 2>&1
 
 # Specific provider store tests
@@ -110,5 +110,5 @@ Keep it concise. The user can see the full output in tmux — don't dump the ent
 
 - Never modify code. If tests fail, report what failed — the coordinator decides what to fix.
 - If `cargo test` needs to compile first and it takes time, say so — don't report "no output" when it's still building.
-- If LocalStack isn't running and you can't start it (Docker not available, etc.), report that as a blocker.
+- If MiniStack isn't running and you can't start it (Docker not available, etc.), report that as a blocker.
 - The `--ignored` flag is required for DynamoDB integration tests — they're marked `#[ignore]` by default.

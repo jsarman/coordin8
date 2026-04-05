@@ -1,6 +1,6 @@
 ---
 name: pane-peek
-description: Capture recent output from a named tmux pane without flooding context. Use when monitoring background processes (docker, localstack, djinn) or checking on long-running commands.
+description: Capture recent output from a named tmux pane without flooding context. Use when monitoring background processes (docker, ministack, djinn) or checking on long-running commands.
 allowed-tools: Bash
 ---
 

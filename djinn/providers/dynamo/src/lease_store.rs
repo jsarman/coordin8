@@ -287,7 +287,7 @@ mod tests {
     use crate::client::make_dynamo_client;
     use aws_sdk_dynamodb::Client;
 
-    /// Build a client pointing at LocalStack and create an isolated table for
+    /// Build a client pointing at MiniStack and create an isolated table for
     /// this test run. Returns (store, table_name) — caller must delete the table
     /// after the test.
     async fn setup() -> (DynamoLeaseStore, String, Client) {
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn create_and_get() {
         let (store, table_name, client) = setup().await;
 
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn cancel_removes_lease() {
         let (store, table_name, client) = setup().await;
 
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn expired_lease_shows_up_in_list() {
         let (store, table_name, client) = setup().await;
 
@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn forever_lease_never_expires() {
         let (store, table_name, client) = setup().await;
 
@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn get_by_resource() {
         let (store, table_name, client) = setup().await;
 
@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn renew_updates_expiry() {
         let (store, table_name, client) = setup().await;
 

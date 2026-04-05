@@ -1,6 +1,6 @@
 ---
 name: stack-up
-description: Start the Coordin8 infrastructure stack (Docker, LocalStack, Djinn) in tmux panes. Use when the user needs to bring up services for development or testing.
+description: Start the Coordin8 infrastructure stack (Docker, MiniStack, Djinn) in tmux panes. Use when the user needs to bring up services for development or testing.
 allowed-tools: Bash, Read
 ---
 
@@ -12,7 +12,7 @@ Spin up the Coordin8 development stack in a tmux session, with each service in i
 
 - `/stack-up` — interactive: ask what to bring up
 - `/stack-up docker` — docker-compose stack only
-- `/stack-up localstack` — LocalStack only
+- `/stack-up ministack` — MiniStack only
 - `/stack-up djinn` — local Djinn binary only
 - `/stack-up all` — full stack
 
@@ -45,10 +45,10 @@ tmux new-window -t coordin8 -n docker
 tmux send-keys -t coordin8:docker 'docker compose up --build 2>&1' Enter
 ```
 
-**LocalStack:**
+**MiniStack:**
 ```bash
-tmux new-window -t coordin8 -n localstack
-tmux send-keys -t coordin8:localstack 'docker compose up -d localstack 2>&1' Enter
+tmux new-window -t coordin8 -n ministack
+tmux send-keys -t coordin8:ministack 'docker compose up -d ministack 2>&1' Enter
 ```
 
 **Local Djinn (cargo run):**
@@ -66,9 +66,9 @@ After launching, poll health checks. Don't flood — check every 3 seconds, max 
 for i in $(seq 1 20); do nc -z localhost 9001 && echo "ready" && break || sleep 3; done
 ```
 
-**LocalStack:**
+**MiniStack:**
 ```bash
-for i in $(seq 1 20); do curl -sf http://localhost:4566/_localstack/health && echo "ready" && break || sleep 3; done
+for i in $(seq 1 20); do curl -sf http://localhost:4566/_ministack/health && echo "ready" && break || sleep 3; done
 ```
 
 ### 5. Report
@@ -76,11 +76,11 @@ for i in $(seq 1 20); do curl -sf http://localhost:4566/_localstack/health && ec
 Once ready (or timed out), report:
 - Which services are up and on which ports
 - Any that failed to start — peek at their pane output for errors
-- Keep it brief: "Stack is up. Djinn on :9001, LocalStack on :4566." or "Djinn failed to start — build error in coordin8-lease crate."
+- Keep it brief: "Stack is up. Djinn on :9001, MiniStack on :4566." or "Djinn failed to start — build error in coordin8-lease crate."
 
 ## Important
 
-- **Boot order matters:** LocalStack/Docker first, then Djinn, then application services
+- **Boot order matters:** MiniStack/Docker first, then Djinn, then application services
 - Read `docker-compose.yml` if needed to confirm service names and ports
 - Don't run `docker compose up` and `cargo run` Djinn simultaneously unless the user is testing against Docker — they'll port-conflict on 9001
 - If something fails, peek at the pane output and surface the error — don't retry blindly
