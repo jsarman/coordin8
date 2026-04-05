@@ -62,7 +62,7 @@ services:
     networks:
       - coordin8-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_ministack/health"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')\""]
       interval: 5s
       timeout: 5s
       retries: 20
