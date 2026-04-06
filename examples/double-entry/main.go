@@ -143,7 +143,7 @@ func main() {
 	fmt.Println("[A2] Enlisting participants...")
 	must(txn.Enlist(ctx, &pb.EnlistRequest{TxnId: txnA.TxnId, ParticipantEndpoint: debitAddrA}))
 	must(txn.Enlist(ctx, &pb.EnlistRequest{TxnId: txnA.TxnId, ParticipantEndpoint: creditAddrA}))
-	fmt.Println("     both enlisted ✓\n")
+	fmt.Println("     both enlisted ✓")
 
 	fmt.Println("[A3] Committing (2PC — prepare then commit)...")
 	_, err = txn.Commit(ctx, &pb.CommitRequest{TxnId: txnA.TxnId})
@@ -182,7 +182,7 @@ func main() {
 	fmt.Println("[B2] Enlisting participants...")
 	must(txn.Enlist(ctx, &pb.EnlistRequest{TxnId: txnB.TxnId, ParticipantEndpoint: debitAddrB}))
 	must(txn.Enlist(ctx, &pb.EnlistRequest{TxnId: txnB.TxnId, ParticipantEndpoint: creditAddrB}))
-	fmt.Println("     both enlisted ✓\n")
+	fmt.Println("     both enlisted ✓")
 
 	fmt.Println("[B3] Attempting commit (debit will veto during prepare)...")
 	_, err = txn.Commit(ctx, &pb.CommitRequest{TxnId: txnB.TxnId})
