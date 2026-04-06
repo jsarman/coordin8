@@ -49,13 +49,15 @@ async fn main() -> Result<()> {
     let provider = std::env::var("COORDIN8_PROVIDER").unwrap_or_else(|_| "local".into());
 
     // These are Arc<dyn TraitName> — the type erases the concrete provider
-    let (lease_store, registry_store, event_store, txn_store, space_store): (
+    type Stores = (
         Arc<dyn LeaseStore>,
         Arc<dyn RegistryStore>,
         Arc<dyn EventStore>,
         Arc<dyn TxnStore>,
         Arc<dyn SpaceStore>,
-    ) = match provider.as_str() {
+    );
+    let (lease_store, registry_store, event_store, txn_store, space_store): Stores =
+        match provider.as_str() {
         "dynamo" => {
             let client = coordin8_provider_dynamo::make_dynamo_client().await;
 
