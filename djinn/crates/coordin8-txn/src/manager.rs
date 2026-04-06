@@ -137,9 +137,7 @@ impl TxnManager {
         // ── Terminal state guards ─────────────────────────────────────────────
         match txn.state {
             TransactionState::Committed => return Ok(()), // idempotent
-            TransactionState::Aborted => {
-                return Err(Error::TransactionAborted(txn_id.to_string()))
-            }
+            TransactionState::Aborted => return Err(Error::TransactionAborted(txn_id.to_string())),
             _ => {}
         }
 
@@ -261,15 +259,17 @@ impl TxnManager {
             .update_state(txn_id, TransactionState::Committed)
             .await?;
         self.lease_manager.cancel(&txn.lease_id).await.ok();
-        debug!(txn_id, prepared = prepared_eps.len(), "transaction committed");
+        debug!(
+            txn_id,
+            prepared = prepared_eps.len(),
+            "transaction committed"
+        );
         Ok(())
     }
 
     // ── Outbound gRPC helpers (static — no self needed) ───────────────────────
 
-    fn connect_to(
-        host_port: &str,
-    ) -> Result<tonic::transport::Endpoint, Error> {
+    fn connect_to(host_port: &str) -> Result<tonic::transport::Endpoint, Error> {
         let uri = format!("http://{}", host_port);
         tonic::transport::Channel::from_shared(uri)
             .map_err(|e| Error::Internal(format!("invalid endpoint '{}': {}", host_port, e)))

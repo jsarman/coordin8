@@ -8,7 +8,9 @@ use tokio::sync::broadcast;
 use tracing::debug;
 use uuid::Uuid;
 
-use coordin8_core::{DeliveryMode, Error, EventRecord, EventStore, LeaseRecord, SubscriptionRecord};
+use coordin8_core::{
+    DeliveryMode, Error, EventRecord, EventStore, LeaseRecord, SubscriptionRecord,
+};
 use coordin8_lease::LeaseManager;
 use coordin8_registry::matcher::{matches, parse_template};
 
@@ -127,7 +129,10 @@ impl EventManager {
             let mut check_attrs = attrs.clone();
             check_attrs.insert("event_type".to_string(), event_type.clone());
             if ops.is_empty() || matches(&ops, &check_attrs) {
-                let _ = self.store.enqueue(&sub.registration_id, event.clone()).await;
+                let _ = self
+                    .store
+                    .enqueue(&sub.registration_id, event.clone())
+                    .await;
             }
         }
 

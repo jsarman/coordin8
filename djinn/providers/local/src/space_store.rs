@@ -6,13 +6,13 @@ use coordin8_registry::matcher::{matches, parse_template};
 
 pub struct InMemorySpaceStore {
     tuples: DashMap<String, TupleRecord>,
-    lease_index: DashMap<String, String>,       // lease_id → tuple_id
+    lease_index: DashMap<String, String>, // lease_id → tuple_id
     watches: DashMap<String, SpaceWatchRecord>,
-    watch_lease_index: DashMap<String, String>,  // lease_id → watch_id
+    watch_lease_index: DashMap<String, String>, // lease_id → watch_id
 
     // Transaction isolation buffers
-    uncommitted: DashMap<String, Vec<TupleRecord>>,   // txn_id → written tuples (not yet visible)
-    txn_taken: DashMap<String, Vec<TupleRecord>>,     // txn_id → tuples taken from committed (restore on abort)
+    uncommitted: DashMap<String, Vec<TupleRecord>>, // txn_id → written tuples (not yet visible)
+    txn_taken: DashMap<String, Vec<TupleRecord>>, // txn_id → tuples taken from committed (restore on abort)
 }
 
 impl InMemorySpaceStore {
@@ -226,7 +226,10 @@ impl SpaceStore for InMemorySpaceStore {
     }
 
     async fn has_txn(&self, txn_id: &str) -> Result<bool, Error> {
-        let has_writes = self.uncommitted.get(txn_id).map_or(false, |v| !v.is_empty());
+        let has_writes = self
+            .uncommitted
+            .get(txn_id)
+            .map_or(false, |v| !v.is_empty());
         let has_takes = self.txn_taken.contains_key(txn_id);
         Ok(has_writes || has_takes)
     }

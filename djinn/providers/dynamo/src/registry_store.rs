@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use aws_sdk_dynamodb::{Client, error::SdkError, types::AttributeValue};
+use aws_sdk_dynamodb::{error::SdkError, types::AttributeValue, Client};
 use std::collections::HashMap;
 
 use coordin8_core::{Error, RegistryEntry, RegistryStore, TransportConfig};
@@ -80,9 +80,7 @@ fn entry_to_item(entry: &RegistryEntry) -> HashMap<String, AttributeValue> {
     item
 }
 
-fn entry_from_item(
-    item: &HashMap<String, AttributeValue>,
-) -> Result<RegistryEntry, Error> {
+fn entry_from_item(item: &HashMap<String, AttributeValue>) -> Result<RegistryEntry, Error> {
     let capability_id = item
         .get("capability_id")
         .and_then(|v| v.as_s().ok())
@@ -105,9 +103,9 @@ fn entry_from_item(
         Some(AttributeValue::M(map)) => map
             .iter()
             .map(|(k, v)| {
-                v.as_s()
-                    .map(|s| (k.clone(), s.clone()))
-                    .map_err(|_| Error::Storage(format!("attrs value for key '{k}' is not a string")))
+                v.as_s().map(|s| (k.clone(), s.clone())).map_err(|_| {
+                    Error::Storage(format!("attrs value for key '{k}' is not a string"))
+                })
             })
             .collect::<Result<HashMap<String, String>, Error>>()?,
         _ => HashMap::new(),
@@ -118,13 +116,11 @@ fn entry_from_item(
             let config = config_map
                 .iter()
                 .map(|(k, v)| {
-                    v.as_s()
-                        .map(|s| (k.clone(), s.clone()))
-                        .map_err(|_| {
-                            Error::Storage(format!(
-                                "transport_config value for key '{k}' is not a string"
-                            ))
-                        })
+                    v.as_s().map(|s| (k.clone(), s.clone())).map_err(|_| {
+                        Error::Storage(format!(
+                            "transport_config value for key '{k}' is not a string"
+                        ))
+                    })
                 })
                 .collect::<Result<HashMap<String, String>, Error>>()?;
             Some(TransportConfig {
@@ -176,9 +172,7 @@ impl RegistryStore for DynamoRegistryStore {
 
         match result {
             Ok(_) => Ok(Some(entry)),
-            Err(SdkError::ServiceError(se))
-                if se.err().is_conditional_check_failed_exception() =>
-            {
+            Err(SdkError::ServiceError(se)) if se.err().is_conditional_check_failed_exception() => {
                 Ok(None)
             }
             Err(e) => Err(Error::Storage(format!("put_item (update) failed: {e}"))),
@@ -230,7 +224,10 @@ impl RegistryStore for DynamoRegistryStore {
             .client
             .get_item()
             .table_name(&self.table_name)
-            .key("capability_id", AttributeValue::S(capability_id.to_string()))
+            .key(
+                "capability_id",
+                AttributeValue::S(capability_id.to_string()),
+            )
             .send()
             .await
             .map_err(|e| Error::Storage(format!("get_item failed: {e}")))?;
@@ -315,11 +312,7 @@ mod tests {
     }
 
     async fn teardown(client: &Client, table_name: &str) {
-        let _ = client
-            .delete_table()
-            .table_name(table_name)
-            .send()
-            .await;
+        let _ = client.delete_table().table_name(table_name).send().await;
     }
 
     fn make_entry(capability_id: &str, lease_id: &str) -> RegistryEntry {

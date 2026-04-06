@@ -40,7 +40,11 @@ fn tuple_record_to_proto(r: &coordin8_core::TupleRecord, lease: Option<Lease>) -
 
 /// Parse txn_id from proto: empty string → None.
 fn parse_txn_id(txn_id: String) -> Option<String> {
-    if txn_id.is_empty() { None } else { Some(txn_id) }
+    if txn_id.is_empty() {
+        None
+    } else {
+        Some(txn_id)
+    }
 }
 
 pub struct SpaceServiceImpl {
@@ -68,7 +72,14 @@ impl SpaceService for SpaceServiceImpl {
 
         let (record, lease_record) = self
             .manager
-            .write(r.attrs, r.payload, r.ttl_seconds, r.written_by, input_tuple_id, txn_id)
+            .write(
+                r.attrs,
+                r.payload,
+                r.ttl_seconds,
+                r.written_by,
+                input_tuple_id,
+                txn_id,
+            )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -131,7 +142,12 @@ impl SpaceService for SpaceServiceImpl {
 
         let (_, _lease_id) = self
             .manager
-            .notify(r.template.clone(), on.clone(), r.ttl_seconds, r.handback.clone())
+            .notify(
+                r.template.clone(),
+                on.clone(),
+                r.ttl_seconds,
+                r.handback.clone(),
+            )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -209,10 +225,7 @@ impl SpaceService for SpaceServiceImpl {
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
-    async fn renew(
-        &self,
-        req: Request<RenewTupleRequest>,
-    ) -> Result<Response<Lease>, Status> {
+    async fn renew(&self, req: Request<RenewTupleRequest>) -> Result<Response<Lease>, Status> {
         let r = req.into_inner();
         let record = self
             .manager
@@ -229,10 +242,7 @@ impl SpaceService for SpaceServiceImpl {
         }))
     }
 
-    async fn cancel(
-        &self,
-        req: Request<CancelTupleRequest>,
-    ) -> Result<Response<()>, Status> {
+    async fn cancel(&self, req: Request<CancelTupleRequest>) -> Result<Response<()>, Status> {
         let tuple_id = req.into_inner().tuple_id;
         self.manager
             .cancel(&tuple_id)

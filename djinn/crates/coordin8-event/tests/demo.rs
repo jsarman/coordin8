@@ -12,7 +12,10 @@ use tokio::sync::broadcast;
 
 fn make_manager() -> Arc<EventManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(lease_store, coordin8_core::LeaseConfig::default()));
+    let lease_manager = Arc::new(LeaseManager::new(
+        lease_store,
+        coordin8_core::LeaseConfig::default(),
+    ));
     let event_store = Arc::new(InMemoryEventStore::new());
     let (event_tx, _) = broadcast::channel(256);
     Arc::new(EventManager::new(event_store, lease_manager, event_tx))
@@ -48,7 +51,11 @@ async fn durable_mailbox_drains_backlog() {
             )
             .await
             .unwrap();
-        println!("[demo] Emitted:    seq={} event_id={}", event.seq_num, &event.event_id[..8]);
+        println!(
+            "[demo] Emitted:    seq={} event_id={}",
+            event.seq_num,
+            &event.event_id[..8]
+        );
     }
 
     // Now drain the mailbox
@@ -144,9 +151,16 @@ async fn template_filtering_enqueues_only_matches() {
     .unwrap();
 
     let backlog = mgr.drain_mailbox(&reg_id).await.unwrap();
-    println!("\n[demo] Template filter: got {} event(s) (expected 1)", backlog.len());
+    println!(
+        "\n[demo] Template filter: got {} event(s) (expected 1)",
+        backlog.len()
+    );
     for e in &backlog {
-        println!("       ticker={:?}  payload={}", e.attrs.get("ticker"), String::from_utf8_lossy(&e.payload));
+        println!(
+            "       ticker={:?}  payload={}",
+            e.attrs.get("ticker"),
+            String::from_utf8_lossy(&e.payload)
+        );
     }
 
     assert_eq!(backlog.len(), 1);
@@ -170,7 +184,12 @@ async fn sequence_numbers_are_monotonic_per_source_type() {
 
     // Different type resets to its own counter
     let other = mgr
-        .emit("feed".into(), "heartbeat".into(), Default::default(), vec![])
+        .emit(
+            "feed".into(),
+            "heartbeat".into(),
+            Default::default(),
+            vec![],
+        )
         .await
         .unwrap();
 
@@ -188,7 +207,13 @@ async fn cancel_removes_subscription() {
     let mgr = make_manager();
 
     let (reg_id, _, _) = mgr
-        .subscribe("events".into(), Default::default(), DeliveryMode::Durable, 60, vec![])
+        .subscribe(
+            "events".into(),
+            Default::default(),
+            DeliveryMode::Durable,
+            60,
+            vec![],
+        )
         .await
         .unwrap();
 
@@ -230,13 +255,13 @@ async fn subscription_lease_expiry_cascade() {
 
     // Subscription exists
     assert!(mgr.get_subscription(&reg_id).await.unwrap().is_some());
-    println!("\n[demo] Subscription created: reg_id={reg_id}  lease_id={}", lease.lease_id);
+    println!(
+        "\n[demo] Subscription created: reg_id={reg_id}  lease_id={}",
+        lease.lease_id
+    );
 
     // Simulate what the reaper + cascade does: unsubscribe by lease
-    let removed = mgr
-        .unsubscribe_by_lease(&lease.lease_id)
-        .await
-        .unwrap();
+    let removed = mgr.unsubscribe_by_lease(&lease.lease_id).await.unwrap();
     assert_eq!(removed, Some(reg_id.clone()));
 
     // Subscription should be gone

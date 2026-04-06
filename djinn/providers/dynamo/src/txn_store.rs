@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use aws_sdk_dynamodb::{Client, types::AttributeValue};
+use aws_sdk_dynamodb::{types::AttributeValue, Client};
 use chrono::{DateTime, Utc};
 
 use coordin8_core::{Error, ParticipantRecord, TransactionRecord, TransactionState, TxnStore};
@@ -54,13 +54,18 @@ fn state_from_str(s: &str) -> Result<TransactionState, Error> {
         "Prepared" => Ok(TransactionState::Prepared),
         "Committed" => Ok(TransactionState::Committed),
         "Aborted" => Ok(TransactionState::Aborted),
-        other => Err(Error::Storage(format!("unknown transaction state: {other}"))),
+        other => Err(Error::Storage(format!(
+            "unknown transaction state: {other}"
+        ))),
     }
 }
 
 fn participant_to_av(p: &ParticipantRecord) -> AttributeValue {
     let mut map = HashMap::new();
-    map.insert("endpoint".to_string(), AttributeValue::S(p.endpoint.clone()));
+    map.insert(
+        "endpoint".to_string(),
+        AttributeValue::S(p.endpoint.clone()),
+    );
     map.insert(
         "crash_count".to_string(),
         AttributeValue::N(p.crash_count.to_string()),
@@ -94,9 +99,7 @@ fn participant_from_av(av: &AttributeValue) -> Result<ParticipantRecord, Error> 
     })
 }
 
-fn record_from_item(
-    item: &HashMap<String, AttributeValue>,
-) -> Result<TransactionRecord, Error> {
+fn record_from_item(item: &HashMap<String, AttributeValue>) -> Result<TransactionRecord, Error> {
     let txn_id = item
         .get("txn_id")
         .and_then(|v| v.as_s().ok())
@@ -155,7 +158,10 @@ impl TxnStore for DynamoTxnStore {
             .table_name(&self.table_name)
             .item("txn_id", AttributeValue::S(record.txn_id))
             .item("lease_id", AttributeValue::S(record.lease_id))
-            .item("state", AttributeValue::S(state_to_str(&record.state).to_string()))
+            .item(
+                "state",
+                AttributeValue::S(state_to_str(&record.state).to_string()),
+            )
             .item("begun_at", AttributeValue::S(record.begun_at.to_rfc3339()))
             .item("participants", participants_to_av(&record.participants))
             .send()
@@ -189,10 +195,7 @@ impl TxnStore for DynamoTxnStore {
             .key("txn_id", AttributeValue::S(txn_id.to_string()))
             .update_expression("SET #s = :s")
             .expression_attribute_names("#s", "state")
-            .expression_attribute_values(
-                ":s",
-                AttributeValue::S(state_to_str(&state).to_string()),
-            )
+            .expression_attribute_values(":s", AttributeValue::S(state_to_str(&state).to_string()))
             .condition_expression("attribute_exists(txn_id)")
             .send()
             .await;
@@ -312,11 +315,7 @@ mod tests {
     }
 
     async fn teardown(client: &Client, table_name: &str) {
-        let _ = client
-            .delete_table()
-            .table_name(table_name)
-            .send()
-            .await;
+        let _ = client.delete_table().table_name(table_name).send().await;
     }
 
     fn make_record(txn_id: &str, lease_id: &str) -> TransactionRecord {
@@ -353,7 +352,10 @@ mod tests {
     async fn update_state() {
         let (store, table_name, client) = setup().await;
 
-        store.create(make_record("txn-state", "lease-s")).await.unwrap();
+        store
+            .create(make_record("txn-state", "lease-s"))
+            .await
+            .unwrap();
         store
             .update_state("txn-state", TransactionState::Committed)
             .await
@@ -383,7 +385,10 @@ mod tests {
     async fn add_participant() {
         let (store, table_name, client) = setup().await;
 
-        store.create(make_record("txn-part", "lease-p")).await.unwrap();
+        store
+            .create(make_record("txn-part", "lease-p"))
+            .await
+            .unwrap();
         store
             .add_participant(
                 "txn-part",
@@ -423,7 +428,10 @@ mod tests {
     async fn remove() {
         let (store, table_name, client) = setup().await;
 
-        store.create(make_record("txn-rm", "lease-rm")).await.unwrap();
+        store
+            .create(make_record("txn-rm", "lease-rm"))
+            .await
+            .unwrap();
         store.remove("txn-rm").await.unwrap();
         assert!(store.get("txn-rm").await.unwrap().is_none());
 

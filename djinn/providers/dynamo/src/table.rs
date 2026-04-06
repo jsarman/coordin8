@@ -1,11 +1,11 @@
 use aws_sdk_dynamodb::{
-    Client,
     error::SdkError,
     operation::create_table::CreateTableError,
     types::{
         AttributeDefinition, BillingMode, GlobalSecondaryIndex, KeySchemaElement, KeyType,
         Projection, ProjectionType, ScalarAttributeType, TimeToLiveSpecification,
     },
+    Client,
 };
 use tracing::{info, warn};
 
@@ -85,7 +85,9 @@ pub async fn ensure_lease_table(client: &Client, table_name: &str) -> Result<(),
         Ok(_) => {
             info!(table = table_name, "DynamoDB table created");
         }
-        Err(SdkError::ServiceError(se)) if matches!(se.err(), CreateTableError::ResourceInUseException(_)) => {
+        Err(SdkError::ServiceError(se))
+            if matches!(se.err(), CreateTableError::ResourceInUseException(_)) =>
+        {
             // Table already exists — that's fine.
         }
         Err(e) => {
@@ -109,7 +111,10 @@ pub async fn ensure_lease_table(client: &Client, table_name: &str) -> Result<(),
 
     match ttl_result {
         Ok(_) => {
-            info!(table = table_name, "DynamoDB TTL enabled on 'ttl' attribute");
+            info!(
+                table = table_name,
+                "DynamoDB TTL enabled on 'ttl' attribute"
+            );
         }
         Err(e) => {
             // TTL errors are non-fatal — log and continue.
@@ -363,7 +368,10 @@ pub async fn ensure_space_table(client: &Client, table_name: &str) -> Result<(),
 }
 
 /// Ensure the space uncommitted buffer table exists. PK = txn_id, SK = tuple_id.
-pub async fn ensure_space_uncommitted_table(client: &Client, table_name: &str) -> Result<(), String> {
+pub async fn ensure_space_uncommitted_table(
+    client: &Client,
+    table_name: &str,
+) -> Result<(), String> {
     let result = client
         .create_table()
         .table_name(table_name)

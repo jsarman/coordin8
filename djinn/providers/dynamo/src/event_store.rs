@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use aws_sdk_dynamodb::{Client, types::AttributeValue};
+use aws_sdk_dynamodb::{types::AttributeValue, Client};
 use chrono::{DateTime, Utc};
 
 use coordin8_core::{DeliveryMode, Error, EventRecord, EventStore, SubscriptionRecord};
@@ -95,9 +95,9 @@ fn sub_from_item(item: &HashMap<String, AttributeValue>) -> Result<SubscriptionR
         Some(AttributeValue::M(map)) => map
             .iter()
             .map(|(k, v)| {
-                v.as_s()
-                    .map(|s| (k.clone(), s.clone()))
-                    .map_err(|_| Error::Storage(format!("template value for '{k}' is not a string")))
+                v.as_s().map(|s| (k.clone(), s.clone())).map_err(|_| {
+                    Error::Storage(format!("template value for '{k}' is not a string"))
+                })
             })
             .collect::<Result<HashMap<String, String>, Error>>()?,
         _ => HashMap::new(),
@@ -205,10 +205,7 @@ impl EventStore for DynamoEventStore {
             .client
             .put_item()
             .table_name(&self.sub_table)
-            .item(
-                "registration_id",
-                AttributeValue::S(sub.registration_id),
-            )
+            .item("registration_id", AttributeValue::S(sub.registration_id))
             .item("source", AttributeValue::S(sub.source))
             .item("lease_id", AttributeValue::S(sub.lease_id))
             .item(
@@ -387,10 +384,7 @@ impl EventStore for DynamoEventStore {
             .query()
             .table_name(&self.mailbox_table)
             .key_condition_expression("registration_id = :rid")
-            .expression_attribute_values(
-                ":rid",
-                AttributeValue::S(registration_id.to_string()),
-            )
+            .expression_attribute_values(":rid", AttributeValue::S(registration_id.to_string()))
             .send()
             .await
             .map_err(|e| Error::Storage(format!("query failed: {e}")))?;
@@ -405,9 +399,7 @@ impl EventStore for DynamoEventStore {
 
         // Delete all items we just read (batch delete, 25 at a time)
         for chunk in items.chunks(25) {
-            let mut batch = self
-                .client
-                .batch_write_item();
+            let mut batch = self.client.batch_write_item();
 
             let delete_requests: Vec<_> = chunk
                 .iter()
@@ -417,10 +409,7 @@ impl EventStore for DynamoEventStore {
                         "registration_id".to_string(),
                         item.get("registration_id").unwrap().clone(),
                     );
-                    key.insert(
-                        "seq_num".to_string(),
-                        item.get("seq_num").unwrap().clone(),
-                    );
+                    key.insert("seq_num".to_string(), item.get("seq_num").unwrap().clone());
                     aws_sdk_dynamodb::types::WriteRequest::builder()
                         .delete_request(
                             aws_sdk_dynamodb::types::DeleteRequest::builder()
@@ -452,10 +441,7 @@ impl DynamoEventStore {
                 .query()
                 .table_name(&self.mailbox_table)
                 .key_condition_expression("registration_id = :rid")
-                .expression_attribute_values(
-                    ":rid",
-                    AttributeValue::S(registration_id.to_string()),
-                )
+                .expression_attribute_values(":rid", AttributeValue::S(registration_id.to_string()))
                 .limit(25)
                 .send()
                 .await
@@ -474,10 +460,7 @@ impl DynamoEventStore {
                         "registration_id".to_string(),
                         item.get("registration_id").unwrap().clone(),
                     );
-                    key.insert(
-                        "seq_num".to_string(),
-                        item.get("seq_num").unwrap().clone(),
-                    );
+                    key.insert("seq_num".to_string(), item.get("seq_num").unwrap().clone());
                     aws_sdk_dynamodb::types::WriteRequest::builder()
                         .delete_request(
                             aws_sdk_dynamodb::types::DeleteRequest::builder()
@@ -525,8 +508,7 @@ mod tests {
         let sub_table = format!("coordin8_event_sub_test_{suffix}");
         let mailbox_table = format!("coordin8_event_mailbox_test_{suffix}");
 
-        let store =
-            DynamoEventStore::with_tables(client.clone(), &sub_table, &mailbox_table);
+        let store = DynamoEventStore::with_tables(client.clone(), &sub_table, &mailbox_table);
         store.init().await.expect("table creation failed");
 
         (store, sub_table, mailbox_table, client)
@@ -534,11 +516,7 @@ mod tests {
 
     async fn teardown(client: &Client, sub_table: &str, mailbox_table: &str) {
         let _ = client.delete_table().table_name(sub_table).send().await;
-        let _ = client
-            .delete_table()
-            .table_name(mailbox_table)
-            .send()
-            .await;
+        let _ = client.delete_table().table_name(mailbox_table).send().await;
     }
 
     fn make_sub(reg_id: &str, lease_id: &str) -> SubscriptionRecord {
@@ -593,7 +571,10 @@ mod tests {
     async fn remove_subscription() {
         let (store, sub_table, mailbox_table, client) = setup().await;
 
-        store.create_subscription(make_sub("reg-rm", "lease-rm")).await.unwrap();
+        store
+            .create_subscription(make_sub("reg-rm", "lease-rm"))
+            .await
+            .unwrap();
         store.remove_subscription("reg-rm").await.unwrap();
         assert!(store.get_subscription("reg-rm").await.unwrap().is_none());
 
@@ -651,8 +632,14 @@ mod tests {
     async fn list_subscriptions() {
         let (store, sub_table, mailbox_table, client) = setup().await;
 
-        store.create_subscription(make_sub("reg-a", "lease-a")).await.unwrap();
-        store.create_subscription(make_sub("reg-b", "lease-b")).await.unwrap();
+        store
+            .create_subscription(make_sub("reg-a", "lease-a"))
+            .await
+            .unwrap();
+        store
+            .create_subscription(make_sub("reg-b", "lease-b"))
+            .await
+            .unwrap();
 
         let all = store.list_subscriptions().await.unwrap();
         assert_eq!(all.len(), 2);

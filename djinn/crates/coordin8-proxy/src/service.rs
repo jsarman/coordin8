@@ -20,10 +20,7 @@ impl ProxyServiceImpl {
 
 #[tonic::async_trait]
 impl ProxyService for ProxyServiceImpl {
-    async fn open(
-        &self,
-        request: Request<OpenRequest>,
-    ) -> Result<Response<ProxyHandle>, Status> {
+    async fn open(&self, request: Request<OpenRequest>) -> Result<Response<ProxyHandle>, Status> {
         let template = request.into_inner().template;
         debug!(?template, "proxy open request");
 
@@ -39,10 +36,7 @@ impl ProxyService for ProxyServiceImpl {
         }))
     }
 
-    async fn release(
-        &self,
-        request: Request<ReleaseRequest>,
-    ) -> Result<Response<()>, Status> {
+    async fn release(&self, request: Request<ReleaseRequest>) -> Result<Response<()>, Status> {
         let proxy_id = request.into_inner().proxy_id;
         debug!(%proxy_id, "proxy release request");
 

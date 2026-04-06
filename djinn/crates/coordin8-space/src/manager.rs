@@ -7,7 +7,9 @@ use tokio::sync::broadcast;
 use tracing::debug;
 use uuid::Uuid;
 
-use coordin8_core::{Error, LeaseRecord, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord};
+use coordin8_core::{
+    Error, LeaseRecord, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord,
+};
 use coordin8_lease::LeaseManager;
 use coordin8_registry::matcher::{matches, parse_template};
 
@@ -170,7 +172,10 @@ impl SpaceManager {
                         }
                         // Re-query store atomically — don't trust broadcast alone
                         // because another taker may have claimed it.
-                        if let Ok(Some(record)) = store.take_match(&template_clone, txn_id_clone.as_deref()).await {
+                        if let Ok(Some(record)) = store
+                            .take_match(&template_clone, txn_id_clone.as_deref())
+                            .await
+                        {
                             if txn_id_clone.is_none() {
                                 let _ = lease_mgr.cancel(&record.lease_id).await;
                             }
@@ -180,7 +185,10 @@ impl SpaceManager {
                     Err(broadcast::error::RecvError::Closed) => return None,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         // We lagged — try an immediate take in case we missed the signal
-                        if let Ok(Some(record)) = store.take_match(&template_clone, txn_id_clone.as_deref()).await {
+                        if let Ok(Some(record)) = store
+                            .take_match(&template_clone, txn_id_clone.as_deref())
+                            .await
+                        {
                             if txn_id_clone.is_none() {
                                 let _ = lease_mgr.cancel(&record.lease_id).await;
                             }
@@ -208,7 +216,9 @@ impl SpaceManager {
         template: HashMap<String, String>,
         txn_id: Option<String>,
     ) -> Result<Vec<TupleRecord>, Error> {
-        self.store.find_all_matches(&template, txn_id.as_deref()).await
+        self.store
+            .find_all_matches(&template, txn_id.as_deref())
+            .await
     }
 
     /// Commit a transaction's Space operations: flush uncommitted writes to the
@@ -241,7 +251,12 @@ impl SpaceManager {
             let _ = self.tuple_tx.send(record.clone());
         }
 
-        debug!(txn_id, discarded = discarded.len(), restored = restored.len(), "space txn aborted");
+        debug!(
+            txn_id,
+            discarded = discarded.len(),
+            restored = restored.len(),
+            "space txn aborted"
+        );
         Ok(())
     }
 
@@ -318,11 +333,7 @@ impl SpaceManager {
     }
 
     /// Renew a tuple's lease.
-    pub async fn renew(
-        &self,
-        tuple_id: &str,
-        ttl_secs: u64,
-    ) -> Result<LeaseRecord, Error> {
+    pub async fn renew(&self, tuple_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error> {
         let record = self
             .store
             .get(tuple_id)

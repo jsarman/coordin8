@@ -216,10 +216,7 @@ impl RegistryService for RegistryServiceImpl {
             attrs.insert(k, v);
         }
 
-        let entry = RegistryEntry {
-            attrs,
-            ..existing
-        };
+        let entry = RegistryEntry { attrs, ..existing };
 
         self.index
             .update(entry.clone())
@@ -279,9 +276,14 @@ impl RegistryService for RegistryServiceImpl {
 
         debug!(?template, count = entries.len(), "lookup_all");
 
-        #[allow(clippy::result_large_err)] // tonic::Status is the gRPC error type — boxing it gains nothing
-        let stream =
-            tokio_stream::iter(entries.iter().map(|e| Ok(entry_to_capability(e))).collect::<Vec<_>>());
+        #[allow(clippy::result_large_err)]
+        // tonic::Status is the gRPC error type — boxing it gains nothing
+        let stream = tokio_stream::iter(
+            entries
+                .iter()
+                .map(|e| Ok(entry_to_capability(e)))
+                .collect::<Vec<_>>(),
+        );
         Ok(Response::new(Box::pin(stream)))
     }
 

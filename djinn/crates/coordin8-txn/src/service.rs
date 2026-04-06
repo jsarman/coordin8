@@ -20,11 +20,11 @@ fn to_timestamp(dt: chrono::DateTime<chrono::Utc>) -> prost_types::Timestamp {
 
 fn state_to_proto(s: &TransactionState) -> i32 {
     match s {
-        TransactionState::Active    => 0,
-        TransactionState::Voting    => 1,
-        TransactionState::Prepared  => 2,
+        TransactionState::Active => 0,
+        TransactionState::Voting => 1,
+        TransactionState::Prepared => 2,
         TransactionState::Committed => 3,
-        TransactionState::Aborted   => 4,
+        TransactionState::Aborted => 4,
     }
 }
 

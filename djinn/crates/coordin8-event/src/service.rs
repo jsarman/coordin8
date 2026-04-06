@@ -61,7 +61,13 @@ impl EventService for EventServiceImpl {
 
         let (registration_id, lease, seq_num) = self
             .manager
-            .subscribe(r.source.clone(), r.template, delivery, r.ttl_seconds, r.handback)
+            .subscribe(
+                r.source.clone(),
+                r.template,
+                delivery,
+                r.ttl_seconds,
+                r.handback,
+            )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -147,9 +153,7 @@ impl EventService for EventServiceImpl {
 
                 let mut check_attrs = event.attrs.clone();
                 check_attrs.insert("event_type".to_string(), event.event_type.clone());
-                if !ops.is_empty()
-                    && !coordin8_registry::matcher::matches(&ops, &check_attrs)
-                {
+                if !ops.is_empty() && !coordin8_registry::matcher::matches(&ops, &check_attrs) {
                     continue;
                 }
 
