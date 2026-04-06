@@ -1,5 +1,27 @@
 services:
 
+  # Deploys all 9 DynamoDB tables via CloudFormation before Djinn starts.
+  # Runs unconditionally — harmless when COORDIN8_PROVIDER=local since tables are just unused.
+  cfn-init:
+    image: amazon/aws-cli
+    command: >
+      cloudformation deploy
+      --template-file /infra/dynamodb-tables.cfn.yml
+      --stack-name coordin8-tables
+      --endpoint-url http://ministack:4566
+      --no-fail-on-empty-changeset
+    environment:
+      AWS_ACCESS_KEY_ID: "test"
+      AWS_SECRET_ACCESS_KEY: "test"
+      AWS_DEFAULT_REGION: "us-east-1"
+    volumes:
+      - ./infra:/infra:ro
+    depends_on:
+      ministack:
+        condition: service_healthy
+    networks:
+      - coordin8-net
+
   djinn:
     build:
       context: .
@@ -26,6 +48,8 @@ services:
     depends_on:
       ministack:
         condition: service_healthy
+      cfn-init:
+        condition: service_completed_successfully
     extra_hosts:
       - "host.docker.internal:host-gateway"  # lets Djinn call back to host (2PC participants)
     networks:

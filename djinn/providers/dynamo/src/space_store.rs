@@ -48,19 +48,29 @@ impl DynamoSpaceStore {
         }
     }
 
+    /// Create the backing tables if `COORDIN8_AUTO_CREATE_TABLES` is set to
+    /// `"true"` or `"1"` (case-insensitive). Otherwise, assumes the tables
+    /// already exist (e.g. provisioned by CloudFormation).
     pub async fn init(&self) -> Result<(), Error> {
-        ensure_space_table(&self.client, &self.tuple_table)
-            .await
-            .map_err(Error::Storage)?;
-        ensure_space_uncommitted_table(&self.client, &self.uncommitted_table)
-            .await
-            .map_err(Error::Storage)?;
-        ensure_space_txn_taken_table(&self.client, &self.txn_taken_table)
-            .await
-            .map_err(Error::Storage)?;
-        ensure_space_watches_table(&self.client, &self.watches_table)
-            .await
-            .map_err(Error::Storage)?;
+        if crate::auto_create_enabled() {
+            ensure_space_table(&self.client, &self.tuple_table)
+                .await
+                .map_err(Error::Storage)?;
+            ensure_space_uncommitted_table(&self.client, &self.uncommitted_table)
+                .await
+                .map_err(Error::Storage)?;
+            ensure_space_txn_taken_table(&self.client, &self.txn_taken_table)
+                .await
+                .map_err(Error::Storage)?;
+            ensure_space_watches_table(&self.client, &self.watches_table)
+                .await
+                .map_err(Error::Storage)?;
+        } else {
+            tracing::info!(
+                tables = %format!("{}, {}, {}, {}", self.tuple_table, self.uncommitted_table, self.txn_taken_table, self.watches_table),
+                "COORDIN8_AUTO_CREATE_TABLES not set — skipping table creation"
+            );
+        }
         Ok(())
     }
 }
@@ -746,6 +756,7 @@ mod tests {
         std::env::set_var("AWS_ACCESS_KEY_ID", "test");
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
         std::env::set_var("AWS_DEFAULT_REGION", "us-east-1");
+        std::env::set_var("COORDIN8_AUTO_CREATE_TABLES", "true");
 
         let client = make_dynamo_client().await;
         let suffix = Uuid::new_v4();
