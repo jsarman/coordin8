@@ -474,7 +474,7 @@ impl SpaceStore for DynamoSpaceStore {
                         // Conditional check failed — someone else took it, try next match
                         let is_condition_check = e
                             .as_service_error()
-                            .map_or(false, |se| se.is_conditional_check_failed_exception());
+                            .is_some_and(|se| se.is_conditional_check_failed_exception());
                         if is_condition_check {
                             continue;
                         }
