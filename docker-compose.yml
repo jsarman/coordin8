@@ -19,12 +19,12 @@ services:
       PROXY_PORT_MIN: "9100"
       PROXY_PORT_MAX: "9200"
       COORDIN8_PROVIDER: "${COORDIN8_PROVIDER:-local}"
-      DYNAMODB_ENDPOINT: "http://localstack:4566"
+      DYNAMODB_ENDPOINT: "http://ministack:4566"
       AWS_ACCESS_KEY_ID: "test"
       AWS_SECRET_ACCESS_KEY: "test"
       AWS_DEFAULT_REGION: "us-east-1"
     depends_on:
-      localstack:
+      ministack:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"  # lets Djinn call back to host (2PC participants)
@@ -52,20 +52,17 @@ services:
     networks:
       - coordin8-net
 
-  # LocalStack — AWS emulation for integration testing
-  localstack:
-    image: localstack/localstack:3
+  # MiniStack — free, MIT-licensed AWS emulation (replaces LocalStack)
+  ministack:
+    image: nahuelnucera/ministack
     ports:
       - "4566:4566"
     environment:
-      - SERVICES=dynamodb
       - DEFAULT_REGION=us-east-1
-    volumes:
-      - localstack-data:/var/lib/localstack
     networks:
       - coordin8-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"dynamodb\": \"available\"'"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')\""]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -83,5 +80,4 @@ networks:
   coordin8-net:
     driver: bridge
 
-volumes:
-  localstack-data:
+volumes: {}

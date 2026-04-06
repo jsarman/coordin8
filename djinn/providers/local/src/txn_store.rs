@@ -42,7 +42,11 @@ impl TxnStore for InMemoryTxnStore {
         }
     }
 
-    async fn add_participant(&self, txn_id: &str, participant: ParticipantRecord) -> Result<(), Error> {
+    async fn add_participant(
+        &self,
+        txn_id: &str,
+        participant: ParticipantRecord,
+    ) -> Result<(), Error> {
         match self.records.get_mut(txn_id) {
             Some(mut r) => {
                 r.participants.push(participant);

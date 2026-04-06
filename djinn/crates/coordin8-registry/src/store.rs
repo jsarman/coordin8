@@ -33,7 +33,10 @@ impl RegistryIndex {
         self.store.get_by_lease(lease_id).await
     }
 
-    pub async fn unregister_by_lease(&self, lease_id: &str) -> Result<Option<RegistryEntry>, Error> {
+    pub async fn unregister_by_lease(
+        &self,
+        lease_id: &str,
+    ) -> Result<Option<RegistryEntry>, Error> {
         self.store.remove_by_lease(lease_id).await
     }
 

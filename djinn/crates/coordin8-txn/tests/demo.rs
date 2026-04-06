@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{Request, Response, Status};
 use tonic::transport::Server;
+use tonic::{Request, Response, Status};
 
 use coordin8_core::TransactionState;
 use coordin8_lease::LeaseManager;
@@ -29,21 +29,21 @@ struct MockParticipant {
     name: String,
     /// What vote to cast in Prepare (0=PREPARED, 1=NOTCHANGED, 2=ABORTED)
     prepare_vote: i32,
-    pub prepared:  Arc<AtomicBool>,
+    pub prepared: Arc<AtomicBool>,
     pub committed: Arc<AtomicBool>,
-    pub aborted:   Arc<AtomicBool>,
+    pub aborted: Arc<AtomicBool>,
 }
 
 impl MockParticipant {
     fn new(name: &str, prepare_vote: i32) -> (Self, Arc<AtomicBool>, Arc<AtomicBool>) {
         let committed = Arc::new(AtomicBool::new(false));
-        let aborted   = Arc::new(AtomicBool::new(false));
+        let aborted = Arc::new(AtomicBool::new(false));
         let p = Self {
-            name:         name.to_string(),
+            name: name.to_string(),
             prepare_vote,
-            prepared:     Arc::new(AtomicBool::new(false)),
-            committed:    Arc::clone(&committed),
-            aborted:      Arc::clone(&aborted),
+            prepared: Arc::new(AtomicBool::new(false)),
+            committed: Arc::clone(&committed),
+            aborted: Arc::clone(&aborted),
         };
         (p, committed, aborted)
     }
@@ -51,39 +51,65 @@ impl MockParticipant {
 
 #[tonic::async_trait]
 impl ParticipantService for MockParticipant {
-    async fn prepare(&self, req: Request<ParticipantRequest>) -> Result<Response<PrepareResponse>, Status> {
+    async fn prepare(
+        &self,
+        req: Request<ParticipantRequest>,
+    ) -> Result<Response<PrepareResponse>, Status> {
         self.prepared.store(true, Ordering::SeqCst);
         let vote_name = match self.prepare_vote {
             1 => "NOTCHANGED",
             2 => "ABORTED",
             _ => "PREPARED",
         };
-        println!("    [{}] prepare({}) → {}", self.name, &req.into_inner().txn_id[..8], vote_name);
-        Ok(Response::new(PrepareResponse { vote: self.prepare_vote }))
+        println!(
+            "    [{}] prepare({}) → {}",
+            self.name,
+            &req.into_inner().txn_id[..8],
+            vote_name
+        );
+        Ok(Response::new(PrepareResponse {
+            vote: self.prepare_vote,
+        }))
     }
 
     async fn commit(&self, req: Request<ParticipantRequest>) -> Result<Response<()>, Status> {
         self.committed.store(true, Ordering::SeqCst);
-        println!("    [{}] commit({})", self.name, &req.into_inner().txn_id[..8]);
+        println!(
+            "    [{}] commit({})",
+            self.name,
+            &req.into_inner().txn_id[..8]
+        );
         Ok(Response::new(()))
     }
 
     async fn abort(&self, req: Request<ParticipantRequest>) -> Result<Response<()>, Status> {
         self.aborted.store(true, Ordering::SeqCst);
-        println!("    [{}] abort({})", self.name, &req.into_inner().txn_id[..8]);
+        println!(
+            "    [{}] abort({})",
+            self.name,
+            &req.into_inner().txn_id[..8]
+        );
         Ok(Response::new(()))
     }
 
-    async fn prepare_and_commit(&self, req: Request<ParticipantRequest>) -> Result<Response<PrepareResponse>, Status> {
+    async fn prepare_and_commit(
+        &self,
+        req: Request<ParticipantRequest>,
+    ) -> Result<Response<PrepareResponse>, Status> {
         let tid = &req.into_inner().txn_id[..8].to_string();
         if self.prepare_vote == 0 {
             self.committed.store(true, Ordering::SeqCst);
-            println!("    [{}] prepare_and_commit({}) → PREPARED+committed", self.name, tid);
+            println!(
+                "    [{}] prepare_and_commit({}) → PREPARED+committed",
+                self.name, tid
+            );
         } else {
             self.aborted.store(true, Ordering::SeqCst);
             println!("    [{}] prepare_and_commit({}) → ABORTED", self.name, tid);
         }
-        Ok(Response::new(PrepareResponse { vote: self.prepare_vote }))
+        Ok(Response::new(PrepareResponse {
+            vote: self.prepare_vote,
+        }))
     }
 }
 
@@ -91,7 +117,10 @@ impl ParticipantService for MockParticipant {
 
 fn make_manager() -> Arc<TxnManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(lease_store, coordin8_core::LeaseConfig::default()));
+    let lease_manager = Arc::new(LeaseManager::new(
+        lease_store,
+        coordin8_core::LeaseConfig::default(),
+    ));
     let txn_store = Arc::new(InMemoryTxnStore::new());
     Arc::new(TxnManager::new(txn_store, lease_manager))
 }
@@ -142,11 +171,21 @@ async fn single_participant_commit() {
 
     let state = mgr.get_state(&txn_id).await.unwrap();
     println!("  State:  {:?}", state);
-    println!("  store-A committed={} aborted={}", committed.load(Ordering::SeqCst), aborted.load(Ordering::SeqCst));
+    println!(
+        "  store-A committed={} aborted={}",
+        committed.load(Ordering::SeqCst),
+        aborted.load(Ordering::SeqCst)
+    );
 
     assert_eq!(state, TransactionState::Committed);
-    assert!(committed.load(Ordering::SeqCst),  "store-A should have committed");
-    assert!(!aborted.load(Ordering::SeqCst),   "store-A should NOT have aborted");
+    assert!(
+        committed.load(Ordering::SeqCst),
+        "store-A should have committed"
+    );
+    assert!(
+        !aborted.load(Ordering::SeqCst),
+        "store-A should NOT have aborted"
+    );
     println!("  ✓ State is COMMITTED. Participant committed. No abort.");
 }
 
@@ -174,8 +213,16 @@ async fn multi_participant_all_prepared_commits() {
 
     let state = mgr.get_state(&txn_id).await.unwrap();
     println!("  State:  {:?}", state);
-    println!("  store-A committed={} aborted={}", committed_a.load(Ordering::SeqCst), aborted_a.load(Ordering::SeqCst));
-    println!("  store-B committed={} aborted={}", committed_b.load(Ordering::SeqCst), aborted_b.load(Ordering::SeqCst));
+    println!(
+        "  store-A committed={} aborted={}",
+        committed_a.load(Ordering::SeqCst),
+        aborted_a.load(Ordering::SeqCst)
+    );
+    println!(
+        "  store-B committed={} aborted={}",
+        committed_b.load(Ordering::SeqCst),
+        aborted_b.load(Ordering::SeqCst)
+    );
 
     assert_eq!(state, TransactionState::Committed);
     assert!(committed_a.load(Ordering::SeqCst));
@@ -209,15 +256,38 @@ async fn participant_vetoes_aborts_everyone() {
 
     let state = mgr.get_state(&txn_id).await.unwrap();
     println!("  State:  {:?}", state);
-    println!("  store-A committed={} aborted={}", committed_a.load(Ordering::SeqCst), aborted_a.load(Ordering::SeqCst));
-    println!("  store-B committed={} aborted={}", committed_b.load(Ordering::SeqCst), aborted_b.load(Ordering::SeqCst));
+    println!(
+        "  store-A committed={} aborted={}",
+        committed_a.load(Ordering::SeqCst),
+        aborted_a.load(Ordering::SeqCst)
+    );
+    println!(
+        "  store-B committed={} aborted={}",
+        committed_b.load(Ordering::SeqCst),
+        aborted_b.load(Ordering::SeqCst)
+    );
 
-    assert!(result.is_err(), "commit should return error when a participant vetoes");
+    assert!(
+        result.is_err(),
+        "commit should return error when a participant vetoes"
+    );
     assert_eq!(state, TransactionState::Aborted);
-    assert!(!committed_a.load(Ordering::SeqCst), "store-A must NOT have committed — veto means nothing commits");
-    assert!(!committed_b.load(Ordering::SeqCst), "store-B must NOT have committed");
-    assert!(aborted_a.load(Ordering::SeqCst),   "store-A should have received abort");
-    assert!(aborted_b.load(Ordering::SeqCst),   "store-B should have received abort");
+    assert!(
+        !committed_a.load(Ordering::SeqCst),
+        "store-A must NOT have committed — veto means nothing commits"
+    );
+    assert!(
+        !committed_b.load(Ordering::SeqCst),
+        "store-B must NOT have committed"
+    );
+    assert!(
+        aborted_a.load(Ordering::SeqCst),
+        "store-A should have received abort"
+    );
+    assert!(
+        aborted_b.load(Ordering::SeqCst),
+        "store-B should have received abort"
+    );
     println!("  ✓ State is ABORTED. Neither participant committed. This is the guarantee.");
 }
 
@@ -245,14 +315,34 @@ async fn explicit_abort_no_state_change() {
 
     let state = mgr.get_state(&txn_id).await.unwrap();
     println!("  State:  {:?}", state);
-    println!("  store-A committed={} aborted={}", committed_a.load(Ordering::SeqCst), aborted_a.load(Ordering::SeqCst));
-    println!("  store-B committed={} aborted={}", committed_b.load(Ordering::SeqCst), aborted_b.load(Ordering::SeqCst));
+    println!(
+        "  store-A committed={} aborted={}",
+        committed_a.load(Ordering::SeqCst),
+        aborted_a.load(Ordering::SeqCst)
+    );
+    println!(
+        "  store-B committed={} aborted={}",
+        committed_b.load(Ordering::SeqCst),
+        aborted_b.load(Ordering::SeqCst)
+    );
 
     assert_eq!(state, TransactionState::Aborted);
-    assert!(!committed_a.load(Ordering::SeqCst), "store-A must NOT have committed");
-    assert!(!committed_b.load(Ordering::SeqCst), "store-B must NOT have committed");
-    assert!(aborted_a.load(Ordering::SeqCst),   "store-A should have received abort");
-    assert!(aborted_b.load(Ordering::SeqCst),   "store-B should have received abort");
+    assert!(
+        !committed_a.load(Ordering::SeqCst),
+        "store-A must NOT have committed"
+    );
+    assert!(
+        !committed_b.load(Ordering::SeqCst),
+        "store-B must NOT have committed"
+    );
+    assert!(
+        aborted_a.load(Ordering::SeqCst),
+        "store-A should have received abort"
+    );
+    assert!(
+        aborted_b.load(Ordering::SeqCst),
+        "store-B should have received abort"
+    );
     println!("  ✓ State is ABORTED. Neither participant committed. Clean rollback.");
 }
 
@@ -265,7 +355,7 @@ async fn notchanged_voter_skipped_at_commit() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let mgr = make_manager();
-    let (ep_a, committed_a, _) = spawn_participant("writer",   0 /* PREPARED    */).await;
+    let (ep_a, committed_a, _) = spawn_participant("writer", 0 /* PREPARED    */).await;
     let (ep_b, committed_b, _) = spawn_participant("readonly", 1 /* NOTCHANGED  */).await;
 
     let (txn_id, _) = mgr.begin(60).await.unwrap();
@@ -280,12 +370,24 @@ async fn notchanged_voter_skipped_at_commit() {
 
     let state = mgr.get_state(&txn_id).await.unwrap();
     println!("  State:  {:?}", state);
-    println!("  writer   committed={}", committed_a.load(Ordering::SeqCst));
-    println!("  readonly committed={} (should be false — no commit call needed)", committed_b.load(Ordering::SeqCst));
+    println!(
+        "  writer   committed={}",
+        committed_a.load(Ordering::SeqCst)
+    );
+    println!(
+        "  readonly committed={} (should be false — no commit call needed)",
+        committed_b.load(Ordering::SeqCst)
+    );
 
     assert_eq!(state, TransactionState::Committed);
-    assert!(committed_a.load(Ordering::SeqCst),  "writer should have committed");
-    assert!(!committed_b.load(Ordering::SeqCst), "readonly should NOT receive commit call");
+    assert!(
+        committed_a.load(Ordering::SeqCst),
+        "writer should have committed"
+    );
+    assert!(
+        !committed_b.load(Ordering::SeqCst),
+        "readonly should NOT receive commit call"
+    );
     println!("  ✓ COMMITTED. Writer got commit. Read-only participant skipped.");
 }
 
@@ -312,11 +414,21 @@ async fn lease_expiry_auto_aborts() {
 
     let state = mgr.get_state(&txn_id).await.unwrap();
     println!("  State:  {:?}", state);
-    println!("  store-A committed={} aborted={}", committed_a.load(Ordering::SeqCst), aborted_a.load(Ordering::SeqCst));
+    println!(
+        "  store-A committed={} aborted={}",
+        committed_a.load(Ordering::SeqCst),
+        aborted_a.load(Ordering::SeqCst)
+    );
 
     assert_eq!(state, TransactionState::Aborted);
-    assert!(!committed_a.load(Ordering::SeqCst), "store-A must NOT have committed");
-    assert!(aborted_a.load(Ordering::SeqCst),   "store-A should have received abort");
+    assert!(
+        !committed_a.load(Ordering::SeqCst),
+        "store-A must NOT have committed"
+    );
+    assert!(
+        aborted_a.load(Ordering::SeqCst),
+        "store-A should have received abort"
+    );
     println!("  ✓ Lease expired → ABORTED. Participant got abort call. No commits.");
 }
 

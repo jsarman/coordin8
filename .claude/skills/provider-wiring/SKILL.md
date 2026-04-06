@@ -92,10 +92,10 @@ coordin8-provider-dynamo = { workspace = true }
 Add to the `djinn` service environment:
 ```yaml
 COORDIN8_PROVIDER: "${COORDIN8_PROVIDER:-local}"
-DYNAMODB_ENDPOINT: "http://localstack:4566"
+DYNAMODB_ENDPOINT: "http://ministack:4566"
 ```
 
-Add `depends_on` for localstack when using dynamo (optional — can be manual for now).
+Add `depends_on` for ministack when using dynamo (optional — can be manual for now).
 
 ### `Dockerfile.djinn`
 No changes needed — the binary is the same, provider is selected at runtime via env var.

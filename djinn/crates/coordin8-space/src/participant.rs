@@ -55,10 +55,7 @@ impl ParticipantService for SpaceParticipantService {
         Ok(Response::new(PrepareResponse { vote }))
     }
 
-    async fn commit(
-        &self,
-        req: Request<ParticipantRequest>,
-    ) -> Result<Response<()>, Status> {
+    async fn commit(&self, req: Request<ParticipantRequest>) -> Result<Response<()>, Status> {
         let txn_id = req.into_inner().txn_id;
 
         self.manager
@@ -70,10 +67,7 @@ impl ParticipantService for SpaceParticipantService {
         Ok(Response::new(()))
     }
 
-    async fn abort(
-        &self,
-        req: Request<ParticipantRequest>,
-    ) -> Result<Response<()>, Status> {
+    async fn abort(&self, req: Request<ParticipantRequest>) -> Result<Response<()>, Status> {
         let txn_id = req.into_inner().txn_id;
 
         self.manager

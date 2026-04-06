@@ -1,6 +1,6 @@
 use aws_sdk_dynamodb::Client;
 
-/// Build a DynamoDB client. When `DYNAMODB_ENDPOINT` is set (e.g. for LocalStack),
+/// Build a DynamoDB client. When `DYNAMODB_ENDPOINT` is set (e.g. for MiniStack),
 /// that URL is used as the endpoint override. Otherwise falls through to the
 /// standard AWS credential chain and region config.
 pub async fn make_dynamo_client() -> Client {

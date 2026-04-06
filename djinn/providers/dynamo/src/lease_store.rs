@@ -1,8 +1,5 @@
 use async_trait::async_trait;
-use aws_sdk_dynamodb::{
-    Client,
-    types::AttributeValue,
-};
+use aws_sdk_dynamodb::{types::AttributeValue, Client};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -119,7 +116,8 @@ impl LeaseStore for DynamoLeaseStore {
             ttl_seconds: ttl_secs,
         };
 
-        let mut req = self.client
+        let mut req = self
+            .client
             .put_item()
             .table_name(&self.table_name)
             .item("lease_id", AttributeValue::S(record.lease_id.clone()))
@@ -172,16 +170,14 @@ impl LeaseStore for DynamoLeaseStore {
             ),
         };
 
-        let mut req = self.client
+        let mut req = self
+            .client
             .update_item()
             .table_name(&self.table_name)
             .key("lease_id", AttributeValue::S(lease_id.to_string()))
             .update_expression(update_expr)
             .expression_attribute_names("#ttl_field", "ttl")
-            .expression_attribute_values(
-                ":ea",
-                AttributeValue::S(new_expires_at.to_rfc3339()),
-            )
+            .expression_attribute_values(":ea", AttributeValue::S(new_expires_at.to_rfc3339()))
             .expression_attribute_values(":ts", AttributeValue::N(ttl_secs.to_string()))
             .condition_expression("attribute_exists(lease_id)");
 
@@ -255,9 +251,7 @@ impl LeaseStore for DynamoLeaseStore {
             .table_name(&self.table_name)
             // Exclude FOREVER leases (ttl_seconds = 0) and only return records
             // whose expires_at is in the past.
-            .filter_expression(
-                "expires_at <= :now AND ttl_seconds <> :zero",
-            )
+            .filter_expression("expires_at <= :now AND ttl_seconds <> :zero")
             .expression_attribute_values(":now", AttributeValue::S(now))
             .expression_attribute_values(":zero", AttributeValue::N("0".to_string()))
             .send()
@@ -287,7 +281,7 @@ mod tests {
     use crate::client::make_dynamo_client;
     use aws_sdk_dynamodb::Client;
 
-    /// Build a client pointing at LocalStack and create an isolated table for
+    /// Build a client pointing at MiniStack and create an isolated table for
     /// this test run. Returns (store, table_name) — caller must delete the table
     /// after the test.
     async fn setup() -> (DynamoLeaseStore, String, Client) {
@@ -306,15 +300,11 @@ mod tests {
     }
 
     async fn teardown(client: &Client, table_name: &str) {
-        let _ = client
-            .delete_table()
-            .table_name(table_name)
-            .send()
-            .await;
+        let _ = client.delete_table().table_name(table_name).send().await;
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn create_and_get() {
         let (store, table_name, client) = setup().await;
 
@@ -330,7 +320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn cancel_removes_lease() {
         let (store, table_name, client) = setup().await;
 
@@ -342,7 +332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn expired_lease_shows_up_in_list() {
         let (store, table_name, client) = setup().await;
 
@@ -360,7 +350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn forever_lease_never_expires() {
         let (store, table_name, client) = setup().await;
 
@@ -379,7 +369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn get_by_resource() {
         let (store, table_name, client) = setup().await;
 
@@ -392,7 +382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn renew_updates_expiry() {
         let (store, table_name, client) = setup().await;
 

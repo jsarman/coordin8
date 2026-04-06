@@ -6,15 +6,16 @@ use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tracing::info;
 
+use coordin8_core::{EventStore, LeaseStore, RegistryStore, SpaceStore, TxnStore};
 use coordin8_event::{EventManager, EventServiceImpl};
 use coordin8_lease::{LeaseManager, LeaseServiceImpl};
 use coordin8_proto::coordin8::event_service_server::EventServiceServer;
 use coordin8_proto::coordin8::lease_service_server::LeaseServiceServer;
+use coordin8_proto::coordin8::participant_service_server::ParticipantServiceServer;
 use coordin8_proto::coordin8::proxy_service_server::ProxyServiceServer;
 use coordin8_proto::coordin8::registry_service_server::RegistryServiceServer;
 use coordin8_proto::coordin8::space_service_server::SpaceServiceServer;
 use coordin8_proto::coordin8::transaction_service_server::TransactionServiceServer;
-use coordin8_core::{EventStore, LeaseStore, RegistryStore, SpaceStore, TxnStore};
 use coordin8_provider_local::{
     InMemoryEventStore, InMemoryLeaseStore, InMemoryRegistryStore, InMemorySpaceStore,
     InMemoryTxnStore,
@@ -22,7 +23,6 @@ use coordin8_provider_local::{
 use coordin8_proxy::{ProxyConfig, ProxyManager, ProxyServiceImpl};
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
-use coordin8_proto::coordin8::participant_service_server::ParticipantServiceServer;
 use coordin8_space::{SpaceManager, SpaceParticipantService, SpaceServiceImpl};
 use coordin8_txn::{TxnManager, TxnServiceImpl};
 
@@ -49,52 +49,80 @@ async fn main() -> Result<()> {
     let provider = std::env::var("COORDIN8_PROVIDER").unwrap_or_else(|_| "local".into());
 
     // These are Arc<dyn TraitName> — the type erases the concrete provider
-    let (lease_store, registry_store, event_store, txn_store, space_store): (
+    type Stores = (
         Arc<dyn LeaseStore>,
         Arc<dyn RegistryStore>,
         Arc<dyn EventStore>,
         Arc<dyn TxnStore>,
         Arc<dyn SpaceStore>,
-    ) = match provider.as_str() {
-        "dynamo" => {
-            let client = coordin8_provider_dynamo::make_dynamo_client().await;
+    );
+    let (lease_store, registry_store, event_store, txn_store, space_store): Stores =
+        match provider.as_str() {
+            "dynamo" => {
+                let client = coordin8_provider_dynamo::make_dynamo_client().await;
 
-            let lease_store = Arc::new(coordin8_provider_dynamo::DynamoLeaseStore::new(client.clone()));
-            lease_store.init().await?;
+                let lease_store = Arc::new(coordin8_provider_dynamo::DynamoLeaseStore::new(
+                    client.clone(),
+                ));
+                lease_store.init().await?;
 
-            let registry_store = Arc::new(coordin8_provider_dynamo::DynamoRegistryStore::new(client.clone()));
-            registry_store.init().await?;
+                let registry_store = Arc::new(coordin8_provider_dynamo::DynamoRegistryStore::new(
+                    client.clone(),
+                ));
+                registry_store.init().await?;
 
-            let event_store = Arc::new(coordin8_provider_dynamo::DynamoEventStore::new(client.clone()));
-            event_store.init().await?;
+                let event_store = Arc::new(coordin8_provider_dynamo::DynamoEventStore::new(
+                    client.clone(),
+                ));
+                event_store.init().await?;
 
-            let txn_store = Arc::new(coordin8_provider_dynamo::DynamoTxnStore::new(client.clone()));
-            txn_store.init().await?;
+                let txn_store = Arc::new(coordin8_provider_dynamo::DynamoTxnStore::new(
+                    client.clone(),
+                ));
+                txn_store.init().await?;
 
-            let space_store = Arc::new(coordin8_provider_dynamo::DynamoSpaceStore::new(client.clone()));
-            space_store.init().await?;
+                let space_store = Arc::new(coordin8_provider_dynamo::DynamoSpaceStore::new(
+                    client.clone(),
+                ));
+                space_store.init().await?;
 
-            info!("  ✓ Provider: dynamo (DynamoDB)");
+                info!("  ✓ Provider: dynamo (DynamoDB)");
 
-            (lease_store, registry_store, event_store, txn_store, space_store)
-        }
-        _ => {
-            let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
-            let registry_store: Arc<dyn RegistryStore> = Arc::new(InMemoryRegistryStore::new());
-            let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
-            let txn_store: Arc<dyn TxnStore> = Arc::new(InMemoryTxnStore::new());
-            let space_store: Arc<dyn SpaceStore> = Arc::new(InMemorySpaceStore::new());
-            info!("  ✓ Provider: local (in-memory)");
-            (lease_store, registry_store, event_store, txn_store, space_store)
-        }
-    };
+                (
+                    lease_store,
+                    registry_store,
+                    event_store,
+                    txn_store,
+                    space_store,
+                )
+            }
+            _ => {
+                let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+                let registry_store: Arc<dyn RegistryStore> = Arc::new(InMemoryRegistryStore::new());
+                let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+                let txn_store: Arc<dyn TxnStore> = Arc::new(InMemoryTxnStore::new());
+                let space_store: Arc<dyn SpaceStore> = Arc::new(InMemorySpaceStore::new());
+                info!("  ✓ Provider: local (in-memory)");
+                (
+                    lease_store,
+                    registry_store,
+                    event_store,
+                    txn_store,
+                    space_store,
+                )
+            }
+        };
 
     // ── Layer 1: LeaseMgr ────────────────────────────────────────────────────
     let (expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);
     let lease_config = coordin8_core::LeaseConfig::from_env();
-    info!("  Lease policy: max_ttl={}, preferred_ttl={}s",
-        lease_config.max_ttl.map_or("FOREVER".to_string(), |v| format!("{}s", v)),
-        lease_config.preferred_ttl);
+    info!(
+        "  Lease policy: max_ttl={}, preferred_ttl={}s",
+        lease_config
+            .max_ttl
+            .map_or("FOREVER".to_string(), |v| format!("{}s", v)),
+        lease_config.preferred_ttl
+    );
     let lease_manager = Arc::new(LeaseManager::new(lease_store, lease_config));
 
     let reaper_manager = Arc::clone(&lease_manager);
@@ -125,12 +153,11 @@ async fn main() -> Result<()> {
                         lease_id = %lease.lease_id,
                         "registry entry expired"
                     );
-                    let _ = registry_expiry_tx.send(
-                        coordin8_registry::service::RegistryChangedEvent {
+                    let _ =
+                        registry_expiry_tx.send(coordin8_registry::service::RegistryChangedEvent {
                             event_type: 1, // EXPIRED
                             entry,
-                        },
-                    );
+                        });
                 }
             }
         }
@@ -204,12 +231,12 @@ async fn main() -> Result<()> {
     info!("  ✓ Space: ready");
 
     // ── gRPC servers ─────────────────────────────────────────────────────────
-    let lease_addr    = "0.0.0.0:9001".parse()?;
+    let lease_addr = "0.0.0.0:9001".parse()?;
     let registry_addr = "0.0.0.0:9002".parse()?;
-    let proxy_addr    = "0.0.0.0:9003".parse()?;
-    let txn_addr      = "0.0.0.0:9004".parse()?;
-    let event_addr    = "0.0.0.0:9005".parse()?;
-    let space_addr    = "0.0.0.0:9006".parse()?;
+    let proxy_addr = "0.0.0.0:9003".parse()?;
+    let txn_addr = "0.0.0.0:9004".parse()?;
+    let event_addr = "0.0.0.0:9005".parse()?;
+    let space_addr = "0.0.0.0:9006".parse()?;
 
     let lease_svc =
         LeaseServiceServer::new(LeaseServiceImpl::new(Arc::clone(&lease_manager), expiry_tx));
@@ -222,7 +249,8 @@ async fn main() -> Result<()> {
     let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(txn_manager));
     let event_svc = EventServiceServer::new(EventServiceImpl::new(event_manager));
     let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(Arc::clone(&space_manager)));
-    let space_participant_svc = ParticipantServiceServer::new(SpaceParticipantService::new(space_manager));
+    let space_participant_svc =
+        ParticipantServiceServer::new(SpaceParticipantService::new(space_manager));
 
     info!("  ✓ LeaseMgr:      listening on {}", lease_addr);
     info!("  ✓ Registry:      listening on {}", registry_addr);
@@ -234,11 +262,16 @@ async fn main() -> Result<()> {
 
     tokio::try_join!(
         Server::builder().add_service(lease_svc).serve(lease_addr),
-        Server::builder().add_service(registry_svc).serve(registry_addr),
+        Server::builder()
+            .add_service(registry_svc)
+            .serve(registry_addr),
         Server::builder().add_service(proxy_svc).serve(proxy_addr),
         Server::builder().add_service(txn_svc).serve(txn_addr),
         Server::builder().add_service(event_svc).serve(event_addr),
-        Server::builder().add_service(space_svc).add_service(space_participant_svc).serve(space_addr),
+        Server::builder()
+            .add_service(space_svc)
+            .add_service(space_participant_svc)
+            .serve(space_addr),
     )?;
 
     Ok(())

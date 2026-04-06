@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use aws_sdk_dynamodb::{Client, types::AttributeValue};
+use aws_sdk_dynamodb::{types::AttributeValue, Client};
 use chrono::{DateTime, Utc};
 
 use coordin8_core::{Error, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord};
@@ -69,9 +69,18 @@ impl DynamoSpaceStore {
 
 fn tuple_to_item(record: &TupleRecord) -> HashMap<String, AttributeValue> {
     let mut item = HashMap::new();
-    item.insert("tuple_id".to_string(), AttributeValue::S(record.tuple_id.clone()));
-    item.insert("lease_id".to_string(), AttributeValue::S(record.lease_id.clone()));
-    item.insert("written_by".to_string(), AttributeValue::S(record.written_by.clone()));
+    item.insert(
+        "tuple_id".to_string(),
+        AttributeValue::S(record.tuple_id.clone()),
+    );
+    item.insert(
+        "lease_id".to_string(),
+        AttributeValue::S(record.lease_id.clone()),
+    );
+    item.insert(
+        "written_by".to_string(),
+        AttributeValue::S(record.written_by.clone()),
+    );
     item.insert(
         "written_at".to_string(),
         AttributeValue::S(record.written_at.to_rfc3339()),
@@ -87,12 +96,17 @@ fn tuple_to_item(record: &TupleRecord) -> HashMap<String, AttributeValue> {
     if !record.payload.is_empty() {
         item.insert(
             "payload".to_string(),
-            AttributeValue::B(aws_sdk_dynamodb::primitives::Blob::new(record.payload.clone())),
+            AttributeValue::B(aws_sdk_dynamodb::primitives::Blob::new(
+                record.payload.clone(),
+            )),
         );
     }
 
     if let Some(ref input_id) = record.input_tuple_id {
-        item.insert("input_tuple_id".to_string(), AttributeValue::S(input_id.clone()));
+        item.insert(
+            "input_tuple_id".to_string(),
+            AttributeValue::S(input_id.clone()),
+        );
     }
 
     item
@@ -191,9 +205,9 @@ fn watch_from_item(item: &HashMap<String, AttributeValue>) -> Result<SpaceWatchR
         Some(AttributeValue::M(map)) => map
             .iter()
             .map(|(k, v)| {
-                v.as_s()
-                    .map(|s| (k.clone(), s.clone()))
-                    .map_err(|_| Error::Storage(format!("template value for '{k}' is not a string")))
+                v.as_s().map(|s| (k.clone(), s.clone())).map_err(|_| {
+                    Error::Storage(format!("template value for '{k}' is not a string"))
+                })
             })
             .collect::<Result<HashMap<String, String>, Error>>()?,
         _ => HashMap::new(),
@@ -388,7 +402,8 @@ impl SpaceStore for DynamoSpaceStore {
 
         // Search uncommitted buffer for this transaction
         if let Some(tid) = txn_id {
-            let uncommitted = query_by_pk(&self.client, &self.uncommitted_table, "txn_id", tid).await?;
+            let uncommitted =
+                query_by_pk(&self.client, &self.uncommitted_table, "txn_id", tid).await?;
             for item in &uncommitted {
                 let record = tuple_from_item(item)?;
                 if matches(&ops, &record.attrs) {
@@ -474,7 +489,7 @@ impl SpaceStore for DynamoSpaceStore {
                         // Conditional check failed — someone else took it, try next match
                         let is_condition_check = e
                             .as_service_error()
-                            .map_or(false, |se| se.is_conditional_check_failed_exception());
+                            .is_some_and(|se| se.is_conditional_check_failed_exception());
                         if is_condition_check {
                             continue;
                         }
@@ -535,7 +550,10 @@ impl SpaceStore for DynamoSpaceStore {
                 .delete_item()
                 .table_name(&self.uncommitted_table)
                 .key("txn_id", AttributeValue::S(txn_id.to_string()))
-                .key("tuple_id", AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()))
+                .key(
+                    "tuple_id",
+                    AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()),
+                )
                 .send()
                 .await
                 .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
@@ -549,7 +567,10 @@ impl SpaceStore for DynamoSpaceStore {
                 .delete_item()
                 .table_name(&self.txn_taken_table)
                 .key("txn_id", AttributeValue::S(txn_id.to_string()))
-                .key("tuple_id", AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()))
+                .key(
+                    "tuple_id",
+                    AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()),
+                )
                 .send()
                 .await
                 .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
@@ -572,7 +593,10 @@ impl SpaceStore for DynamoSpaceStore {
                 .delete_item()
                 .table_name(&self.uncommitted_table)
                 .key("txn_id", AttributeValue::S(txn_id.to_string()))
-                .key("tuple_id", AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()))
+                .key(
+                    "tuple_id",
+                    AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()),
+                )
                 .send()
                 .await
                 .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
@@ -592,7 +616,10 @@ impl SpaceStore for DynamoSpaceStore {
                 .delete_item()
                 .table_name(&self.txn_taken_table)
                 .key("txn_id", AttributeValue::S(txn_id.to_string()))
-                .key("tuple_id", AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()))
+                .key(
+                    "tuple_id",
+                    AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()),
+                )
                 .send()
                 .await
                 .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
@@ -764,7 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn insert_and_get() {
         let (store, tables, client) = setup().await;
 
@@ -783,7 +810,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn remove_returns_old() {
         let (store, tables, client) = setup().await;
 
@@ -797,11 +824,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn remove_by_lease() {
         let (store, tables, client) = setup().await;
 
-        store.insert(make_tuple("t-lease", "lease-target")).await.unwrap();
+        store
+            .insert(make_tuple("t-lease", "lease-target"))
+            .await
+            .unwrap();
         let removed = store.remove_by_lease("lease-target").await.unwrap();
         assert!(removed.is_some());
         assert!(store.get("t-lease").await.unwrap().is_none());
@@ -810,7 +840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn find_match() {
         let (store, tables, client) = setup().await;
 
@@ -831,7 +861,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn take_match_atomic() {
         let (store, tables, client) = setup().await;
 
@@ -855,7 +885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn txn_uncommitted_visible_within_txn() {
         let (store, tables, client) = setup().await;
 
@@ -876,7 +906,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn commit_flushes_uncommitted() {
         let (store, tables, client) = setup().await;
 
@@ -897,16 +927,21 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn abort_discards_uncommitted_restores_taken() {
         let (store, tables, client) = setup().await;
 
         // Insert a committed tuple
-        store.insert(make_tuple("t-taken", "lease-taken")).await.unwrap();
+        store
+            .insert(make_tuple("t-taken", "lease-taken"))
+            .await
+            .unwrap();
 
         // Insert an uncommitted tuple with different attrs so it won't match the take
         let mut uc_tuple = make_tuple("t-uc", "lease-uc");
-        uc_tuple.attrs.insert("type".to_string(), "receipt".to_string());
+        uc_tuple
+            .attrs
+            .insert("type".to_string(), "receipt".to_string());
         store
             .insert_uncommitted("txn-abort", uc_tuple)
             .await
@@ -915,7 +950,10 @@ mod tests {
         // Take the committed tuple under the txn (matches "order", not "receipt")
         let mut template = HashMap::new();
         template.insert("type".to_string(), "order".to_string());
-        let taken = store.take_match(&template, Some("txn-abort")).await.unwrap();
+        let taken = store
+            .take_match(&template, Some("txn-abort"))
+            .await
+            .unwrap();
         assert!(taken.is_some());
         assert_eq!(taken.unwrap().tuple_id, "t-taken");
 
@@ -938,7 +976,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn watches_crud() {
         let (store, tables, client) = setup().await;
 
@@ -973,7 +1011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires LocalStack on localhost:4566"]
+    #[ignore = "requires MiniStack on localhost:4566"]
     async fn has_txn() {
         let (store, tables, client) = setup().await;
 

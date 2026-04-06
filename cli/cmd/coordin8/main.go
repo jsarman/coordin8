@@ -293,7 +293,7 @@ var registryWatchCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Println("watching registry events...\n")
+		fmt.Println("watching registry events...")
 		for evt := range ch {
 			fmt.Printf("[%-12s] %s  interface=%s\n",
 				evt.Type, evt.Capability.CapabilityID, evt.Capability.Interface)

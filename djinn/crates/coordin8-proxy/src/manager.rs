@@ -54,16 +54,23 @@ impl ProxyConfig {
     ///   PROXY_PORT_MIN   (optional)
     ///   PROXY_PORT_MAX   (optional)
     pub fn from_env() -> Self {
-        let bind_host = std::env::var("PROXY_BIND_HOST")
-            .unwrap_or_else(|_| "127.0.0.1".to_string());
+        let bind_host =
+            std::env::var("PROXY_BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let port_range = match (
-            std::env::var("PROXY_PORT_MIN").ok().and_then(|v| v.parse::<u16>().ok()),
-            std::env::var("PROXY_PORT_MAX").ok().and_then(|v| v.parse::<u16>().ok()),
+            std::env::var("PROXY_PORT_MIN")
+                .ok()
+                .and_then(|v| v.parse::<u16>().ok()),
+            std::env::var("PROXY_PORT_MAX")
+                .ok()
+                .and_then(|v| v.parse::<u16>().ok()),
         ) {
             (Some(min), Some(max)) => Some((min, max)),
             _ => None,
         };
-        Self { bind_host, port_range }
+        Self {
+            bind_host,
+            port_range,
+        }
     }
 }
 
@@ -89,7 +96,9 @@ impl ProxyManager {
         match self.config.port_range {
             Some((min, max)) => {
                 for _ in min..=max {
-                    let port = self.next_port.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let port = self
+                        .next_port
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let port = if port > max { min } else { port };
                     self.next_port.store(
                         if port >= max { min } else { port + 1 },
@@ -138,10 +147,8 @@ impl ProxyManager {
             proxies.remove(&pid);
         });
 
-        self.proxies.insert(
-            proxy_id.clone(),
-            ProxyEntry { shutdown: tx },
-        );
+        self.proxies
+            .insert(proxy_id.clone(), ProxyEntry { shutdown: tx });
 
         Ok((proxy_id, local_port))
     }
@@ -169,7 +176,9 @@ impl ProxyManager {
             })
             .ok_or_else(|| ProxyError::NotFound(template.clone()))?;
 
-        let t = entry.transport.ok_or_else(|| ProxyError::NotFound(template.clone()))?;
+        let t = entry
+            .transport
+            .ok_or_else(|| ProxyError::NotFound(template.clone()))?;
         let host = t.config.get("host").cloned().unwrap_or_default();
         let port = t.config.get("port").cloned().unwrap_or_default();
         Ok(format!("{host}:{port}"))

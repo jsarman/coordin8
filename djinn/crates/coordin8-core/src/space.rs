@@ -99,7 +99,10 @@ pub trait SpaceStore: Send + Sync {
     async fn remove_watch(&self, watch_id: &str) -> Result<(), Error>;
 
     /// Remove a watch by its lease ID.
-    async fn remove_watch_by_lease(&self, lease_id: &str) -> Result<Option<SpaceWatchRecord>, Error>;
+    async fn remove_watch_by_lease(
+        &self,
+        lease_id: &str,
+    ) -> Result<Option<SpaceWatchRecord>, Error>;
 
     /// List all active watches.
     async fn list_watches(&self) -> Result<Vec<SpaceWatchRecord>, Error>;

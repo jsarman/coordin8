@@ -38,10 +38,12 @@ impl RegistryStore for InMemoryRegistryStore {
         if self.entries.contains_key(&entry.capability_id) {
             // Update lease index if lease_id changed
             // Remove old lease index entry for this capability
-            self.lease_index.retain(|_, cap_id| *cap_id != entry.capability_id);
+            self.lease_index
+                .retain(|_, cap_id| *cap_id != entry.capability_id);
             self.lease_index
                 .insert(entry.lease_id.clone(), entry.capability_id.clone());
-            self.entries.insert(entry.capability_id.clone(), entry.clone());
+            self.entries
+                .insert(entry.capability_id.clone(), entry.clone());
             Ok(Some(entry))
         } else {
             Ok(None)

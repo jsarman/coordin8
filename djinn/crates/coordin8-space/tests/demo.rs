@@ -14,7 +14,10 @@ use tokio::sync::broadcast;
 
 fn make_manager() -> (Arc<SpaceManager>, broadcast::Sender<TupleRecord>) {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(lease_store, coordin8_core::LeaseConfig::default()));
+    let lease_manager = Arc::new(LeaseManager::new(
+        lease_store,
+        coordin8_core::LeaseConfig::default(),
+    ));
     let space_store = Arc::new(InMemorySpaceStore::new());
     let (tuple_tx, _) = broadcast::channel(256);
     let (expiry_tx, _) = broadcast::channel(256);
@@ -29,7 +32,10 @@ fn make_manager() -> (Arc<SpaceManager>, broadcast::Sender<TupleRecord>) {
 
 fn make_manager_with_reaper() -> Arc<SpaceManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(lease_store.clone(), coordin8_core::LeaseConfig::default()));
+    let lease_manager = Arc::new(LeaseManager::new(
+        lease_store.clone(),
+        coordin8_core::LeaseConfig::default(),
+    ));
     let space_store = Arc::new(InMemorySpaceStore::new());
     let (tuple_tx, _) = broadcast::channel(256);
     let (expiry_tx, _) = broadcast::channel(256);
@@ -72,7 +78,11 @@ async fn write_and_read() {
 
     let (record, _lease) = mgr
         .write(
-            [("kind".into(), "price".into()), ("ticker".into(), "AAPL".into())].into(),
+            [
+                ("kind".into(), "price".into()),
+                ("ticker".into(), "AAPL".into()),
+            ]
+            .into(),
             b"{\"price\": 189}".to_vec(),
             60,
             "test".into(),
@@ -104,7 +114,11 @@ async fn write_and_take() {
     let (mgr, _) = make_manager();
 
     mgr.write(
-        [("kind".into(), "task".into()), ("name".into(), "build".into())].into(),
+        [
+            ("kind".into(), "task".into()),
+            ("name".into(), "build".into()),
+        ]
+        .into(),
         vec![],
         60,
         "producer".into(),
@@ -208,7 +222,10 @@ async fn read_blocking_timeout() {
 
     assert!(result.is_none());
     assert!(start.elapsed() >= Duration::from_millis(80));
-    println!("\n[demo] Read blocking timeout: None after {:?} ✓", start.elapsed());
+    println!(
+        "\n[demo] Read blocking timeout: None after {:?} ✓",
+        start.elapsed()
+    );
 }
 
 // ── Test 7: template matching operators ─────────────────────────────────────
@@ -267,7 +284,11 @@ async fn template_matching() {
     // Wildcard (Any)
     let any = mgr
         .read(
-            [("kind".into(), "sensor".into()), ("location".into(), "*".into())].into(),
+            [
+                ("kind".into(), "sensor".into()),
+                ("location".into(), "*".into()),
+            ]
+            .into(),
             false,
             0,
             None,
@@ -344,7 +365,11 @@ async fn notify_appearance() {
 
     // Write a matching tuple
     mgr2.write(
-        [("kind".into(), "alert".into()), ("level".into(), "critical".into())].into(),
+        [
+            ("kind".into(), "alert".into()),
+            ("level".into(), "critical".into()),
+        ]
+        .into(),
         b"disk full".to_vec(),
         60,
         "monitor".into(),
@@ -400,10 +425,7 @@ async fn take_race_one_winner() {
     let r2 = r2.unwrap();
 
     // Exactly one should win
-    let winners = [r1.is_some(), r2.is_some()]
-        .iter()
-        .filter(|&&w| w)
-        .count();
+    let winners = [r1.is_some(), r2.is_some()].iter().filter(|&&w| w).count();
     assert_eq!(winners, 1);
     println!("\n[demo] Take race: exactly one winner ✓");
 }
@@ -482,7 +504,11 @@ async fn contents_bulk_read() {
     // Write 3 price tuples and 1 task tuple
     for ticker in &["AAPL", "TSLA", "GOOG"] {
         mgr.write(
-            [("kind".into(), "price".into()), ("ticker".into(), ticker.to_string())].into(),
+            [
+                ("kind".into(), "price".into()),
+                ("ticker".into(), ticker.to_string()),
+            ]
+            .into(),
             vec![],
             60,
             "feed".into(),
@@ -512,10 +538,7 @@ async fn contents_bulk_read() {
     println!("\n[demo] Contents: got {} price tuples ✓", prices.len());
 
     // Contents with empty template should return all 4
-    let all = mgr
-        .contents(Default::default(), None)
-        .await
-        .unwrap();
+    let all = mgr.contents(Default::default(), None).await.unwrap();
     assert_eq!(all.len(), 4);
     println!("[demo] Contents: got {} total tuples ✓", all.len());
 
@@ -556,14 +579,20 @@ async fn txn_write_invisible_without_txn() {
         .read([("kind".into(), "secret".into())].into(), false, 0, None)
         .await
         .unwrap();
-    assert!(result.is_none(), "uncommitted tuple should be invisible without txn");
+    assert!(
+        result.is_none(),
+        "uncommitted tuple should be invisible without txn"
+    );
 
     // Take WITHOUT txn → should NOT see the tuple
     let result = mgr
         .take([("kind".into(), "secret".into())].into(), false, 0, None)
         .await
         .unwrap();
-    assert!(result.is_none(), "uncommitted tuple should not be takeable without txn");
+    assert!(
+        result.is_none(),
+        "uncommitted tuple should not be takeable without txn"
+    );
 
     println!("\n[demo] Txn isolation: uncommitted write invisible to non-txn reads ✓");
 }
@@ -577,7 +606,11 @@ async fn txn_write_visible_with_txn() {
 
     // Write under transaction
     mgr.write(
-        [("kind".into(), "secret".into()), ("data".into(), "classified".into())].into(),
+        [
+            ("kind".into(), "secret".into()),
+            ("data".into(), "classified".into()),
+        ]
+        .into(),
         b"payload".to_vec(),
         60,
         "writer".into(),
@@ -597,7 +630,10 @@ async fn txn_write_visible_with_txn() {
         )
         .await
         .unwrap();
-    assert!(result.is_some(), "uncommitted tuple should be visible within its own txn");
+    assert!(
+        result.is_some(),
+        "uncommitted tuple should be visible within its own txn"
+    );
     assert_eq!(result.unwrap().attrs["data"], "classified");
 
     println!("\n[demo] Txn isolation: uncommitted write visible to own txn ✓");
@@ -681,7 +717,10 @@ async fn txn_abort_discards_writes() {
         )
         .await
         .unwrap();
-    assert!(result.is_none(), "aborted tuple should be gone even under txn");
+    assert!(
+        result.is_none(),
+        "aborted tuple should be gone even under txn"
+    );
 
     println!("\n[demo] Txn abort: uncommitted writes discarded ✓");
 }
@@ -714,7 +753,10 @@ async fn txn_take_then_commit() {
         )
         .await
         .unwrap();
-    assert!(taken.is_some(), "should be able to take own uncommitted tuple");
+    assert!(
+        taken.is_some(),
+        "should be able to take own uncommitted tuple"
+    );
 
     // Commit
     mgr.commit_space_txn(&txn_id).await.unwrap();
@@ -724,7 +766,10 @@ async fn txn_take_then_commit() {
         .read([("kind".into(), "takeable".into())].into(), false, 0, None)
         .await
         .unwrap();
-    assert!(result.is_none(), "taken-then-committed tuple should be gone");
+    assert!(
+        result.is_none(),
+        "taken-then-committed tuple should be gone"
+    );
 
     println!("\n[demo] Txn take+commit: tuple consumed ✓");
 }
@@ -840,7 +885,12 @@ async fn txn_take_committed_abort_restores() {
 
     // Non-transactional read should NOT see it (it's been taken)
     let gone = mgr
-        .read([("kind".into(), "restoreable".into())].into(), false, 0, None)
+        .read(
+            [("kind".into(), "restoreable".into())].into(),
+            false,
+            0,
+            None,
+        )
         .await
         .unwrap();
     assert!(gone.is_none(), "taken tuple should be invisible");
@@ -850,7 +900,12 @@ async fn txn_take_committed_abort_restores() {
 
     // Now it should be visible again
     let restored = mgr
-        .read([("kind".into(), "restoreable".into())].into(), false, 0, None)
+        .read(
+            [("kind".into(), "restoreable".into())].into(),
+            false,
+            0,
+            None,
+        )
         .await
         .unwrap();
     assert!(restored.is_some(), "tuple should be restored after abort");
@@ -951,7 +1006,11 @@ async fn txn_cross_process_shared_txn() {
     // ── Process A: write under the shared transaction ───────────────────────
     let (record, _) = mgr
         .write(
-            [("kind".into(), "transfer".into()), ("amount".into(), "500".into())].into(),
+            [
+                ("kind".into(), "transfer".into()),
+                ("amount".into(), "500".into()),
+            ]
+            .into(),
             b"bank transfer".to_vec(),
             60,
             "process-a".into(),
@@ -960,7 +1019,10 @@ async fn txn_cross_process_shared_txn() {
         )
         .await
         .unwrap();
-    println!("\n[demo] Process A: wrote tuple {} under shared txn", record.tuple_id);
+    println!(
+        "\n[demo] Process A: wrote tuple {} under shared txn",
+        record.tuple_id
+    );
 
     // ── Outsider: read with no transaction → nothing ────────────────────────
     let r = mgr
@@ -1022,7 +1084,10 @@ async fn txn_cross_process_shared_txn() {
         .read([("kind".into(), "transfer".into())].into(), false, 0, None)
         .await
         .unwrap();
-    assert!(r.is_none(), "tuple consumed — written and taken in same txn");
+    assert!(
+        r.is_none(),
+        "tuple consumed — written and taken in same txn"
+    );
     println!("[demo] Final: read → None (tuple consumed) ✓");
 
     println!("[demo] Cross-process shared txn passed ✓");
@@ -1039,7 +1104,11 @@ async fn txn_shared_abort_voids_everything() {
 
     // ── Writer writes under shared txn ──────────────────────────────────────
     mgr.write(
-        [("kind".into(), "payment".into()), ("id".into(), "99".into())].into(),
+        [
+            ("kind".into(), "payment".into()),
+            ("id".into(), "99".into()),
+        ]
+        .into(),
         b"$500".to_vec(),
         60,
         "writer".into(),
@@ -1103,7 +1172,11 @@ async fn txn_taker_abort_restores_committed_tuple() {
 
     // ── Writer writes under its txn and commits ─────────────────────────────
     mgr.write(
-        [("kind".into(), "invoice".into()), ("id".into(), "777".into())].into(),
+        [
+            ("kind".into(), "invoice".into()),
+            ("id".into(), "777".into()),
+        ]
+        .into(),
         b"invoice data".to_vec(),
         60,
         "billing".into(),
@@ -1252,25 +1325,49 @@ async fn txn_contents_includes_uncommitted() {
     // Write 2 committed tuples
     mgr.write(
         [("kind".into(), "item".into()), ("id".into(), "1".into())].into(),
-        vec![], 60, "w".into(), None, None,
-    ).await.unwrap();
+        vec![],
+        60,
+        "w".into(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     mgr.write(
         [("kind".into(), "item".into()), ("id".into(), "2".into())].into(),
-        vec![], 60, "w".into(), None, None,
-    ).await.unwrap();
+        vec![],
+        60,
+        "w".into(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     // Write 1 uncommitted under txn
     mgr.write(
         [("kind".into(), "item".into()), ("id".into(), "3".into())].into(),
-        vec![], 60, "w".into(), None, Some(txn_id.clone()),
-    ).await.unwrap();
+        vec![],
+        60,
+        "w".into(),
+        None,
+        Some(txn_id.clone()),
+    )
+    .await
+    .unwrap();
 
     // Contents without txn → 2
-    let without = mgr.contents([("kind".into(), "item".into())].into(), None).await.unwrap();
+    let without = mgr
+        .contents([("kind".into(), "item".into())].into(), None)
+        .await
+        .unwrap();
     assert_eq!(without.len(), 2, "contents without txn should see 2");
 
     // Contents with txn → 3
-    let with = mgr.contents([("kind".into(), "item".into())].into(), Some(txn_id)).await.unwrap();
+    let with = mgr
+        .contents([("kind".into(), "item".into())].into(), Some(txn_id))
+        .await
+        .unwrap();
     assert_eq!(with.len(), 3, "contents with txn should see 3");
 
     println!("\n[demo] Txn contents: includes uncommitted ✓");
