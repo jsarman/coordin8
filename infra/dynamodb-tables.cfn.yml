@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Coordin8 DynamoDB tables. Deploy this template before starting the Djinn.
+  All tables use PAY_PER_REQUEST billing. Only coordin8_leases has TTL enabled.
+
+Resources:
+
+  # ── LeaseMgr ─────────────────────────────────────────────────────────────────
+
+  LeasesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_leases
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: lease_id
+          AttributeType: S
+        - AttributeName: resource_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: lease_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: resource_id-index
+          KeySchema:
+            - AttributeName: resource_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ── Registry ─────────────────────────────────────────────────────────────────
+
+  RegistryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_registry
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: capability_id
+          AttributeType: S
+        - AttributeName: lease_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: capability_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: lease_id-index
+          KeySchema:
+            - AttributeName: lease_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # ── TransactionMgr ───────────────────────────────────────────────────────────
+
+  TxnTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_txn
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: txn_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: txn_id
+          KeyType: HASH
+
+  # ── EventMgr ─────────────────────────────────────────────────────────────────
+
+  EventSubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_event_subscriptions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: registration_id
+          AttributeType: S
+        - AttributeName: lease_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: registration_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: lease_id-index
+          KeySchema:
+            - AttributeName: lease_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  EventMailboxTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_event_mailbox
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: registration_id
+          AttributeType: S
+        - AttributeName: seq_num
+          AttributeType: N
+      KeySchema:
+        - AttributeName: registration_id
+          KeyType: HASH
+        - AttributeName: seq_num
+          KeyType: RANGE
+
+  # ── Space ─────────────────────────────────────────────────────────────────────
+
+  SpaceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_space
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: tuple_id
+          AttributeType: S
+        - AttributeName: lease_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tuple_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: lease_id-index
+          KeySchema:
+            - AttributeName: lease_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  SpaceUncommittedTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_space_uncommitted
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: txn_id
+          AttributeType: S
+        - AttributeName: tuple_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: txn_id
+          KeyType: HASH
+        - AttributeName: tuple_id
+          KeyType: RANGE
+
+  SpaceTxnTakenTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_space_txn_taken
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: txn_id
+          AttributeType: S
+        - AttributeName: tuple_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: txn_id
+          KeyType: HASH
+        - AttributeName: tuple_id
+          KeyType: RANGE
+
+  SpaceWatchesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_space_watches
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: watch_id
+          AttributeType: S
+        - AttributeName: lease_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: watch_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: lease_id-index
+          KeySchema:
+            - AttributeName: lease_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL

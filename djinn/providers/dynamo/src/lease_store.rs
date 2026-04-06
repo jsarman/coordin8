@@ -27,11 +27,21 @@ impl DynamoLeaseStore {
         }
     }
 
-    /// Create the backing table if it doesn't exist yet.
+    /// Create the backing table if `COORDIN8_AUTO_CREATE_TABLES` is set to
+    /// `"true"` or `"1"` (case-insensitive). Otherwise, assumes the table
+    /// already exists (e.g. provisioned by CloudFormation).
     pub async fn init(&self) -> Result<(), Error> {
-        ensure_lease_table(&self.client, &self.table_name)
-            .await
-            .map_err(Error::Storage)
+        if crate::auto_create_enabled() {
+            ensure_lease_table(&self.client, &self.table_name)
+                .await
+                .map_err(Error::Storage)
+        } else {
+            tracing::info!(
+                table = %self.table_name,
+                "COORDIN8_AUTO_CREATE_TABLES not set — skipping table creation"
+            );
+            Ok(())
+        }
     }
 }
 
@@ -289,6 +299,7 @@ mod tests {
         std::env::set_var("AWS_ACCESS_KEY_ID", "test");
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
         std::env::set_var("AWS_DEFAULT_REGION", "us-east-1");
+        std::env::set_var("COORDIN8_AUTO_CREATE_TABLES", "true");
 
         let client = make_dynamo_client().await;
         let table_name = format!("coordin8_leases_test_{}", Uuid::new_v4());

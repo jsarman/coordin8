@@ -81,19 +81,7 @@ pub async fn ensure_lease_table(client: &Client, table_name: &str) -> Result<(),
         .send()
         .await;
 
-    match result {
-        Ok(_) => {
-            info!(table = table_name, "DynamoDB table created");
-        }
-        Err(SdkError::ServiceError(se))
-            if matches!(se.err(), CreateTableError::ResourceInUseException(_)) =>
-        {
-            // Table already exists — that's fine.
-        }
-        Err(e) => {
-            return Err(format!("create_table failed: {e}"));
-        }
-    }
+    handle_create_result(result, table_name)?;
 
     // Enable TTL (idempotent — safe to call even if already enabled).
     let ttl_result = client
@@ -178,20 +166,7 @@ pub async fn ensure_registry_table(client: &Client, table_name: &str) -> Result<
         .send()
         .await;
 
-    match result {
-        Ok(_) => {
-            info!(table = table_name, "DynamoDB registry table created");
-        }
-        Err(SdkError::ServiceError(se))
-            if matches!(se.err(), CreateTableError::ResourceInUseException(_)) =>
-        {
-            // Table already exists — that's fine.
-        }
-        Err(e) => {
-            return Err(format!("create_table failed: {e}"));
-        }
-    }
-
+    handle_create_result(result, table_name)?;
     Ok(())
 }
 
