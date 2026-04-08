@@ -9,6 +9,7 @@ members = [
     "crates/coordin8-event",
     "crates/coordin8-txn",
     "crates/coordin8-space",
+    "crates/coordin8-bootstrap",
     "crates/coordin8-djinn",
     "providers/local",
     "providers/dynamo",
@@ -16,8 +17,9 @@ members = [
 
 [workspace.dependencies]
 # Internal crates
-coordin8-core    = { path = "crates/coordin8-core" }
-coordin8-proto   = { path = "crates/coordin8-proto" }
+coordin8-core      = { path = "crates/coordin8-core" }
+coordin8-proto     = { path = "crates/coordin8-proto" }
+coordin8-bootstrap = { path = "crates/coordin8-bootstrap" }
 coordin8-lease   = { path = "crates/coordin8-lease" }
 coordin8-registry = { path = "crates/coordin8-registry" }
 coordin8-proxy   = { path = "crates/coordin8-proxy" }
