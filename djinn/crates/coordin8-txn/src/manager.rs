@@ -7,21 +7,20 @@ use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use coordin8_core::{
-    Error, LeaseRecord, ParticipantRecord, PrepareVote, TransactionRecord, TransactionState,
-    TxnStore,
+    Error, LeaseRecord, Leasing, ParticipantRecord, PrepareVote, TransactionRecord,
+    TransactionState, TxnStore,
 };
-use coordin8_lease::LeaseManager;
 use coordin8_proto::coordin8::{
     participant_service_client::ParticipantServiceClient, ParticipantRequest,
 };
 
 pub struct TxnManager {
     store: Arc<dyn TxnStore>,
-    lease_manager: Arc<LeaseManager>,
+    lease_manager: Arc<dyn Leasing>,
 }
 
 impl TxnManager {
-    pub fn new(store: Arc<dyn TxnStore>, lease_manager: Arc<LeaseManager>) -> Self {
+    pub fn new(store: Arc<dyn TxnStore>, lease_manager: Arc<dyn Leasing>) -> Self {
         Self {
             store,
             lease_manager,

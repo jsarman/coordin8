@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tracing::debug;
 
-use coordin8_core::{Error, LeaseConfig, LeaseRecord, LeaseStore};
+use coordin8_core::{Error, LeaseConfig, LeaseRecord, LeaseStore, Leasing};
 
 /// Coordinates lease operations. Wraps the backing store with business logic.
 ///
@@ -17,7 +18,23 @@ impl LeaseManager {
         Self { store, config }
     }
 
-    pub async fn grant(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error> {
+    pub async fn get(&self, lease_id: &str) -> Result<Option<LeaseRecord>, Error> {
+        self.store.get(lease_id).await
+    }
+
+    /// Called by the reaper. Returns expired leases and removes them from the store.
+    pub async fn drain_expired(&self) -> Result<Vec<LeaseRecord>, Error> {
+        let expired = self.store.list_expired().await?;
+        for record in &expired {
+            self.store.remove(&record.lease_id).await?;
+        }
+        Ok(expired)
+    }
+}
+
+#[async_trait]
+impl Leasing for LeaseManager {
+    async fn grant(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error> {
         let granted_ttl = self.config.negotiate(ttl_secs);
         let record = self.store.create(resource_id, granted_ttl).await?;
         debug!(
@@ -31,7 +48,7 @@ impl LeaseManager {
         Ok(record)
     }
 
-    pub async fn renew(&self, lease_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error> {
+    async fn renew(&self, lease_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error> {
         let record = self
             .store
             .get(lease_id)
@@ -56,7 +73,7 @@ impl LeaseManager {
         Ok(record)
     }
 
-    pub async fn cancel(&self, lease_id: &str) -> Result<(), Error> {
+    async fn cancel(&self, lease_id: &str) -> Result<(), Error> {
         // Fetch before cancel so we can log the resource_id
         let resource_id = self
             .store
@@ -67,18 +84,5 @@ impl LeaseManager {
         self.store.cancel(lease_id).await?;
         debug!(lease_id, resource_id, "lease cancelled");
         Ok(())
-    }
-
-    pub async fn get(&self, lease_id: &str) -> Result<Option<LeaseRecord>, Error> {
-        self.store.get(lease_id).await
-    }
-
-    /// Called by the reaper. Returns expired leases and removes them from the store.
-    pub async fn drain_expired(&self) -> Result<Vec<LeaseRecord>, Error> {
-        let expired = self.store.list_expired().await?;
-        for record in &expired {
-            self.store.remove(&record.lease_id).await?;
-        }
-        Ok(expired)
     }
 }

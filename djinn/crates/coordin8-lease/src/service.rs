@@ -5,7 +5,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
-use coordin8_core::LeaseRecord;
+use coordin8_core::{LeaseRecord, Leasing};
 use coordin8_proto::coordin8::{
     lease_service_server::LeaseService, CancelRequest, ExpiryEvent, GrantRequest, Lease,
     RenewRequest, WatchExpiryRequest,

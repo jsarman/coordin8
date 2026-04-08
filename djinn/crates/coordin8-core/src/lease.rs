@@ -97,3 +97,22 @@ pub trait LeaseStore: Send + Sync {
     async fn list_expired(&self) -> Result<Vec<LeaseRecord>, Error>;
     async fn remove(&self, lease_id: &str) -> Result<(), Error>;
 }
+
+/// Abstract lease client used by downstream services (EventMgr, Space, TxnMgr).
+///
+/// The monolith hands out a local impl that wraps the in-process `LeaseManager`.
+/// Split-mode services hand out a remote impl that forwards each call to a
+/// `LeaseMgr` instance discovered through Registry. Downstream code is oblivious
+/// to the difference — this is the Jini lease-as-interface pattern, adapted for
+/// Coordin8's gRPC transport.
+///
+/// Only the three methods downstream services actually use are on the trait.
+/// Internal lease machinery (reaper, `get`, `drain_expired`, `get_by_resource`)
+/// stays on the concrete `LeaseManager` — it is implementation detail of the
+/// *local* LeaseMgr process, not a cross-service contract.
+#[async_trait]
+pub trait Leasing: Send + Sync {
+    async fn grant(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error>;
+    async fn renew(&self, lease_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error>;
+    async fn cancel(&self, lease_id: &str) -> Result<(), Error>;
+}

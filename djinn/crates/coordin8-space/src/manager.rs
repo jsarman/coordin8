@@ -8,14 +8,13 @@ use tracing::debug;
 use uuid::Uuid;
 
 use coordin8_core::{
-    Error, LeaseRecord, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord,
+    Error, LeaseRecord, Leasing, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord,
 };
-use coordin8_lease::LeaseManager;
 use coordin8_registry::matcher::{matches, parse_template};
 
 pub struct SpaceManager {
     store: Arc<dyn SpaceStore>,
-    lease_manager: Arc<LeaseManager>,
+    lease_manager: Arc<dyn Leasing>,
     tuple_tx: broadcast::Sender<TupleRecord>,
     expiry_tx: broadcast::Sender<TupleRecord>,
 }
@@ -23,7 +22,7 @@ pub struct SpaceManager {
 impl SpaceManager {
     pub fn new(
         store: Arc<dyn SpaceStore>,
-        lease_manager: Arc<LeaseManager>,
+        lease_manager: Arc<dyn Leasing>,
         tuple_tx: broadcast::Sender<TupleRecord>,
         expiry_tx: broadcast::Sender<TupleRecord>,
     ) -> Self {

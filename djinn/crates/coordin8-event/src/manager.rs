@@ -9,14 +9,13 @@ use tracing::debug;
 use uuid::Uuid;
 
 use coordin8_core::{
-    DeliveryMode, Error, EventRecord, EventStore, LeaseRecord, SubscriptionRecord,
+    DeliveryMode, Error, EventRecord, EventStore, LeaseRecord, Leasing, SubscriptionRecord,
 };
-use coordin8_lease::LeaseManager;
 use coordin8_registry::matcher::{matches, parse_template};
 
 pub struct EventManager {
     store: Arc<dyn EventStore>,
-    lease_manager: Arc<LeaseManager>,
+    lease_manager: Arc<dyn Leasing>,
     event_tx: broadcast::Sender<EventRecord>,
     /// Sequence counter per "source::event_type" key.
     seq_counters: DashMap<String, AtomicU64>,
@@ -25,7 +24,7 @@ pub struct EventManager {
 impl EventManager {
     pub fn new(
         store: Arc<dyn EventStore>,
-        lease_manager: Arc<LeaseManager>,
+        lease_manager: Arc<dyn Leasing>,
         event_tx: broadcast::Sender<EventRecord>,
     ) -> Self {
         Self {

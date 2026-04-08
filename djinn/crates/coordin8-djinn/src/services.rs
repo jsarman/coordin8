@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tracing::info;
 
-use coordin8_core::{EventStore, LeaseStore, RegistryStore, SpaceStore, TxnStore};
+use coordin8_core::{EventStore, LeaseStore, Leasing, RegistryStore, SpaceStore, TxnStore};
 use coordin8_event::{EventManager, EventServiceImpl};
 use coordin8_lease::{LeaseManager, LeaseServiceImpl};
 use coordin8_proto::coordin8::event_service_server::EventServiceServer;
@@ -134,6 +134,7 @@ pub async fn run_all() -> Result<()> {
         lease_config.preferred_ttl
     );
     let lease_manager = Arc::new(LeaseManager::new(lease_store, lease_config));
+    let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     let reaper_manager = Arc::clone(&lease_manager);
     let reaper_tx = expiry_tx.clone();
@@ -177,7 +178,7 @@ pub async fn run_all() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<coordin8_core::EventRecord>(256);
     let event_manager = Arc::new(EventManager::new(
         event_store,
-        Arc::clone(&lease_manager),
+        Arc::clone(&leasing),
         event_tx,
     ));
 
@@ -198,7 +199,7 @@ pub async fn run_all() -> Result<()> {
     info!("  ✓ Proxy: ready");
 
     // ── Layer 4: TransactionMgr ───────────────────────────────────────────────
-    let txn_manager = Arc::new(TxnManager::new(txn_store, Arc::clone(&lease_manager)));
+    let txn_manager = Arc::new(TxnManager::new(txn_store, Arc::clone(&leasing)));
 
     let txn_expiry_mgr = Arc::clone(&txn_manager);
     let mut txn_expiry_rx = expiry_tx.subscribe();
@@ -216,7 +217,7 @@ pub async fn run_all() -> Result<()> {
     let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let space_manager = Arc::new(SpaceManager::new(
         space_store,
-        Arc::clone(&lease_manager),
+        Arc::clone(&leasing),
         space_tuple_tx,
         space_expiry_tx,
     ));
@@ -246,7 +247,7 @@ pub async fn run_all() -> Result<()> {
         LeaseServiceServer::new(LeaseServiceImpl::new(Arc::clone(&lease_manager), expiry_tx));
     let registry_svc = RegistryServiceServer::new(RegistryServiceImpl::new(
         registry_index,
-        Arc::clone(&lease_manager),
+        Arc::clone(&leasing),
         registry_tx,
     ));
     let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
@@ -310,6 +311,7 @@ pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Resu
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let lease_config = coordin8_core::LeaseConfig::from_env();
     let lease_manager = Arc::new(LeaseManager::new(lease_store, lease_config));
+    let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     let (expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);
     let reaper_manager = Arc::clone(&lease_manager);
@@ -347,7 +349,7 @@ pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Resu
 
     let registry_svc = RegistryServiceServer::new(RegistryServiceImpl::new(
         registry_index,
-        Arc::clone(&lease_manager),
+        Arc::clone(&leasing),
         registry_tx,
     ));
 
