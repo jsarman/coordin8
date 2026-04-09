@@ -43,7 +43,11 @@ enum Command {
     /// interface=Space with a 30-second self-lease. Mounts both the
     /// SpaceService and its 2PC ParticipantService on the same port.
     Space,
-    /// (stub) Split mode not yet implemented for TransactionMgr.
+    /// Boot TransactionMgr alone on COORDIN8_BIND_ADDR.
+    ///
+    /// Requires COORDIN8_REGISTRY to be set — TxnMgr discovers LeaseMgr
+    /// through Registry (via RemoteLeasing) and self-registers under
+    /// interface=TransactionMgr with a 30-second self-lease.
     Txn,
     /// (stub) Split mode not yet implemented for Proxy.
     Proxy,
@@ -68,7 +72,7 @@ async fn main() -> Result<()> {
         Some(Command::Lease) => services::run_lease().await,
         Some(Command::Event) => services::run_event().await,
         Some(Command::Space) => services::run_space().await,
-        Some(Command::Txn) => stub_not_implemented("txn"),
+        Some(Command::Txn) => services::run_txn().await,
         Some(Command::Proxy) => stub_not_implemented("proxy"),
     }
 }

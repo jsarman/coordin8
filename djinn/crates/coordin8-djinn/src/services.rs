@@ -766,3 +766,124 @@ pub async fn run_space_on_listener(
 
     Ok(())
 }
+
+// ── TransactionMgr alone ─────────────────────────────────────────────────────
+
+/// Boot TransactionMgr alone. Reads `COORDIN8_BIND_ADDR` and `COORDIN8_REGISTRY`.
+///
+/// Requires `COORDIN8_REGISTRY` — TxnMgr needs a Registry to discover
+/// LeaseMgr and to self-register into.
+pub async fn run_txn() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(&bind_addr()).await?;
+    let host = advertise_host();
+    let registry_addr = std::env::var("COORDIN8_REGISTRY").map_err(|_| {
+        anyhow::anyhow!("COORDIN8_REGISTRY must be set for split-mode TransactionMgr")
+    })?;
+    run_txn_on_listener(listener, &registry_addr, &host, 30).await
+}
+
+/// Boot TransactionMgr on a pre-bound [`TcpListener`], wired to a remote
+/// LeaseMgr.
+///
+/// Uses `watch_expiry_prefix("txn:")` to drive `abort_expired(txn_id)` on
+/// the local TxnManager when the remote LeaseMgr expires a transaction
+/// lease — the txn id is carried in the `ExpiryEvent.resource_id` as the
+/// suffix after the `txn:` prefix, matching the monolith's convention.
+pub async fn run_txn_on_listener(
+    listener: tokio::net::TcpListener,
+    registry_addr: &str,
+    advertise_host: &str,
+    self_lease_ttl: u64,
+) -> Result<()> {
+    let actual_addr = listener.local_addr()?;
+    let advertise_port = actual_addr.port();
+
+    let remote_leasing = RemoteLeasing::connect(registry_addr).await?;
+    let leasing: Arc<dyn Leasing> = Arc::new(remote_leasing);
+
+    let txn_store: Arc<dyn TxnStore> = Arc::new(InMemoryTxnStore::new());
+    let txn_manager = Arc::new(TxnManager::new(txn_store, Arc::clone(&leasing)));
+
+    let lease_stream_client = coordin8_bootstrap::discover_lease_mgr(registry_addr).await?;
+    let expiry_txn_mgr = Arc::clone(&txn_manager);
+    let expiry_registry = registry_addr.to_string();
+    tokio::spawn(async move {
+        watch_expiry_prefix(
+            lease_stream_client,
+            expiry_registry,
+            "txn:".to_string(),
+            move |evt| {
+                if let Some(txn_id) = evt.resource_id.strip_prefix("txn:") {
+                    let mgr = Arc::clone(&expiry_txn_mgr);
+                    let txn_id = txn_id.to_string();
+                    tokio::spawn(async move {
+                        let _ = mgr.abort_expired(&txn_id).await;
+                    });
+                }
+            },
+        )
+        .await;
+    });
+
+    let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(txn_manager));
+
+    info!(
+        "  ✓ TransactionMgr (split): listening on {actual_addr}, advertising {advertise_host}:{advertise_port}"
+    );
+
+    let registry_url = registry_addr.to_string();
+    let advertise_host_owned = advertise_host.to_string();
+
+    let register_fut = async move {
+        let registry_client = loop {
+            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
+                registry_url.clone(),
+            )
+            .await
+            {
+                Ok(c) => break c,
+                Err(e) => {
+                    tracing::warn!("registry dial failed: {e}, retrying in 500ms");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        };
+
+        match self_register(
+            registry_client,
+            "TransactionMgr",
+            std::collections::HashMap::new(),
+            &advertise_host_owned,
+            advertise_port,
+            self_lease_ttl,
+        )
+        .await
+        {
+            Ok(_handle) => {
+                info!(
+                    "  ✓ TransactionMgr: self-registered (capability: {}, lease: {})",
+                    _handle.capability_id(),
+                    _handle.lease_id()
+                );
+                std::future::pending::<()>().await;
+            }
+            Err(e) => {
+                tracing::error!("self_register failed: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    let server_fut = Server::builder()
+        .add_service(txn_svc)
+        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+
+    info!("Djinn txn ready.");
+
+    tokio::select! {
+        res = server_fut => res?,
+        _ = register_fut => unreachable!("register_fut awaits pending() forever"),
+    }
+
+    Ok(())
+}
