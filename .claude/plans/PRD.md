@@ -226,6 +226,28 @@ Pluggable storage backends.
 
 ---
 
+## Djinn Split Mode
+
+Each service can boot as its own process, discoverable through Registry. Monolith boot is still the default for local dev. See `.claude/plans/djinn-split/PRD.md`.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| `coordin8-bootstrap` crate (discover/self-register/watch-expiry) | Done | Shared plumbing for split subcommands |
+| `Leasing` trait + `RemoteLeasing` (cross-process lease seam) | Done | `retry_forever` + transport-failure reconnect, pinnable |
+| `CapabilityResolver` trait + `RemoteCapabilityResolver` | Done | Registry template resolution seam, same retry pattern |
+| Multi-call subcommands: `djinn lease/registry/event/space/txn/proxy` | Done | `djinn` with no subcommand still boots bundled mode |
+| Phase 1 — LeaseMgr + Registry split | Done | Self-registration via short-TTL self-lease |
+| Phase 2 — EventMgr split | Done | |
+| Phase 3 — Space split | Done | |
+| Phase 4 — TransactionMgr split | Done | |
+| Phase 5 — Proxy split | Done | |
+| Chaos tests: RemoteLeasing + Space survive LeaseMgr kill | Done | `coordin8-djinn/tests/split_chaos.rs`, 3-phase pattern |
+| Docker-compose chaos (kill a container) | **Gap** | Follow-up from djinn-split PR |
+| DynamoDB/LocalStack provider-swap test | **Gap** | Prove the seam across a real provider boundary |
+| Registry redundancy in split mode | **Gap** | Currently single Registry — open question from PRD |
+
+---
+
 ## Dashboard & Observability
 
 | Item | Status | Notes |
@@ -258,7 +280,8 @@ Not in core — built on Space/EventMgr primitives. **Unblocked** — Space v1 a
 1. **Phase 2: Spec Alignment** — Systems test what we have, then align each service to Jini specs bottom-up (Lease → Registry → ServiceDiscovery → Events → Transactions → Space). See `.claude/plans/phase2-spec-alignment/session-1-prep.md`
 2. **SDK parity gaps** — Java/Node missing keepAlive, watch, registry refresh; Space/EventMgr/TxnMgr SDK clients
 3. **Space SDKs + CLI** — Go SpaceClient, then Java/Node, then CLI commands
-4. **AWS Provider** — DynamoDB/SQS/EventBridge for production
-5. **Space v2: Transactions** — txn_id on operations, Space as 2PC participant
-6. **Higher-order patterns** — Lens, Reflex, Sentry (now unblocked by Space + EventMgr)
-7. **Dashboard** — observability UI
+4. **Djinn split follow-ups** — docker-compose chaos, DynamoDB/LocalStack provider-swap test, Registry redundancy
+5. **AWS Provider** — DynamoDB/SQS/EventBridge for production
+6. **Space v2: Transactions** — txn_id on operations, Space as 2PC participant
+7. **Higher-order patterns** — Lens, Reflex, Sentry (now unblocked by Space + EventMgr)
+8. **Dashboard** — observability UI
