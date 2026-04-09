@@ -13,7 +13,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
-use coordin8_core::TransactionState;
+use coordin8_core::{Leasing, TransactionState};
 use coordin8_lease::LeaseManager;
 use coordin8_proto::coordin8::{
     participant_service_server::{ParticipantService, ParticipantServiceServer},
@@ -117,7 +117,7 @@ impl ParticipantService for MockParticipant {
 
 fn make_manager() -> Arc<TxnManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(
+    let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
         lease_store,
         coordin8_core::LeaseConfig::default(),
     ));

@@ -1,0 +1,17 @@
+[package]
+name = "coordin8-bootstrap"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+coordin8-core  = { workspace = true }
+coordin8-proto = { workspace = true }
+
+async-trait = { workspace = true }
+chrono      = { workspace = true }
+prost-types = { workspace = true }
+tokio       = { workspace = true }
+tonic       = { workspace = true }
+tracing     = { workspace = true }
+uuid        = { workspace = true }
+thiserror   = { workspace = true }

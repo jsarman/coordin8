@@ -31,3 +31,19 @@ pub trait RegistryStore: Send + Sync {
     async fn get_by_lease(&self, lease_id: &str) -> Result<Option<RegistryEntry>, Error>;
     async fn list_all(&self) -> Result<Vec<RegistryEntry>, Error>;
 }
+
+/// Narrow seam used by callers that only need to turn a capability template
+/// into the first matching `RegistryEntry`. This is the piece of Registry
+/// the Proxy layer talks to, factored out so it can be implemented both
+/// locally (wrapping a `RegistryStore`) and remotely (over gRPC to a
+/// Registry service) — the Jini lease-as-interface pattern, applied to
+/// capability resolution.
+#[async_trait]
+pub trait CapabilityResolver: Send + Sync {
+    /// Resolve a template to the first matching entry. Returns `None` if no
+    /// capability currently matches.
+    async fn resolve(
+        &self,
+        template: &HashMap<String, String>,
+    ) -> Result<Option<RegistryEntry>, Error>;
+}

@@ -16,6 +16,7 @@ coordin8-proxy            = { workspace = true }
 coordin8-event            = { workspace = true }
 coordin8-txn              = { workspace = true }
 coordin8-space            = { workspace = true }
+coordin8-bootstrap        = { workspace = true }
 coordin8-provider-local   = { workspace = true }
 coordin8-provider-dynamo  = { workspace = true }
 
@@ -24,3 +25,5 @@ tonic              = { workspace = true }
 anyhow             = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
+clap               = { version = "4", features = ["derive"] }
+tokio-stream       = { version = "0.1", features = ["net"] }

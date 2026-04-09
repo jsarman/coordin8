@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use coordin8_core::{SpaceEventKind, TupleRecord};
+use coordin8_core::{Leasing, SpaceEventKind, TupleRecord};
 use coordin8_lease::LeaseManager;
 use coordin8_provider_local::{InMemoryLeaseStore, InMemorySpaceStore};
 use coordin8_space::SpaceManager;
@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 
 fn make_manager() -> (Arc<SpaceManager>, broadcast::Sender<TupleRecord>) {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(
+    let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
         lease_store,
         coordin8_core::LeaseConfig::default(),
     ));
@@ -36,16 +36,12 @@ fn make_manager_with_reaper() -> Arc<SpaceManager> {
         lease_store.clone(),
         coordin8_core::LeaseConfig::default(),
     ));
+    let leasing: Arc<dyn Leasing> = lease_manager.clone();
     let space_store = Arc::new(InMemorySpaceStore::new());
     let (tuple_tx, _) = broadcast::channel(256);
     let (expiry_tx, _) = broadcast::channel(256);
 
-    let mgr = Arc::new(SpaceManager::new(
-        space_store,
-        Arc::clone(&lease_manager),
-        tuple_tx,
-        expiry_tx,
-    ));
+    let mgr = Arc::new(SpaceManager::new(space_store, leasing, tuple_tx, expiry_tx));
 
     // Start reaper + expiry listener
     let (reaper_expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);

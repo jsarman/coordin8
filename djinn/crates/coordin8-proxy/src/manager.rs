@@ -7,8 +7,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use coordin8_core::registry::RegistryStore;
-use coordin8_registry::matcher::{matches, parse_template};
+use coordin8_core::CapabilityResolver;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -75,17 +74,17 @@ impl ProxyConfig {
 }
 
 pub struct ProxyManager {
-    registry: Arc<dyn RegistryStore>,
+    resolver: Arc<dyn CapabilityResolver>,
     proxies: Arc<DashMap<String, ProxyEntry>>,
     config: ProxyConfig,
     next_port: Arc<std::sync::atomic::AtomicU16>,
 }
 
 impl ProxyManager {
-    pub fn new(registry: Arc<dyn RegistryStore>, config: ProxyConfig) -> Self {
+    pub fn new(resolver: Arc<dyn CapabilityResolver>, config: ProxyConfig) -> Self {
         let next_port = config.port_range.map(|(min, _)| min).unwrap_or(0);
         Self {
-            registry,
+            resolver,
             proxies: Arc::new(DashMap::new()),
             config,
             next_port: Arc::new(std::sync::atomic::AtomicU16::new(next_port)),
@@ -132,14 +131,14 @@ impl ProxyManager {
         let (tx, rx) = oneshot::channel::<()>();
 
         let proxies = self.proxies.clone();
-        let registry = self.registry.clone();
+        let resolver = self.resolver.clone();
         let pid = proxy_id.clone();
 
         info!(proxy_id = %pid, local_port, "proxy opened");
 
         tokio::spawn(async move {
             tokio::select! {
-                _ = accept_loop(listener, registry, template) => {}
+                _ = accept_loop(listener, resolver, template) => {}
                 _ = rx => {
                     debug!(proxy_id = %pid, "proxy shut down");
                 }
@@ -164,16 +163,10 @@ impl ProxyManager {
     }
 
     async fn resolve(&self, template: &HashMap<String, String>) -> Result<String, ProxyError> {
-        let ops = parse_template(template);
-        let entries = self.registry.list_all().await?;
-
-        let entry = entries
-            .into_iter()
-            .find(|e| {
-                let mut all_attrs = e.attrs.clone();
-                all_attrs.insert("interface".to_string(), e.interface.clone());
-                matches(&ops, &all_attrs)
-            })
+        let entry = self
+            .resolver
+            .resolve(template)
+            .await?
             .ok_or_else(|| ProxyError::NotFound(template.clone()))?;
 
         let t = entry
@@ -187,17 +180,17 @@ impl ProxyManager {
 
 async fn accept_loop(
     listener: TcpListener,
-    registry: Arc<dyn RegistryStore>,
+    resolver: Arc<dyn CapabilityResolver>,
     template: HashMap<String, String>,
 ) {
     loop {
         match listener.accept().await {
             Ok((client, peer)) => {
                 debug!(%peer, "proxy accepted connection");
-                let reg = registry.clone();
+                let r = resolver.clone();
                 let tmpl = template.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = forward(client, reg, tmpl).await {
+                    if let Err(e) = forward(client, r, tmpl).await {
                         warn!("proxy forward error: {e}");
                     }
                 });
@@ -212,25 +205,17 @@ async fn accept_loop(
 
 async fn forward(
     mut client: TcpStream,
-    registry: Arc<dyn RegistryStore>,
+    resolver: Arc<dyn CapabilityResolver>,
     template: HashMap<String, String>,
 ) -> std::io::Result<()> {
-    let ops = parse_template(&template);
-    let entry = registry
-        .list_all()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .find(|e| {
-            let mut all_attrs = e.attrs.clone();
-            all_attrs.insert("interface".to_string(), e.interface.clone());
-            matches(&ops, &all_attrs)
-        });
-
-    let entry = match entry {
-        Some(e) => e,
-        None => {
+    let entry = match resolver.resolve(&template).await {
+        Ok(Some(e)) => e,
+        Ok(None) => {
             warn!(?template, "proxy: no capability at forward time");
+            return Ok(());
+        }
+        Err(e) => {
+            warn!(?template, "proxy: resolver error at forward time: {e}");
             return Ok(());
         }
     };

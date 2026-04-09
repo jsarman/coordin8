@@ -4,7 +4,7 @@
 ///   Subscribe (durable) → Emit × 3 → Receive (drain backlog) → Emit while live → Receive live
 use std::sync::Arc;
 
-use coordin8_core::DeliveryMode;
+use coordin8_core::{DeliveryMode, Leasing};
 use coordin8_event::EventManager;
 use coordin8_lease::LeaseManager;
 use coordin8_provider_local::{InMemoryEventStore, InMemoryLeaseStore};
@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 fn make_manager() -> Arc<EventManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(
+    let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
         lease_store,
         coordin8_core::LeaseConfig::default(),
     ));
@@ -229,7 +229,7 @@ async fn cancel_removes_subscription() {
 #[tokio::test]
 async fn subscription_lease_expiry_cascade() {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
-    let lease_manager = Arc::new(LeaseManager::new(
+    let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
         lease_store,
         coordin8_core::LeaseConfig::default(),
     ));

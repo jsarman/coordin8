@@ -8,7 +8,7 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 use uuid::Uuid;
 
-use coordin8_core::{RegistryEntry, TransportConfig};
+use coordin8_core::{Leasing, RegistryEntry, TransportConfig};
 use coordin8_proto::coordin8::{
     registry_service_server::RegistryService, Capability, LookupRequest, ModifyAttrsRequest,
     RegisterRequest, RegisterResponse, RegistryEvent, RegistryWatchRequest,
@@ -47,14 +47,14 @@ fn entry_to_capability(e: &RegistryEntry) -> Capability {
 
 pub struct RegistryServiceImpl {
     index: Arc<RegistryIndex>,
-    lease_manager: Arc<coordin8_lease::LeaseManager>,
+    lease_manager: Arc<dyn Leasing>,
     event_tx: RegistryBroadcast,
 }
 
 impl RegistryServiceImpl {
     pub fn new(
         index: Arc<RegistryIndex>,
-        lease_manager: Arc<coordin8_lease::LeaseManager>,
+        lease_manager: Arc<dyn Leasing>,
         event_tx: RegistryBroadcast,
     ) -> Self {
         Self {
