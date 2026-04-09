@@ -11,7 +11,9 @@ use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tracing::info;
 
-use coordin8_bootstrap::{self_register, watch_expiry_prefix, RemoteLeasing};
+use coordin8_bootstrap::{
+    self_register, watch_expiry_prefix, RemoteCapabilityResolver, RemoteLeasing,
+};
 use coordin8_core::{EventStore, LeaseStore, Leasing, RegistryStore, SpaceStore, TxnStore};
 use coordin8_event::{EventManager, EventServiceImpl};
 use coordin8_lease::{LeaseManager, LeaseServiceImpl};
@@ -26,7 +28,7 @@ use coordin8_provider_local::{
     InMemoryEventStore, InMemoryLeaseStore, InMemoryRegistryStore, InMemorySpaceStore,
     InMemoryTxnStore,
 };
-use coordin8_proxy::{ProxyConfig, ProxyManager, ProxyServiceImpl};
+use coordin8_proxy::{LocalCapabilityResolver, ProxyConfig, ProxyManager, ProxyServiceImpl};
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
 use coordin8_space::{SpaceManager, SpaceParticipantService, SpaceServiceImpl};
@@ -196,7 +198,8 @@ pub async fn run_all() -> Result<()> {
 
     // ── Layer 3: Proxy ───────────────────────────────────────────────────────
     let proxy_config = ProxyConfig::from_env();
-    let proxy_manager = Arc::new(ProxyManager::new(registry_store, proxy_config));
+    let proxy_resolver = Arc::new(LocalCapabilityResolver::new(registry_store));
+    let proxy_manager = Arc::new(ProxyManager::new(proxy_resolver, proxy_config));
     info!("  ✓ Proxy: ready");
 
     // ── Layer 4: TransactionMgr ───────────────────────────────────────────────
@@ -879,6 +882,103 @@ pub async fn run_txn_on_listener(
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
     info!("Djinn txn ready.");
+
+    tokio::select! {
+        res = server_fut => res?,
+        _ = register_fut => unreachable!("register_fut awaits pending() forever"),
+    }
+
+    Ok(())
+}
+
+// ── Proxy alone ──────────────────────────────────────────────────────────────
+
+/// Boot Proxy alone. Reads `COORDIN8_BIND_ADDR` and `COORDIN8_REGISTRY`.
+///
+/// Requires `COORDIN8_REGISTRY` — Proxy resolves capability templates by
+/// calling the Registry's `Lookup` RPC via `RemoteCapabilityResolver`.
+pub async fn run_proxy() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(&bind_addr()).await?;
+    let host = advertise_host();
+    let registry_addr = std::env::var("COORDIN8_REGISTRY")
+        .map_err(|_| anyhow::anyhow!("COORDIN8_REGISTRY must be set for split-mode Proxy"))?;
+    run_proxy_on_listener(listener, &registry_addr, &host, 30).await
+}
+
+/// Boot Proxy on a pre-bound [`TcpListener`] against a remote Registry.
+///
+/// Resolution is done through `RemoteCapabilityResolver`, so every open and
+/// every forwarded connection issues a Registry `Lookup` RPC — the same
+/// "resolve at connection time" semantics as the monolith, but over the
+/// wire. Reads `PROXY_BIND_HOST` / `PROXY_PORT_MIN` / `PROXY_PORT_MAX` via
+/// `ProxyConfig::from_env`.
+pub async fn run_proxy_on_listener(
+    listener: tokio::net::TcpListener,
+    registry_addr: &str,
+    advertise_host: &str,
+    self_lease_ttl: u64,
+) -> Result<()> {
+    let actual_addr = listener.local_addr()?;
+    let advertise_port = actual_addr.port();
+
+    let resolver = Arc::new(RemoteCapabilityResolver::connect(registry_addr).await?);
+    let proxy_config = ProxyConfig::from_env();
+    let proxy_manager = Arc::new(ProxyManager::new(resolver, proxy_config));
+
+    let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
+
+    info!(
+        "  ✓ Proxy (split): listening on {actual_addr}, advertising {advertise_host}:{advertise_port}"
+    );
+
+    let registry_url = registry_addr.to_string();
+    let advertise_host_owned = advertise_host.to_string();
+
+    let register_fut = async move {
+        let registry_client = loop {
+            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
+                registry_url.clone(),
+            )
+            .await
+            {
+                Ok(c) => break c,
+                Err(e) => {
+                    tracing::warn!("registry dial failed: {e}, retrying in 500ms");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        };
+
+        match self_register(
+            registry_client,
+            "Proxy",
+            std::collections::HashMap::new(),
+            &advertise_host_owned,
+            advertise_port,
+            self_lease_ttl,
+        )
+        .await
+        {
+            Ok(_handle) => {
+                info!(
+                    "  ✓ Proxy: self-registered (capability: {}, lease: {})",
+                    _handle.capability_id(),
+                    _handle.lease_id()
+                );
+                std::future::pending::<()>().await;
+            }
+            Err(e) => {
+                tracing::error!("self_register failed: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    let server_fut = Server::builder()
+        .add_service(proxy_svc)
+        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+
+    info!("Djinn proxy ready.");
 
     tokio::select! {
         res = server_fut => res?,

@@ -49,7 +49,12 @@ enum Command {
     /// through Registry (via RemoteLeasing) and self-registers under
     /// interface=TransactionMgr with a 30-second self-lease.
     Txn,
-    /// (stub) Split mode not yet implemented for Proxy.
+    /// Boot Proxy alone on COORDIN8_BIND_ADDR.
+    ///
+    /// Requires COORDIN8_REGISTRY to be set — Proxy resolves templates via
+    /// Registry's Lookup RPC (RemoteCapabilityResolver) and self-registers
+    /// under interface=Proxy with a 30-second self-lease. Reads the usual
+    /// PROXY_BIND_HOST / PROXY_PORT_MIN / PROXY_PORT_MAX env vars.
     Proxy,
 }
 
@@ -73,12 +78,6 @@ async fn main() -> Result<()> {
         Some(Command::Event) => services::run_event().await,
         Some(Command::Space) => services::run_space().await,
         Some(Command::Txn) => services::run_txn().await,
-        Some(Command::Proxy) => stub_not_implemented("proxy"),
+        Some(Command::Proxy) => services::run_proxy().await,
     }
-}
-
-/// Log "split mode not yet implemented" and exit 1.
-fn stub_not_implemented(service: &str) -> Result<()> {
-    eprintln!("split mode not yet implemented for {service}");
-    std::process::exit(1);
 }

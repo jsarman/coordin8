@@ -12,6 +12,10 @@
 //! - **[`RemoteLeasing`]** — a `coordin8_core::Leasing` impl that forwards
 //!   grant/renew/cancel over gRPC to a discovered LeaseMgr, transparently
 //!   re-discovering through Registry on transport failure.
+//! - **[`RemoteCapabilityResolver`]** — a `coordin8_core::CapabilityResolver`
+//!   impl that forwards template lookups to a Registry gRPC service and
+//!   reconnects on transport failure. Used by split-mode Proxy to resolve
+//!   templates without a shared in-process `RegistryStore`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -23,11 +27,14 @@ use tokio::task::JoinHandle;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
-use coordin8_core::{Error as CoreError, LeaseRecord, Leasing};
+use coordin8_core::{
+    CapabilityResolver, Error as CoreError, LeaseRecord, Leasing, RegistryEntry,
+    TransportConfig as CoreTransportConfig,
+};
 use coordin8_proto::coordin8::{
     lease_service_client::LeaseServiceClient, registry_service_client::RegistryServiceClient,
-    CancelRequest, ExpiryEvent, GrantRequest, Lease, LookupRequest, RegisterRequest, RenewRequest,
-    TransportDescriptor, WatchExpiryRequest,
+    CancelRequest, Capability, ExpiryEvent, GrantRequest, Lease, LookupRequest, RegisterRequest,
+    RenewRequest, TransportDescriptor, WatchExpiryRequest,
 };
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -478,5 +485,102 @@ impl Leasing for RemoteLeasing {
         })
         .await
         .map(|_| ())
+    }
+}
+
+// ── RemoteCapabilityResolver ─────────────────────────────────────────────────
+
+/// A `coordin8_core::CapabilityResolver` implementation backed by a Registry
+/// gRPC client. Split-mode Proxy uses this to resolve templates without a
+/// shared in-process `RegistryStore` — the matching happens on the Registry
+/// server via its `Lookup` RPC.
+///
+/// On transport failure the Registry connection is rebuilt against
+/// `registry_addr` and the lookup is retried once. A `NotFound` status is
+/// treated as a successful "no match" (returns `Ok(None)`), since Registry
+/// reports "no capability matches this template" via `Status::not_found`.
+pub struct RemoteCapabilityResolver {
+    registry_addr: String,
+    client: Mutex<RegistryServiceClient<Channel>>,
+}
+
+impl RemoteCapabilityResolver {
+    /// Build a `RemoteCapabilityResolver` by dialing the Registry at
+    /// `registry_addr`. Retries forever with exponential backoff until the
+    /// Registry is reachable.
+    pub async fn connect(registry_addr: &str) -> Result<Self, Error> {
+        let client = retry_forever("registry_dial", || async {
+            RegistryServiceClient::connect(registry_addr.to_string())
+                .await
+                .map_err(Error::from)
+        })
+        .await;
+        Ok(Self {
+            registry_addr: registry_addr.to_string(),
+            client: Mutex::new(client),
+        })
+    }
+
+    async fn reconnect(&self) -> Result<(), CoreError> {
+        let fresh = RegistryServiceClient::connect(self.registry_addr.clone())
+            .await
+            .map_err(|e| CoreError::Internal(format!("registry reconnect failed: {e}")))?;
+        *self.client.lock().await = fresh;
+        warn!(registry = %self.registry_addr, "RemoteCapabilityResolver reconnected to Registry");
+        Ok(())
+    }
+}
+
+fn capability_to_registry_entry(cap: Capability) -> RegistryEntry {
+    RegistryEntry {
+        capability_id: cap.capability_id,
+        // Registry::Lookup does not return lease_id on the wire, and Proxy
+        // only reads the transport; leave this empty rather than invent one.
+        lease_id: String::new(),
+        interface: cap.interface,
+        attrs: cap.attrs,
+        transport: cap.transport.map(|t| CoreTransportConfig {
+            transport_type: t.r#type,
+            config: t.config,
+        }),
+    }
+}
+
+#[async_trait]
+impl CapabilityResolver for RemoteCapabilityResolver {
+    async fn resolve(
+        &self,
+        template: &HashMap<String, String>,
+    ) -> Result<Option<RegistryEntry>, CoreError> {
+        let request = LookupRequest {
+            template: template.clone(),
+        };
+
+        let attempt = self.client.lock().await.lookup(request.clone()).await;
+        let cap = match attempt {
+            Ok(resp) => resp.into_inner(),
+            Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
+            Err(status) if is_transport_failure(&status) => {
+                self.reconnect().await?;
+                match self.client.lock().await.lookup(request).await {
+                    Ok(resp) => resp.into_inner(),
+                    Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
+                    Err(status) => {
+                        return Err(CoreError::Internal(format!(
+                            "registry lookup failed after reconnect: {}",
+                            status
+                        )))
+                    }
+                }
+            }
+            Err(status) => {
+                return Err(CoreError::Internal(format!(
+                    "registry lookup failed: {}",
+                    status
+                )))
+            }
+        };
+
+        Ok(Some(capability_to_registry_entry(cap)))
     }
 }
