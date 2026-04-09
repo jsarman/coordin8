@@ -11,6 +11,7 @@ use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tracing::info;
 
+use coordin8_bootstrap::{self_register, watch_expiry_prefix, RemoteLeasing};
 use coordin8_core::{EventStore, LeaseStore, Leasing, RegistryStore, SpaceStore, TxnStore};
 use coordin8_event::{EventManager, EventServiceImpl};
 use coordin8_lease::{LeaseManager, LeaseServiceImpl};
@@ -443,7 +444,7 @@ pub async fn run_lease_on_listener(
             }
         };
 
-        match coordin8_bootstrap::self_register(
+        match self_register(
             registry_client,
             "LeaseMgr",
             std::collections::HashMap::new(),
@@ -475,6 +476,139 @@ pub async fn run_lease_on_listener(
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
     info!("Djinn lease ready.");
+
+    tokio::select! {
+        res = server_fut => res?,
+        _ = register_fut => unreachable!("register_fut awaits pending() forever"),
+    }
+
+    Ok(())
+}
+
+// ── EventMgr alone ───────────────────────────────────────────────────────────
+
+/// Boot EventMgr alone. Reads `COORDIN8_BIND_ADDR` and `COORDIN8_REGISTRY`.
+///
+/// Requires `COORDIN8_REGISTRY` to be set — EventMgr needs a Registry to
+/// discover LeaseMgr through and to self-register into.
+pub async fn run_event() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(&bind_addr()).await?;
+    let host = advertise_host();
+    let registry_addr = std::env::var("COORDIN8_REGISTRY")
+        .map_err(|_| anyhow::anyhow!("COORDIN8_REGISTRY must be set for split-mode EventMgr"))?;
+    run_event_on_listener(listener, &registry_addr, &host, 30).await
+}
+
+/// Boot EventMgr on a pre-bound [`TcpListener`], wiring it to a remote
+/// LeaseMgr discovered through Registry.
+///
+/// - `registry_addr` — Registry endpoint used for LeaseMgr discovery and
+///   self-registration under `interface=EventMgr`.
+/// - `advertise_host` — host peers should use to dial this EventMgr.
+/// - `self_lease_ttl` — TTL in seconds for the self-registration lease.
+///
+/// Uses [`RemoteLeasing`] for grant/renew/cancel and
+/// [`watch_expiry_prefix`] to drive subscription cleanup when leases expire
+/// on the remote LeaseMgr.
+pub async fn run_event_on_listener(
+    listener: tokio::net::TcpListener,
+    registry_addr: &str,
+    advertise_host: &str,
+    self_lease_ttl: u64,
+) -> Result<()> {
+    let actual_addr = listener.local_addr()?;
+    let advertise_port = actual_addr.port();
+
+    // Discover LeaseMgr through Registry. This blocks until Registry and
+    // LeaseMgr are both reachable.
+    let remote_leasing = RemoteLeasing::connect(registry_addr).await?;
+    let leasing: Arc<dyn Leasing> = Arc::new(remote_leasing);
+
+    // Local in-memory event store — events live in the EventMgr process.
+    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let (event_tx, _) = broadcast::channel::<coordin8_core::EventRecord>(256);
+    let event_manager = Arc::new(EventManager::new(
+        event_store,
+        Arc::clone(&leasing),
+        event_tx,
+    ));
+
+    // Drive subscription cleanup off remote LeaseMgr expiry events. Needs
+    // its own LeaseServiceClient for the streaming WatchExpiry RPC — the
+    // stream reconnects itself via Registry on failure.
+    let lease_stream_client = coordin8_bootstrap::discover_lease_mgr(registry_addr).await?;
+    let expiry_event_manager = Arc::clone(&event_manager);
+    let expiry_registry = registry_addr.to_string();
+    tokio::spawn(async move {
+        watch_expiry_prefix(
+            lease_stream_client,
+            expiry_registry,
+            "event:".to_string(),
+            move |evt| {
+                let mgr = Arc::clone(&expiry_event_manager);
+                let lease_id = evt.lease_id;
+                tokio::spawn(async move {
+                    let _ = mgr.unsubscribe_by_lease(&lease_id).await;
+                });
+            },
+        )
+        .await;
+    });
+
+    let event_svc = EventServiceServer::new(EventServiceImpl::new(Arc::clone(&event_manager)));
+
+    info!(
+        "  ✓ EventMgr (split): listening on {actual_addr}, advertising {advertise_host}:{advertise_port}"
+    );
+
+    let registry_url = registry_addr.to_string();
+    let advertise_host_owned = advertise_host.to_string();
+
+    let register_fut = async move {
+        let registry_client = loop {
+            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
+                registry_url.clone(),
+            )
+            .await
+            {
+                Ok(c) => break c,
+                Err(e) => {
+                    tracing::warn!("registry dial failed: {e}, retrying in 500ms");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        };
+
+        match self_register(
+            registry_client,
+            "EventMgr",
+            std::collections::HashMap::new(),
+            &advertise_host_owned,
+            advertise_port,
+            self_lease_ttl,
+        )
+        .await
+        {
+            Ok(_handle) => {
+                info!(
+                    "  ✓ EventMgr: self-registered (capability: {}, lease: {})",
+                    _handle.capability_id(),
+                    _handle.lease_id()
+                );
+                std::future::pending::<()>().await;
+            }
+            Err(e) => {
+                tracing::error!("self_register failed: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    let server_fut = Server::builder()
+        .add_service(event_svc)
+        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+
+    info!("Djinn event ready.");
 
     tokio::select! {
         res = server_fut => res?,

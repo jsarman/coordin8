@@ -30,7 +30,11 @@ enum Command {
     /// with a 30-second self-lease. Otherwise logs a warning and runs
     /// standalone.
     Lease,
-    /// (stub) Split mode not yet implemented for EventMgr.
+    /// Boot EventMgr alone on COORDIN8_BIND_ADDR.
+    ///
+    /// Requires COORDIN8_REGISTRY to be set — EventMgr discovers LeaseMgr
+    /// through Registry (via RemoteLeasing) and self-registers under
+    /// interface=EventMgr with a 30-second self-lease.
     Event,
     /// (stub) Split mode not yet implemented for Space.
     Space,
@@ -57,7 +61,7 @@ async fn main() -> Result<()> {
         None | Some(Command::All) => services::run_all().await,
         Some(Command::Registry) => services::run_registry().await,
         Some(Command::Lease) => services::run_lease().await,
-        Some(Command::Event) => stub_not_implemented("event"),
+        Some(Command::Event) => services::run_event().await,
         Some(Command::Space) => stub_not_implemented("space"),
         Some(Command::Txn) => stub_not_implemented("txn"),
         Some(Command::Proxy) => stub_not_implemented("proxy"),
