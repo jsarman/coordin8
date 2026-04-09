@@ -36,7 +36,12 @@ enum Command {
     /// through Registry (via RemoteLeasing) and self-registers under
     /// interface=EventMgr with a 30-second self-lease.
     Event,
-    /// (stub) Split mode not yet implemented for Space.
+    /// Boot Space alone on COORDIN8_BIND_ADDR.
+    ///
+    /// Requires COORDIN8_REGISTRY to be set — Space discovers LeaseMgr
+    /// through Registry (via RemoteLeasing) and self-registers under
+    /// interface=Space with a 30-second self-lease. Mounts both the
+    /// SpaceService and its 2PC ParticipantService on the same port.
     Space,
     /// (stub) Split mode not yet implemented for TransactionMgr.
     Txn,
@@ -62,7 +67,7 @@ async fn main() -> Result<()> {
         Some(Command::Registry) => services::run_registry().await,
         Some(Command::Lease) => services::run_lease().await,
         Some(Command::Event) => services::run_event().await,
-        Some(Command::Space) => stub_not_implemented("space"),
+        Some(Command::Space) => services::run_space().await,
         Some(Command::Txn) => stub_not_implemented("txn"),
         Some(Command::Proxy) => stub_not_implemented("proxy"),
     }

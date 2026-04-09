@@ -617,3 +617,152 @@ pub async fn run_event_on_listener(
 
     Ok(())
 }
+
+// ── Space alone ──────────────────────────────────────────────────────────────
+
+/// Boot Space alone. Reads `COORDIN8_BIND_ADDR` and `COORDIN8_REGISTRY`.
+///
+/// Requires `COORDIN8_REGISTRY` — Space needs a Registry to discover
+/// LeaseMgr through and to self-register into.
+pub async fn run_space() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(&bind_addr()).await?;
+    let host = advertise_host();
+    let registry_addr = std::env::var("COORDIN8_REGISTRY")
+        .map_err(|_| anyhow::anyhow!("COORDIN8_REGISTRY must be set for split-mode Space"))?;
+    run_space_on_listener(listener, &registry_addr, &host, 30).await
+}
+
+/// Boot Space on a pre-bound [`TcpListener`], wired to a remote LeaseMgr.
+///
+/// Mounts both `SpaceServiceImpl` and `SpaceParticipantService` on the same
+/// server, matching the monolith layout. Uses `watch_expiry_prefix` twice —
+/// once for `space:` (tuple leases) and once for `space-watch:` (watch
+/// leases) — to keep tuple and watch cleanup driven by the remote LeaseMgr.
+pub async fn run_space_on_listener(
+    listener: tokio::net::TcpListener,
+    registry_addr: &str,
+    advertise_host: &str,
+    self_lease_ttl: u64,
+) -> Result<()> {
+    let actual_addr = listener.local_addr()?;
+    let advertise_port = actual_addr.port();
+
+    let remote_leasing = RemoteLeasing::connect(registry_addr).await?;
+    let leasing: Arc<dyn Leasing> = Arc::new(remote_leasing);
+
+    let space_store: Arc<dyn SpaceStore> = Arc::new(InMemorySpaceStore::new());
+    let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
+    let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
+    let space_manager = Arc::new(SpaceManager::new(
+        space_store,
+        Arc::clone(&leasing),
+        space_tuple_tx,
+        space_expiry_tx,
+    ));
+
+    // Remote LeaseMgr drives tuple + watch cleanup via two WatchExpiry
+    // streams. Each needs its own LeaseServiceClient because the underlying
+    // gRPC stream is owned by one consumer.
+    let tuple_stream_client = coordin8_bootstrap::discover_lease_mgr(registry_addr).await?;
+    let tuple_mgr = Arc::clone(&space_manager);
+    let tuple_registry = registry_addr.to_string();
+    tokio::spawn(async move {
+        watch_expiry_prefix(
+            tuple_stream_client,
+            tuple_registry,
+            "space:".to_string(),
+            move |evt| {
+                let mgr = Arc::clone(&tuple_mgr);
+                let lease_id = evt.lease_id;
+                tokio::spawn(async move {
+                    mgr.on_tuple_expired(&lease_id).await;
+                });
+            },
+        )
+        .await;
+    });
+
+    let watch_stream_client = coordin8_bootstrap::discover_lease_mgr(registry_addr).await?;
+    let watch_mgr = Arc::clone(&space_manager);
+    let watch_registry = registry_addr.to_string();
+    tokio::spawn(async move {
+        watch_expiry_prefix(
+            watch_stream_client,
+            watch_registry,
+            "space-watch:".to_string(),
+            move |evt| {
+                let mgr = Arc::clone(&watch_mgr);
+                let lease_id = evt.lease_id;
+                tokio::spawn(async move {
+                    mgr.on_watch_expired(&lease_id).await;
+                });
+            },
+        )
+        .await;
+    });
+
+    let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(Arc::clone(&space_manager)));
+    let space_participant_svc =
+        ParticipantServiceServer::new(SpaceParticipantService::new(space_manager));
+
+    info!(
+        "  ✓ Space (split): listening on {actual_addr}, advertising {advertise_host}:{advertise_port}"
+    );
+
+    let registry_url = registry_addr.to_string();
+    let advertise_host_owned = advertise_host.to_string();
+
+    let register_fut = async move {
+        let registry_client = loop {
+            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
+                registry_url.clone(),
+            )
+            .await
+            {
+                Ok(c) => break c,
+                Err(e) => {
+                    tracing::warn!("registry dial failed: {e}, retrying in 500ms");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        };
+
+        match self_register(
+            registry_client,
+            "Space",
+            std::collections::HashMap::new(),
+            &advertise_host_owned,
+            advertise_port,
+            self_lease_ttl,
+        )
+        .await
+        {
+            Ok(_handle) => {
+                info!(
+                    "  ✓ Space: self-registered (capability: {}, lease: {})",
+                    _handle.capability_id(),
+                    _handle.lease_id()
+                );
+                std::future::pending::<()>().await;
+            }
+            Err(e) => {
+                tracing::error!("self_register failed: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    let server_fut = Server::builder()
+        .add_service(space_svc)
+        .add_service(space_participant_svc)
+        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+
+    info!("Djinn space ready.");
+
+    tokio::select! {
+        res = server_fut => res?,
+        _ = register_fut => unreachable!("register_fut awaits pending() forever"),
+    }
+
+    Ok(())
+}
