@@ -396,6 +396,28 @@ pub async fn run_lease_on_listener(
     advertise_host: &str,
     self_lease_ttl: u64,
 ) -> Result<()> {
+    run_lease_on_listener_with_shutdown(
+        listener,
+        registry_addr,
+        advertise_host,
+        self_lease_ttl,
+        std::future::pending::<()>(),
+    )
+    .await
+}
+
+/// Same as [`run_lease_on_listener`] but exits cleanly when `shutdown`
+/// resolves. Chaos tests use this to initiate a real graceful shutdown that
+/// actually tears down in-flight HTTP/2 connections — a plain
+/// `JoinHandle::abort()` only cancels the outer task and leaves tonic's
+/// detached per-connection workers serving their existing streams.
+pub async fn run_lease_on_listener_with_shutdown(
+    listener: tokio::net::TcpListener,
+    registry_addr: Option<&str>,
+    advertise_host: &str,
+    self_lease_ttl: u64,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
 
@@ -476,7 +498,10 @@ pub async fn run_lease_on_listener(
 
     let server_fut = Server::builder()
         .add_service(lease_svc)
-        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+        .serve_with_incoming_shutdown(
+            tokio_stream::wrappers::TcpListenerStream::new(listener),
+            shutdown,
+        );
 
     info!("Djinn lease ready.");
 
