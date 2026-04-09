@@ -529,6 +529,32 @@ impl RemoteCapabilityResolver {
         warn!(registry = %self.registry_addr, "RemoteCapabilityResolver reconnected to Registry");
         Ok(())
     }
+
+    /// Invoke `op` against the current Registry client. On transport failure,
+    /// reconnect and retry exactly once. Mirrors `RemoteLeasing::call_with_retry`
+    /// — the client is cloned out of the Mutex before the RPC, so the lock is
+    /// never held across `.await`.
+    /// Invoke Registry::Lookup against the current client. On transport failure,
+    /// reconnect and retry exactly once. Mirrors `RemoteLeasing::call_with_retry`
+    /// — the client is cloned out of the Mutex before the RPC, so the lock is
+    /// never held across `.await`.
+    async fn lookup_with_retry(
+        &self,
+        request: LookupRequest,
+    ) -> Result<tonic::Response<Capability>, tonic::Status> {
+        let mut client = self.client.lock().await.clone();
+        match client.lookup(request.clone()).await {
+            Ok(resp) => Ok(resp),
+            Err(status) if is_transport_failure(&status) => {
+                if let Err(e) = self.reconnect().await {
+                    return Err(tonic::Status::unavailable(format!("{e}")));
+                }
+                let mut client = self.client.lock().await.clone();
+                client.lookup(request).await
+            }
+            Err(status) => Err(status),
+        }
+    }
 }
 
 fn capability_to_registry_entry(cap: Capability) -> RegistryEntry {
@@ -556,31 +582,12 @@ impl CapabilityResolver for RemoteCapabilityResolver {
             template: template.clone(),
         };
 
-        let attempt = self.client.lock().await.lookup(request.clone()).await;
-        let cap = match attempt {
-            Ok(resp) => resp.into_inner(),
-            Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
-            Err(status) if is_transport_failure(&status) => {
-                self.reconnect().await?;
-                match self.client.lock().await.lookup(request).await {
-                    Ok(resp) => resp.into_inner(),
-                    Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
-                    Err(status) => {
-                        return Err(CoreError::Internal(format!(
-                            "registry lookup failed after reconnect: {}",
-                            status
-                        )))
-                    }
-                }
-            }
-            Err(status) => {
-                return Err(CoreError::Internal(format!(
-                    "registry lookup failed: {}",
-                    status
-                )))
-            }
-        };
-
-        Ok(Some(capability_to_registry_entry(cap)))
+        match self.lookup_with_retry(request).await {
+            Ok(resp) => Ok(Some(capability_to_registry_entry(resp.into_inner()))),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(status) => Err(CoreError::Internal(format!(
+                "registry lookup failed: {status}"
+            ))),
+        }
     }
 }

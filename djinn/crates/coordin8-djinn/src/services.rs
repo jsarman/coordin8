@@ -457,11 +457,11 @@ pub async fn run_lease_on_listener(
         )
         .await
         {
-            Ok(_handle) => {
+            Ok(handle) => {
                 info!(
                     "  ✓ LeaseMgr: self-registered (capability: {}, lease: {})",
-                    _handle.capability_id(),
-                    _handle.lease_id()
+                    handle.capability_id(),
+                    handle.lease_id()
                 );
                 // Hold the handle for the lifetime of this future so the
                 // renewal task stays alive only while we are.
@@ -592,11 +592,11 @@ pub async fn run_event_on_listener(
         )
         .await
         {
-            Ok(_handle) => {
+            Ok(handle) => {
                 info!(
                     "  ✓ EventMgr: self-registered (capability: {}, lease: {})",
-                    _handle.capability_id(),
-                    _handle.lease_id()
+                    handle.capability_id(),
+                    handle.lease_id()
                 );
                 std::future::pending::<()>().await;
             }
@@ -740,11 +740,11 @@ pub async fn run_space_on_listener(
         )
         .await
         {
-            Ok(_handle) => {
+            Ok(handle) => {
                 info!(
                     "  ✓ Space: self-registered (capability: {}, lease: {})",
-                    _handle.capability_id(),
-                    _handle.lease_id()
+                    handle.capability_id(),
+                    handle.lease_id()
                 );
                 std::future::pending::<()>().await;
             }
@@ -862,11 +862,11 @@ pub async fn run_txn_on_listener(
         )
         .await
         {
-            Ok(_handle) => {
+            Ok(handle) => {
                 info!(
                     "  ✓ TransactionMgr: self-registered (capability: {}, lease: {})",
-                    _handle.capability_id(),
-                    _handle.lease_id()
+                    handle.capability_id(),
+                    handle.lease_id()
                 );
                 std::future::pending::<()>().await;
             }
@@ -959,11 +959,11 @@ pub async fn run_proxy_on_listener(
         )
         .await
         {
-            Ok(_handle) => {
+            Ok(handle) => {
                 info!(
                     "  ✓ Proxy: self-registered (capability: {}, lease: {})",
-                    _handle.capability_id(),
-                    _handle.lease_id()
+                    handle.capability_id(),
+                    handle.lease_id()
                 );
                 std::future::pending::<()>().await;
             }

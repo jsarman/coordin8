@@ -208,10 +208,14 @@ async fn forward(
     resolver: Arc<dyn CapabilityResolver>,
     template: HashMap<String, String>,
 ) -> std::io::Result<()> {
-    let entry = match resolver.resolve(&template).await.unwrap_or(None) {
-        Some(e) => e,
-        None => {
+    let entry = match resolver.resolve(&template).await {
+        Ok(Some(e)) => e,
+        Ok(None) => {
             warn!(?template, "proxy: no capability at forward time");
+            return Ok(());
+        }
+        Err(e) => {
+            warn!(?template, "proxy: resolver error at forward time: {e}");
             return Ok(());
         }
     };
