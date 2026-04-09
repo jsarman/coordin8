@@ -1,5 +1,12 @@
 # Djinn Split — PRD
 
+> **Status: COMPLETE (merged to main, 2026-04-09).** All six phases shipped. Chaos tests in `coordin8-djinn/tests/split_chaos.rs` prove the `Leasing` seam survives LeaseMgr kills (both `RemoteLeasing` direct and end-to-end through Space). The monolith boot path is unchanged; split subcommands are opt-in.
+>
+> **Follow-ups (not blockers, tracked in master PRD):**
+> - Docker-compose chaos — kill a container instead of a tokio task
+> - DynamoDB/LocalStack provider-swap test — prove the seam across a real provider boundary
+> - Registry redundancy in split mode (PRD open question #1 below — still single Registry)
+
 ## Goal
 
 Split the monolithic Djinn binary into separately deployable services, prove they can boot independently, discover each other through Registry, and tolerate the loss of any single instance. Validate the entire model in `docker compose` against MiniStack before any cloud-target work begins.
