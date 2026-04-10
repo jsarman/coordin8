@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Coordin8 — The Djinn Network" width="250">
+</p>
+
 # Coordin8
 
 > Describe what you need, not where it is.
