@@ -12,7 +12,7 @@ use tonic::transport::Server;
 use tracing::info;
 
 use coordin8_bootstrap::{
-    self_register, watch_expiry_prefix, RemoteCapabilityResolver, RemoteLeasing,
+    self_register, watch_expiry_prefix, RemoteCapabilityResolver, RemoteLeasing, RemoteTxnEnlister,
 };
 use coordin8_core::{EventStore, LeaseStore, Leasing, RegistryStore, SpaceStore, TxnStore};
 use coordin8_event::{EventManager, EventServiceImpl};
@@ -32,7 +32,7 @@ use coordin8_proxy::{LocalCapabilityResolver, ProxyConfig, ProxyManager, ProxySe
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
 use coordin8_space::{SpaceManager, SpaceParticipantService, SpaceServiceImpl};
-use coordin8_txn::{TxnManager, TxnServiceImpl};
+use coordin8_txn::{LocalTxnEnlister, TxnManager, TxnServiceImpl};
 
 // ── Env var helpers (pub for tests) ──────────────────────────────────────────
 
@@ -219,11 +219,17 @@ pub async fn run_all() -> Result<()> {
     // ── Layer 2c: Space ──────────────────────────────────────────────────────
     let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
-    let space_manager = Arc::new(SpaceManager::new(
+    // Bundled mode: auto-enlist goes straight into the local TxnManager so the
+    // 2PC coordinator dials back into our own space participant on :9006.
+    let space_enlister = Arc::new(LocalTxnEnlister::new(Arc::clone(&txn_manager)));
+    let space_participant_endpoint = format!("{}:9006", advertise_host());
+    let space_manager = Arc::new(SpaceManager::with_enlister(
         space_store,
         Arc::clone(&leasing),
         space_tuple_tx,
         space_expiry_tx,
+        space_enlister,
+        space_participant_endpoint,
     ));
 
     let space_expiry_mgr = Arc::clone(&space_manager);
@@ -678,14 +684,23 @@ pub async fn run_space_on_listener(
     let remote_leasing = RemoteLeasing::connect(registry_addr).await?;
     let leasing: Arc<dyn Leasing> = Arc::new(remote_leasing);
 
+    // Split mode: auto-enlist dials TxnMgr over Registry lazily — no I/O
+    // happens at boot, so Space can come up with no TxnMgr in sight and still
+    // serve non-transactional traffic. The first transactional write/take
+    // drives discovery on demand.
+    let space_enlister = Arc::new(RemoteTxnEnlister::new(registry_addr));
+    let space_participant_endpoint = format!("{}:{}", advertise_host, advertise_port);
+
     let space_store: Arc<dyn SpaceStore> = Arc::new(InMemorySpaceStore::new());
     let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
-    let space_manager = Arc::new(SpaceManager::new(
+    let space_manager = Arc::new(SpaceManager::with_enlister(
         space_store,
         Arc::clone(&leasing),
         space_tuple_tx,
         space_expiry_tx,
+        space_enlister,
+        space_participant_endpoint,
     ));
 
     // Remote LeaseMgr drives tuple + watch cleanup via two WatchExpiry

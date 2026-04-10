@@ -29,12 +29,13 @@ use tracing::{debug, info, warn};
 
 use coordin8_core::{
     CapabilityResolver, Error as CoreError, LeaseRecord, Leasing, RegistryEntry,
-    TransportConfig as CoreTransportConfig,
+    TransportConfig as CoreTransportConfig, TxnEnlister,
 };
 use coordin8_proto::coordin8::{
     lease_service_client::LeaseServiceClient, registry_service_client::RegistryServiceClient,
-    CancelRequest, Capability, ExpiryEvent, GrantRequest, Lease, LookupRequest, RegisterRequest,
-    RenewRequest, TransportDescriptor, WatchExpiryRequest,
+    transaction_service_client::TransactionServiceClient, CancelRequest, Capability, EnlistRequest,
+    ExpiryEvent, GrantRequest, Lease, LookupRequest, RegisterRequest, RenewRequest,
+    TransportDescriptor, WatchExpiryRequest,
 };
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -107,6 +108,15 @@ pub async fn discover_lease_mgr(registry_addr: &str) -> Result<LeaseServiceClien
 
 /// Single attempt to discover LeaseMgr via a Registry lookup.
 async fn try_discover_lease_mgr(registry_addr: &str) -> Result<LeaseServiceClient<Channel>, Error> {
+    let channel = discover_service_channel(registry_addr, "LeaseMgr").await?;
+    Ok(LeaseServiceClient::new(channel))
+}
+
+/// Look up a service in Registry by `interface` and dial it.
+///
+/// Helper shared by service-specific discovery functions. Returns a connected
+/// tonic `Channel` that the caller wraps in the appropriate generated client.
+async fn discover_service_channel(registry_addr: &str, interface: &str) -> Result<Channel, Error> {
     let channel = Channel::from_shared(registry_addr.to_string())
         .map_err(|_| Error::MissingTransport("invalid registry address"))?
         .connect()
@@ -114,7 +124,7 @@ async fn try_discover_lease_mgr(registry_addr: &str) -> Result<LeaseServiceClien
 
     let mut registry = RegistryServiceClient::new(channel);
 
-    let template = HashMap::from([("interface".to_string(), "LeaseMgr".to_string())]);
+    let template = HashMap::from([("interface".to_string(), interface.to_string())]);
 
     let cap = registry
         .lookup(LookupRequest { template })
@@ -135,13 +145,26 @@ async fn try_discover_lease_mgr(registry_addr: &str) -> Result<LeaseServiceClien
         .ok_or(Error::MissingTransport("port"))?;
     let addr = format!("http://{host}:{port}");
 
-    debug!(addr, "connecting to LeaseMgr");
-    let lease_channel = Channel::from_shared(addr)
+    debug!(addr, interface, "connecting to discovered service");
+    Channel::from_shared(addr)
         .map_err(|_| Error::MissingTransport("host/port formed invalid URL"))?
         .connect()
-        .await?;
+        .await
+        .map_err(Error::from)
+}
 
-    Ok(LeaseServiceClient::new(lease_channel))
+/// Find TxnMgr in Registry and return a connected client. Retries forever with
+/// exponential backoff. The discovery template is `interface=TransactionMgr`.
+pub async fn discover_txn_mgr(
+    registry_addr: &str,
+) -> Result<TransactionServiceClient<Channel>, Error> {
+    let client = retry_forever("discover_txn_mgr", || async {
+        let channel = discover_service_channel(registry_addr, "TransactionMgr").await?;
+        Ok::<_, Error>(TransactionServiceClient::new(channel))
+    })
+    .await;
+    info!(registry = registry_addr, "discovered TransactionMgr");
+    Ok(client)
 }
 
 // ── SelfRegistrationHandle ────────────────────────────────────────────────────
@@ -588,6 +611,83 @@ impl CapabilityResolver for RemoteCapabilityResolver {
             Err(status) => Err(CoreError::Internal(format!(
                 "registry lookup failed: {status}"
             ))),
+        }
+    }
+}
+
+// ── RemoteTxnEnlister ────────────────────────────────────────────────────────
+
+/// A `coordin8_core::TxnEnlister` backed by a gRPC connection to a remote
+/// TransactionMgr. Used by split-mode services (Space today, others later) so
+/// they can auto-enlist as 2PC participants without taking a direct dependency
+/// on `coordin8-txn`.
+///
+/// Discovery is **lazy**: `new()` does no I/O, so Space can boot before TxnMgr
+/// exists. The first `enlist()` call drives discovery through Registry, caches
+/// the resulting client, and retries forever until TxnMgr is reachable —
+/// matching the "absence is a signal" stance from the design napkin. On any
+/// later transport failure the cached client is dropped and rediscovered.
+pub struct RemoteTxnEnlister {
+    registry_addr: String,
+    client: Mutex<Option<TransactionServiceClient<Channel>>>,
+}
+
+impl RemoteTxnEnlister {
+    /// Build a lazy `RemoteTxnEnlister`. Does not touch the network — the
+    /// first `enlist` call will discover TxnMgr through Registry.
+    pub fn new(registry_addr: &str) -> Self {
+        Self {
+            registry_addr: registry_addr.to_string(),
+            client: Mutex::new(None),
+        }
+    }
+
+    /// Return a ready client, discovering TxnMgr if we don't have one yet.
+    /// Blocks (with exponential backoff) until Registry and TxnMgr are both
+    /// reachable.
+    async fn ensure_client(&self) -> Result<TransactionServiceClient<Channel>, CoreError> {
+        if let Some(c) = self.client.lock().await.as_ref() {
+            return Ok(c.clone());
+        }
+        let fresh = discover_txn_mgr(&self.registry_addr)
+            .await
+            .map_err(|e| CoreError::Internal(format!("discover txn_mgr failed: {e}")))?;
+        let mut guard = self.client.lock().await;
+        *guard = Some(fresh.clone());
+        Ok(fresh)
+    }
+
+    async fn rediscover(&self) -> Result<TransactionServiceClient<Channel>, CoreError> {
+        let fresh = discover_txn_mgr(&self.registry_addr)
+            .await
+            .map_err(|e| CoreError::Internal(format!("rediscover txn_mgr failed: {e}")))?;
+        *self.client.lock().await = Some(fresh.clone());
+        warn!(registry = %self.registry_addr, "RemoteTxnEnlister reconnected to TxnMgr");
+        Ok(fresh)
+    }
+}
+
+#[async_trait]
+impl TxnEnlister for RemoteTxnEnlister {
+    async fn enlist(&self, txn_id: &str, endpoint: &str) -> Result<(), CoreError> {
+        let request = EnlistRequest {
+            txn_id: txn_id.to_string(),
+            participant_endpoint: endpoint.to_string(),
+            crash_count: 0,
+        };
+
+        let mut client = self.ensure_client().await?;
+        match client.enlist(request.clone()).await {
+            Ok(_) => Ok(()),
+            Err(status) if is_transport_failure(&status) => {
+                let mut client = self.rediscover().await?;
+                client
+                    .enlist(request)
+                    .await
+                    .map(|_| ())
+                    .map_err(|s| CoreError::Internal(format!("enlist failed: {s}")))
+            }
+            Err(status) => Err(CoreError::Internal(format!("enlist failed: {status}"))),
         }
     }
 }

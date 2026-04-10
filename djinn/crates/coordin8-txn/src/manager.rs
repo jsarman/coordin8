@@ -375,3 +375,25 @@ fn vote_from_i32(v: i32) -> PrepareVote {
         _ => PrepareVote::Prepared,
     }
 }
+
+/// In-process [`TxnEnlister`] that calls directly into the bundled `TxnManager`.
+///
+/// Used in bundled-mode Djinn so the Space (and any other future participant)
+/// can auto-enlist without going through gRPC. The split-mode counterpart lives
+/// in `coordin8-bootstrap` as `RemoteTxnEnlister`.
+pub struct LocalTxnEnlister {
+    manager: Arc<TxnManager>,
+}
+
+impl LocalTxnEnlister {
+    pub fn new(manager: Arc<TxnManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait::async_trait]
+impl coordin8_core::TxnEnlister for LocalTxnEnlister {
+    async fn enlist(&self, txn_id: &str, endpoint: &str) -> Result<(), Error> {
+        self.manager.enlist(txn_id, endpoint.to_string(), 0).await
+    }
+}
