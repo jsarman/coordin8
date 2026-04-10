@@ -34,10 +34,11 @@ Boot order is strict and load-bearing. No circular dependencies.
 
 The default `djinn` binary boots all services in-process (bundled mode). Each service can also run as its own process via subcommands: `djinn lease | registry | event | space | txn | proxy`. Split services discover each other through Registry — `COORDIN8_REGISTRY=host:9002` is the one well-known endpoint. Everything else self-registers under a short-TTL self-lease and is found by template lookup.
 
-Two seams make this possible without touching manager internals:
+Three trait seams make this possible without touching manager internals:
 
 - **`Leasing` trait** (`coordin8-core`) — abstracts lease operations. `LocalLeasing` wraps the in-process `LeaseManager`; `RemoteLeasing` (`coordin8-bootstrap`) wraps a gRPC client with transparent reconnect + retry on transport failure. Services written against the trait work identically in bundled and split mode.
 - **`CapabilityResolver` trait** (`coordin8-core`) — abstracts Registry template resolution with the same local/remote split.
+- **`TxnEnlister` trait** (`coordin8-core`) — abstracts 2PC enlist. `LocalTxnEnlister` (`coordin8-txn`) calls directly into `TxnManager`; `RemoteTxnEnlister` (`coordin8-bootstrap`) discovers TxnMgr lazily through Registry (Space can boot before TxnMgr exists). Space auto-enlists on the first transactional write/take.
 
 Split mode survives LeaseMgr kills: a `RemoteLeasing` service whose current LeaseMgr dies re-resolves through Registry and continues against whatever instance is still up. Chaos tests in `djinn/crates/coordin8-djinn/tests/split_chaos.rs` enforce this.
 
