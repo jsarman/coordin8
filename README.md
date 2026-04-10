@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Coordin8 — The Djinn Network" width="250">
+  <img src="assets/logo.png" alt="Coordin8 — The Djinn Network">
 </p>
 
 # Coordin8
