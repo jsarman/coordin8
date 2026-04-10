@@ -1,8 +1,12 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Coordin8 — The Djinn Network" width="250">
+</p>
+
 # Coordin8
 
 > Describe what you need, not where it is.
 
-The cloud has durable, scalable building blocks — DynamoDB, SQS, EventBridge, Kafka, Kinesis. What it doesn't have is coordination theory on top. Developers stitch together REST calls and end up with distributed monoliths: all the coupling, none of the transactional guarantees.
+Every cloud has durable, scalable building blocks — key-value stores, message queues, event buses, streams. What none of them have is coordination theory on top. Developers stitch together REST calls and end up with distributed monoliths: all the coupling, none of the transactional guarantees.
 
 Coordin8 brings back the coordination model that Sun Labs got right in 1999 with Jini/JavaSpaces, decoupled from the JVM and modernized for any cloud. Same primitives. Modern runtime. Zero lock-in.
 
@@ -81,7 +85,7 @@ All three SDKs have the same surface area:
 | **Java** | `sdks/java/` | `./gradlew build` |
 | **Node.js/TypeScript** | `sdks/node/` | `npm run build` |
 
-Each SDK provides: `DjinnClient`, `LeaseClient`, `RegistryClient`, `ProxyClient`, and **`ServiceDiscovery`** — a Jini-inspired one-liner client that caches proxy connections by template and refreshes on lease expiry:
+Each SDK provides: `DjinnClient`, `LeaseClient`, `RegistryClient`, `ProxyClient`, `SpaceClient`, and **`ServiceDiscovery`** — a Jini-inspired one-liner client that caches proxy connections by template and refreshes on lease expiry:
 
 ```go
 // Go — one line to get a typed stub
@@ -297,6 +301,7 @@ coordin8/
 | **TransactionMgr** | Built | Real 2PC — parallel prepare, single-participant optimization, veto abort |
 | **Space** | Built | Distributed reactive tuple store with transactional isolation |
 | **DynamoDB Provider** | Built | All 5 stores backed by DynamoDB (9 tables), tested against LocalStack |
+| **Split Mode** | Built | Each service can run as its own process (`djinn lease\|registry\|event\|space\|txn\|proxy`), discoverable through Registry. Chaos-tested. |
 | Cloud Topology | Planned | Independent service deployment — Lambda + Fargate + external pub/sub |
 | Dashboard | Planned | Real-time coordination plane visualization |
 
