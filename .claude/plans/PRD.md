@@ -96,11 +96,11 @@ Distributed reactive coordination store. `out/take/read/watch`. See `.claude/pla
 | InMemorySpaceStore | Done | Race-safe take_match, lease_index for reaper |
 | Integration tests | Done | 13 Rust tests — blocking, race, expiry, template ops |
 | `txn_id` field reserved on Write/Read/Take/Notify/Contents | Done | Wire-compatible; server currently ignores |
-| Transaction isolation (Space as 2PC participant) | **Gap** | Next Phase 2 session — uncommitted buffer + enlist |
-| Go SDK | **Gap** | Generated stubs present, no hand-written client |
+| Transaction isolation (Space as 2PC participant) | Done | `TxnEnlister` trait seam, auto-enlist on write/take, `LocalTxnEnlister` + `RemoteTxnEnlister`, 13 unit + 2 split integration tests |
+| Go SDK | Done | `SpaceClient` — Write, Read, Take, Contents, Notify, RenewTuple, CancelTuple |
 | Java SDK | **Gap** | Generated stubs present, no hand-written client |
 | Node SDK | **Gap** | Generated stubs present, no hand-written client |
-| CLI: spaces list, read, out, watch | **Gap** | Blocked on SDK |
+| CLI: spaces list, read, out, watch | **Gap** | Blocked on Java/Node SDK |
 
 ---
 
@@ -239,7 +239,7 @@ Bottom-up alignment against the Jini specification. See `.claude/plans/phase2-sp
 | Session | Status | Notes |
 |---------|--------|-------|
 | Session 1 — Lease, Registry, ServiceDiscovery, Events, Txn, Space | Done | Merged 2026-03-30. RPC renames, duration negotiation, ServiceID-style re-registration, Contents RPC, handback, and lease-expiry cascades across all four dependent services |
-| Session 2 — Space transaction isolation (Space as 2PC participant) | Not started | `session-2-prep.md` has the design. Uncommitted write buffer, txn-aware `find_match` / `take_match`, new `ParticipantService` impl hosted on port 9006 |
+| Session 2 — Space transaction isolation (Space as 2PC participant) | Done | Merged 2026-04-10. `TxnEnlister` trait seam (mirrors `Leasing`/`CapabilityResolver`), auto-enlist on transactional write/take, `LocalTxnEnlister` (bundled) + lazy `RemoteTxnEnlister` (split), end-to-end split_space_txn integration tests |
 | Nested transactions (`NestableServerTransaction`) | **Deferred** | Explicitly out of scope for Phase 2 |
 | Transaction journal durability / crash recovery | **Gap** | In-memory only, not spec'd for a Phase 2 session yet |
 | Typed Entry classes (vs flat string attrs) | **Deliberate divergence** | Flat map is the intentional modernization |
@@ -297,10 +297,9 @@ Not in core — built on Space/EventMgr primitives. **Unblocked** — Space v1 a
 
 ## Suggested Priority Order
 
-1. **Phase 2 Session 2: Space transaction isolation** — final major Jini spec gap. Uncommitted write buffer, txn-aware read/take, Space as 2PC participant. See `.claude/plans/phase2-spec-alignment/session-2-prep.md`
-2. **SDK parity gaps** — Java LeaseClient missing `keepAlive` + `watch`; Space/EventMgr/TxnMgr hand-written clients missing in all three SDKs
-3. **Space SDKs + CLI** — Go SpaceClient, then Java/Node, then CLI commands
+1. **Space CLI** — `spaces read/out/take/watch` commands in the Go CLI (Go Space SDK now done)
+2. **SDK parity gaps** — Java LeaseClient missing `keepAlive` + `watch`; Space/EventMgr/TxnMgr hand-written clients missing in Java + Node
 4. **Djinn split follow-ups** — docker-compose chaos, DynamoDB/LocalStack provider-swap test, Registry redundancy
 5. **AWS Provider** — DynamoDB/SQS/EventBridge for production
-6. **Higher-order patterns** — Lens, Reflex, Sentry (now unblocked by Space + EventMgr)
+6. **Higher-order patterns** — Lens, Reflex, Sentry (unblocked by Space + EventMgr)
 7. **Dashboard** — observability UI
