@@ -3,12 +3,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use dashmap::DashMap;
 use tokio::sync::broadcast;
 use tracing::debug;
 use uuid::Uuid;
 
 use coordin8_core::{
     Error, LeaseRecord, Leasing, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord,
+    TxnEnlister,
 };
 use coordin8_registry::matcher::{matches, parse_template};
 
@@ -17,9 +19,25 @@ pub struct SpaceManager {
     lease_manager: Arc<dyn Leasing>,
     tuple_tx: broadcast::Sender<TupleRecord>,
     expiry_tx: broadcast::Sender<TupleRecord>,
+    /// Auto-enlist gateway. None = no TxnMgr available; transactional ops still
+    /// work locally but the Space is not registered as a 2PC participant. Tests
+    /// that drive `commit_space_txn` / `abort_space_txn` directly use this mode.
+    enlister: Option<Arc<dyn TxnEnlister>>,
+    /// Address advertised to TxnMgr when enlisting — the participant endpoint
+    /// the 2PC coordinator dials back during prepare/commit/abort. Required
+    /// whenever `enlister` is `Some`.
+    participant_endpoint: Option<String>,
+    /// Set of transactions this Space has already enlisted under. Prevents
+    /// duplicate `Enlist` calls when a single txn does multiple writes/takes.
+    /// Cleared on commit/abort.
+    enlisted: DashMap<String, ()>,
 }
 
 impl SpaceManager {
+    /// Construct a SpaceManager without a TxnMgr connection. Transactional
+    /// methods (`write` with `txn_id`, etc.) still work but the Space will not
+    /// auto-enlist as a 2PC participant — callers are responsible for driving
+    /// `commit_space_txn` / `abort_space_txn` themselves.
     pub fn new(
         store: Arc<dyn SpaceStore>,
         lease_manager: Arc<dyn Leasing>,
@@ -31,7 +49,52 @@ impl SpaceManager {
             lease_manager,
             tuple_tx,
             expiry_tx,
+            enlister: None,
+            participant_endpoint: None,
+            enlisted: DashMap::new(),
         }
+    }
+
+    /// Construct a SpaceManager with auto-enlist wired in. On the first
+    /// transactional `write` or `take` for a given `txn_id`, the Space calls
+    /// `TxnEnlister::enlist(txn_id, participant_endpoint)` so that the 2PC
+    /// coordinator knows to drive prepare/commit/abort against this Space.
+    pub fn with_enlister(
+        store: Arc<dyn SpaceStore>,
+        lease_manager: Arc<dyn Leasing>,
+        tuple_tx: broadcast::Sender<TupleRecord>,
+        expiry_tx: broadcast::Sender<TupleRecord>,
+        enlister: Arc<dyn TxnEnlister>,
+        participant_endpoint: String,
+    ) -> Self {
+        Self {
+            store,
+            lease_manager,
+            tuple_tx,
+            expiry_tx,
+            enlister: Some(enlister),
+            participant_endpoint: Some(participant_endpoint),
+            enlisted: DashMap::new(),
+        }
+    }
+
+    /// Auto-enlist this Space as a participant in `txn_id` if we haven't
+    /// already. No-op when no enlister is configured (tests / standalone mode).
+    /// Idempotent: subsequent calls for the same txn skip the RPC.
+    async fn ensure_enlisted(&self, txn_id: &str) -> Result<(), Error> {
+        let Some(enlister) = self.enlister.as_ref() else {
+            return Ok(());
+        };
+        if self.enlisted.contains_key(txn_id) {
+            return Ok(());
+        }
+        let endpoint = self.participant_endpoint.as_deref().ok_or_else(|| {
+            Error::Internal("space participant_endpoint not configured".to_string())
+        })?;
+        enlister.enlist(txn_id, endpoint).await?;
+        self.enlisted.insert(txn_id.to_string(), ());
+        debug!(txn_id, endpoint, "space auto-enlisted as 2PC participant");
+        Ok(())
     }
 
     /// Write a leased tuple into the Space. Returns both the tuple and its lease.
@@ -65,7 +128,8 @@ impl SpaceManager {
         };
 
         if let Some(ref tid) = txn_id {
-            // Transactional write — buffer, don't broadcast yet.
+            // Transactional write — auto-enlist, buffer, don't broadcast yet.
+            self.ensure_enlisted(tid).await?;
             self.store.insert_uncommitted(tid, record.clone()).await?;
             debug!(tuple_id, txn_id = tid, lease_id = %lease.lease_id, "tuple written (uncommitted)");
         } else {
@@ -139,6 +203,11 @@ impl SpaceManager {
         timeout_ms: u64,
         txn_id: Option<String>,
     ) -> Result<Option<TupleRecord>, Error> {
+        // Auto-enlist before any transactional take (either hits or restores-on-abort).
+        if let Some(ref tid) = txn_id {
+            self.ensure_enlisted(tid).await?;
+        }
+
         // Try immediate atomic take.
         if let Some(record) = self.store.take_match(&template, txn_id.as_deref()).await? {
             // Only cancel lease immediately for non-transactional takes.
@@ -224,6 +293,7 @@ impl SpaceManager {
     /// visible store and broadcast them. Takes under the txn stay removed.
     pub async fn commit_space_txn(&self, txn_id: &str) -> Result<(), Error> {
         let flushed = self.store.commit_txn(txn_id).await?;
+        self.enlisted.remove(txn_id);
 
         // Broadcast all newly visible tuples to wake blocked readers/takers.
         for record in &flushed {
@@ -239,6 +309,7 @@ impl SpaceManager {
     /// Restored tuples are broadcast to wake any blocked readers/takers.
     pub async fn abort_space_txn(&self, txn_id: &str) -> Result<(), Error> {
         let (discarded, restored) = self.store.abort_txn(txn_id).await?;
+        self.enlisted.remove(txn_id);
 
         // Cancel leases on discarded uncommitted tuples.
         for record in &discarded {
