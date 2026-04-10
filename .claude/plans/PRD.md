@@ -13,6 +13,7 @@ The bedrock. TTL-based liveness contracts.
 |------|--------|-------|
 | Proto: Grant, Renew, Cancel, WatchExpiry | Done | `proto/coordin8/lease.proto` |
 | Rust: LeaseManager + reaper | Done | `coordin8-lease` crate, 1s reaper interval |
+| Duration negotiation + `FOREVER` / `ANY` constants | Done | `MAX_LEASE_TTL` / `PREFERRED_LEASE_TTL` env vars |
 | Go SDK: grant, renew, cancel, keepAlive, watch | Done | Full parity |
 | Java SDK: grant, renew, cancel | Done | |
 | Java SDK: keepAlive (background renewal) | **Gap** | Go has it, Java doesn't |
@@ -28,16 +29,17 @@ Attribute-based service discovery with leased entries.
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Proto: Register, Lookup, LookupAll, Watch | Done | `proto/coordin8/registry.proto` |
+| Proto: Register, Lookup, LookupAll, Watch, ModifyAttrs | Done | `proto/coordin8/registry.proto` |
 | Rust: RegistryIndex + matcher | Done | `coordin8-registry` crate |
 | Template ops: exact, contains:, starts_with:, Any | Done | |
 | Template ops: Gte, Lte, Range | **Gap** | Napkin mentions them, not implemented |
 | TransportDescriptor in Capability | Done | type + config map |
-| Go SDK: register, lookup, lookupAll, watch | Done | Full parity |
-| Java SDK: lookup, lookupAll | Done | |
-| Java SDK: register | **Gap** | Go has it, Java doesn't |
-| Java SDK: watch (change events) | **Gap** | Go has it, Java doesn't |
-| Node SDK: register, lookup, lookupAll, watch | Done | |
+| ServiceID-style re-registration (`capability_id`) | Done | `RegisterResponse` carries cap_id + lease |
+| `ModifyAttrs` RPC + `MODIFIED` event type | Done | Jini modifyAttributes pattern |
+| Lease-expiry cascade (zombie entry cleanup) | Done | Phase 2 critical fix |
+| Go SDK: register, lookup, lookupAll, watch, modifyAttrs | Done | Full parity |
+| Java SDK: register, lookup, lookupAll, watch, modifyAttrs | Done | Added in Phase 2 |
+| Node SDK: register, lookup, lookupAll, watch, modifyAttrs | Done | Added in Phase 2 |
 | CLI: list, register, lookup, watch | Done | |
 
 ---
@@ -68,9 +70,9 @@ Jini-inspired one-liner client. Caches proxies by template.
 | Go: Watch, Get, Close | Done | Watch-based refresh working |
 | Go: stale-on-expire, eager-refresh | Done | Background goroutine watches registry |
 | Java: watch, get, close | Done | Cache works |
-| Java: watch-based refresh | **Gap** | Cache never refreshes after initial populate |
+| Java: watch-based refresh | Done | stale-on-expire, refresh-on-register, refresh-on-modified |
 | Node: watch, get, close | Done | Cache works |
-| Node: watch-based refresh | **Gap** | Cache never refreshes after initial populate |
+| Node: watch-based refresh | Done | stale-on-expire, refresh-on-register, refresh-on-modified |
 
 ---
 
@@ -80,22 +82,24 @@ Distributed reactive coordination store. `out/take/read/watch`. See `.claude/pla
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Proto: SpaceService definition | Done | `proto/coordin8/space.proto` — 6 RPCs |
+| Proto: SpaceService definition | Done | `proto/coordin8/space.proto` — Jini-named RPCs |
 | Rust: Space crate | Done | `coordin8-space` — boots Layer 2c, port 9006 |
-| out(attrs, payload, ttl, written_by, lineage) | Done | Leased, broadcasts to wake blockers |
-| take(template, wait, timeout_ms) | Done | Atomic claim+remove, blocking with race handling |
-| read(template, wait, timeout_ms) | Done | Non-destructive, blocking or non-blocking |
-| watch(template, on, ttl) | Done | Server-streaming push, appearance + expiration |
-| RenewTuple / CancelTuple | Done | Lease management on stored tuples |
-| TTL / lease on tuples + watches | Done | Reaper integration via expiry_tx listener |
+| Write (was Out) — attrs, payload, ttl, written_by, lineage | Done | Leased, broadcasts to wake blockers |
+| Take (template, wait, timeout_ms) | Done | Atomic claim+remove, blocking with race handling |
+| Read (template, wait, timeout_ms) | Done | Non-destructive, blocking or non-blocking |
+| Notify (was Watch) — template, handback, ttl | Done | Server-streaming, appearance + expiration, Jini handback |
+| Contents (bulk read streaming) | Done | JavaSpace05.contents — added in Phase 2 |
+| Renew / Cancel (was RenewTuple/CancelTuple) | Done | Lease management on stored tuples |
+| TTL / lease on tuples + notifies | Done | Reaper integration via expiry_tx listener |
 | Provenance metadata | Done | written_by, written_at, input_tuple_id (lineage) |
 | Template matching | Done | Reuses `coordin8_registry::matcher` |
 | InMemorySpaceStore | Done | Race-safe take_match, lease_index for reaper |
-| Integration tests (12) | Done | Full coverage — blocking, race, expiry, template ops |
-| Transaction support (v2) | **Deferred** | txn_id on operations, Space as 2PC participant |
-| Go SDK | **Gap** | |
-| Java SDK | **Gap** | |
-| Node SDK | **Gap** | |
+| Integration tests | Done | 13 Rust tests — blocking, race, expiry, template ops |
+| `txn_id` field reserved on Write/Read/Take/Notify/Contents | Done | Wire-compatible; server currently ignores |
+| Transaction isolation (Space as 2PC participant) | **Gap** | Next Phase 2 session — uncommitted buffer + enlist |
+| Go SDK | **Gap** | Generated stubs present, no hand-written client |
+| Java SDK | **Gap** | Generated stubs present, no hand-written client |
+| Node SDK | **Gap** | Generated stubs present, no hand-written client |
 | CLI: spaces list, read, out, watch | **Gap** | Blocked on SDK |
 
 ---
@@ -112,6 +116,7 @@ Durable event delivery. Store-and-forward mailbox semantics. Independent of Spac
 | Receive (server-streaming) | Done | Subscribe to broadcast BEFORE draining mailbox (race-free) |
 | Emit (any service can call) | Done | Broadcasts + enqueues to all matching durable subscriptions |
 | RenewSubscription / CancelSubscription | Done | |
+| Subscription lease-expiry cascade | Done | Phase 2 critical fix — `remove_by_lease` + `unsubscribe_by_lease` |
 | DeliveryMode: DURABLE vs BEST_EFFORT | Done | DURABLE = mailbox; BEST_EFFORT = broadcast only |
 | Sequence numbers on Event (gap detection) | Done | Per (source, event_type) atomic counter |
 | Handback bytes (echoed from subscribe) | Done | Jini handback pattern |
@@ -139,6 +144,7 @@ Real 2PC distributed transactions. Not sagas. Independent of Space — uses InMe
 | Abort (calls abort on all participants) | Done | |
 | PrepareAndCommit optimization (single participant) | Done | Skips extra round-trip |
 | NOTCHANGED voters skipped at commit phase | Done | Read-only participant optimization |
+| Transaction lease-expiry auto-abort cascade | Done | Phase 2 critical fix — `abort_expired()` wired in main.rs |
 | ParticipantService: Prepare, Commit, Abort, PrepareAndCommit | Done | Participants run own gRPC server |
 | InMemory transaction journal | Done | `InMemoryTxnStore` — participants embedded in TransactionRecord |
 | host.docker.internal for callback routing | Done | `extra_hosts: host-gateway` in compose |
@@ -226,6 +232,20 @@ Pluggable storage backends.
 
 ---
 
+## Phase 2: Spec Alignment
+
+Bottom-up alignment against the Jini specification. See `.claude/plans/phase2-spec-alignment/`.
+
+| Session | Status | Notes |
+|---------|--------|-------|
+| Session 1 — Lease, Registry, ServiceDiscovery, Events, Txn, Space | Done | Merged 2026-03-30. RPC renames, duration negotiation, ServiceID-style re-registration, Contents RPC, handback, and lease-expiry cascades across all four dependent services |
+| Session 2 — Space transaction isolation (Space as 2PC participant) | Not started | `session-2-prep.md` has the design. Uncommitted write buffer, txn-aware `find_match` / `take_match`, new `ParticipantService` impl hosted on port 9006 |
+| Nested transactions (`NestableServerTransaction`) | **Deferred** | Explicitly out of scope for Phase 2 |
+| Transaction journal durability / crash recovery | **Gap** | In-memory only, not spec'd for a Phase 2 session yet |
+| Typed Entry classes (vs flat string attrs) | **Deliberate divergence** | Flat map is the intentional modernization |
+
+---
+
 ## Djinn Split Mode
 
 Each service can boot as its own process, discoverable through Registry. Monolith boot is still the default for local dev. See `.claude/plans/djinn-split/PRD.md`.
@@ -277,11 +297,10 @@ Not in core — built on Space/EventMgr primitives. **Unblocked** — Space v1 a
 
 ## Suggested Priority Order
 
-1. **Phase 2: Spec Alignment** — Systems test what we have, then align each service to Jini specs bottom-up (Lease → Registry → ServiceDiscovery → Events → Transactions → Space). See `.claude/plans/phase2-spec-alignment/session-1-prep.md`
-2. **SDK parity gaps** — Java/Node missing keepAlive, watch, registry refresh; Space/EventMgr/TxnMgr SDK clients
+1. **Phase 2 Session 2: Space transaction isolation** — final major Jini spec gap. Uncommitted write buffer, txn-aware read/take, Space as 2PC participant. See `.claude/plans/phase2-spec-alignment/session-2-prep.md`
+2. **SDK parity gaps** — Java LeaseClient missing `keepAlive` + `watch`; Space/EventMgr/TxnMgr hand-written clients missing in all three SDKs
 3. **Space SDKs + CLI** — Go SpaceClient, then Java/Node, then CLI commands
 4. **Djinn split follow-ups** — docker-compose chaos, DynamoDB/LocalStack provider-swap test, Registry redundancy
 5. **AWS Provider** — DynamoDB/SQS/EventBridge for production
-6. **Space v2: Transactions** — txn_id on operations, Space as 2PC participant
-7. **Higher-order patterns** — Lens, Reflex, Sentry (now unblocked by Space + EventMgr)
-8. **Dashboard** — observability UI
+6. **Higher-order patterns** — Lens, Reflex, Sentry (now unblocked by Space + EventMgr)
+7. **Dashboard** — observability UI
