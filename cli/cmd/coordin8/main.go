@@ -28,6 +28,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&djinnHost, "host", "localhost", "Djinn host")
 	rootCmd.AddCommand(leaseCmd)
 	rootCmd.AddCommand(registryCmd)
+	rootCmd.AddCommand(spaceCmd)
 }
 
 func connect() (*coordin8.Client, error) {
