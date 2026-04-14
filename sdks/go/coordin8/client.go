@@ -20,6 +20,7 @@ type Client struct {
 	registryConn *grpc.ClientConn
 	proxyConn    *grpc.ClientConn
 	spaceConn    *grpc.ClientConn
+	eventConn    *grpc.ClientConn
 }
 
 // ConnectOption configures the Client.
@@ -30,6 +31,7 @@ type connectOptions struct {
 	registryAddr string
 	proxyAddr    string
 	spaceAddr    string
+	eventAddr    string
 }
 
 // WithLeaseAddr overrides the default LeaseMgr address (default: host:9001).
@@ -52,6 +54,11 @@ func WithSpaceAddr(addr string) ConnectOption {
 	return func(o *connectOptions) { o.spaceAddr = addr }
 }
 
+// WithEventAddr overrides the default EventMgr address (default: host:9005).
+func WithEventAddr(addr string) ConnectOption {
+	return func(o *connectOptions) { o.eventAddr = addr }
+}
+
 // Connect opens gRPC connections to LeaseMgr, Registry, and Proxy.
 func Connect(host string, opts ...ConnectOption) (*Client, error) {
 	cfg := &connectOptions{
@@ -59,6 +66,7 @@ func Connect(host string, opts ...ConnectOption) (*Client, error) {
 		registryAddr: host + ":9002",
 		proxyAddr:    host + ":9003",
 		spaceAddr:    host + ":9006",
+		eventAddr:    host + ":9005",
 	}
 	for _, o := range opts {
 		o(cfg)
@@ -94,11 +102,21 @@ func Connect(host string, opts ...ConnectOption) (*Client, error) {
 		return nil, err
 	}
 
+	eventConn, err := grpc.NewClient(cfg.eventAddr, dialOpts...)
+	if err != nil {
+		leaseConn.Close()
+		registryConn.Close()
+		proxyConn.Close()
+		spaceConn.Close()
+		return nil, err
+	}
+
 	return &Client{
 		leaseConn:    leaseConn,
 		registryConn: registryConn,
 		proxyConn:    proxyConn,
 		spaceConn:    spaceConn,
+		eventConn:    eventConn,
 	}, nil
 }
 
@@ -108,5 +126,6 @@ func (c *Client) Close() error {
 	c.registryConn.Close()
 	c.proxyConn.Close()
 	c.spaceConn.Close()
+	c.eventConn.Close()
 	return nil
 }
