@@ -1,0 +1,73 @@
+services:
+  djinn:
+    build:
+      context: ../../
+      dockerfile: Dockerfile.djinn
+    ports:
+      - "9001:9001"
+      - "9002:9002"
+      - "9003:9003"
+      - "9004:9004"
+      - "9005:9005"
+      - "9006:9006"
+      - "9100-9200:9100-9200"
+    environment:
+      RUST_LOG: "info"
+      PROXY_BIND_HOST: "0.0.0.0"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/localhost/9001'"]
+      interval: 5s
+      retries: 10
+    networks:
+      - auction-net
+
+  auction-service:
+    build:
+      context: ../../
+      dockerfile: examples/auction-house/Dockerfile.auction-service
+    depends_on:
+      djinn:
+        condition: service_healthy
+    environment:
+      DJINN_HOST: djinn
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    restart: on-failure
+    networks:
+      - auction-net
+
+  settlement-engine:
+    build:
+      context: ../../
+      dockerfile: examples/auction-house/Dockerfile.settlement-engine
+    depends_on:
+      djinn:
+        condition: service_healthy
+    environment:
+      DJINN_HOST: djinn
+    restart: on-failure
+    networks:
+      - auction-net
+
+  auction-board:
+    build:
+      context: ../../
+      dockerfile: examples/auction-house/Dockerfile.auction-board
+    depends_on:
+      djinn:
+        condition: service_healthy
+      auction-service:
+        condition: service_started
+    environment:
+      DJINN_HOST: djinn
+      PORT: "3000"
+      AUCTION_SERVICE: "http://auction-service:8080"
+    ports:
+      - "3000:3000"
+    restart: on-failure
+    networks:
+      - auction-net
+
+networks:
+  auction-net:

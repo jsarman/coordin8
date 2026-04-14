@@ -1,0 +1,17 @@
+FROM node:20-alpine AS build
+WORKDIR /src
+COPY sdks/node/ /src/sdks/node/
+COPY examples/auction-house/auction-board/ /src/examples/auction-house/auction-board/
+WORKDIR /src/sdks/node
+RUN npm install && npm run build
+WORKDIR /src/examples/auction-house/auction-board
+# Fix the SDK path for Docker context
+RUN sed -i 's|"file:../../../sdks/node"|"file:/src/sdks/node"|' package.json
+RUN npm install
+
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=build /src/examples/auction-house/auction-board/ /app/
+COPY --from=build /src/sdks/node/ /app/node_modules/@coordin8/sdk/
+EXPOSE 3000
+CMD ["npx", "ts-node", "src/server.ts"]

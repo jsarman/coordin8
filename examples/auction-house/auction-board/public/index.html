@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auction House — Coordin8</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+    h1 { text-align: center; margin-bottom: 4px; color: #e94560; }
+    .subtitle { text-align: center; color: #888; margin-bottom: 24px; font-size: 14px; }
+    .status { text-align: center; margin-bottom: 20px; font-size: 13px; }
+    .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .dot.connected { background: #0f0; }
+    .dot.disconnected { background: #f00; }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; max-width: 1200px; margin: 0 auto; }
+
+    .card { background: #16213e; border-radius: 12px; padding: 20px; position: relative; overflow: hidden; border: 1px solid #0f3460; }
+    .card.ended { opacity: 0.7; }
+    .card .item { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+    .card .auction-id { font-size: 11px; color: #666; margin-bottom: 12px; word-break: break-all; }
+    .card .timer { position: absolute; top: 16px; right: 16px; font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .card .timer.urgent { color: #e94560; }
+    .card .bid-info { display: flex; justify-content: space-between; margin: 12px 0; padding: 10px; background: #0f3460; border-radius: 8px; }
+    .card .bid-info .label { font-size: 11px; color: #888; text-transform: uppercase; }
+    .card .bid-info .value { font-size: 18px; font-weight: 600; margin-top: 2px; }
+    .card .bid-form { display: flex; gap: 8px; margin-top: 12px; }
+    .card .bid-form input { flex: 1; padding: 8px 12px; border: 1px solid #0f3460; border-radius: 6px; background: #1a1a2e; color: #eee; font-size: 14px; }
+    .card .bid-form button { padding: 8px 20px; background: #e94560; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    .card .bid-form button:hover { background: #c73e54; }
+
+    .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 800; text-transform: uppercase; border-radius: 12px; }
+    .overlay.sold { background: rgba(15, 157, 88, 0.9); }
+    .overlay.no-sale { background: rgba(233, 69, 96, 0.85); }
+
+    .feed { max-width: 1200px; margin: 24px auto 0; }
+    .feed h2 { font-size: 16px; color: #888; margin-bottom: 8px; }
+    .feed .log { max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; background: #16213e; border-radius: 8px; padding: 12px; border: 1px solid #0f3460; }
+    .feed .log div { padding: 2px 0; }
+    .feed .log .bid { color: #4fc3f7; }
+    .feed .log .sale { color: #0f9d58; }
+    .feed .log .expire { color: #e94560; }
+
+    .create-form { max-width: 1200px; margin: 0 auto 20px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .create-form input { padding: 8px 12px; border: 1px solid #0f3460; border-radius: 6px; background: #16213e; color: #eee; font-size: 13px; }
+    .create-form button { padding: 8px 20px; background: #0f3460; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    .create-form button:hover { background: #1a5276; }
+    .create-form label { font-size: 12px; color: #888; }
+  </style>
+</head>
+<body>
+  <h1>🔨 Auction House</h1>
+  <p class="subtitle">Three services. Three languages. One coordination plane.</p>
+  <div class="status"><span class="dot disconnected" id="dot"></span><span id="status-text">Connecting...</span></div>
+
+  <div class="create-form">
+    <label>New Auction:</label>
+    <input id="item" placeholder="Item name" value="Vintage Typewriter">
+    <input id="starting" type="number" placeholder="Start $" value="25" style="width:80px">
+    <input id="reserve" type="number" placeholder="Reserve $" value="50" style="width:80px">
+    <input id="duration" type="number" placeholder="Seconds" value="30" style="width:80px">
+    <button onclick="createAuction()">Create Auction</button>
+  </div>
+
+  <div class="grid" id="auctions"></div>
+
+  <div class="feed">
+    <h2>Event Feed</h2>
+    <div class="log" id="log"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

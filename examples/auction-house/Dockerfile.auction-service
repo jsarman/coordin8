@@ -1,0 +1,14 @@
+FROM gradle:8.7-jdk21 AS build
+WORKDIR /src
+COPY sdks/java/ /src/sdks/java/
+COPY examples/auction-house/auction-service/ /src/examples/auction-house/auction-service/
+WORKDIR /src/examples/auction-house/auction-service
+# Fix the settings.gradle includeBuild path for Docker context
+RUN sed -i "s|../../../sdks/java|/src/sdks/java|" settings.gradle
+RUN gradle build --no-daemon
+
+FROM eclipse-temurin:21-jre-alpine
+COPY --from=build /src/examples/auction-house/auction-service/build/libs/auction-service-0.1.0.jar /app.jar
+COPY --from=build /src/examples/auction-house/auction-service/build/distributions/auction-service-0.1.0.tar /tmp/dist.tar
+RUN cd /opt && tar xf /tmp/dist.tar && rm /tmp/dist.tar
+ENTRYPOINT ["/opt/auction-service-0.1.0/bin/auction-service"]
