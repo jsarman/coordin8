@@ -398,13 +398,13 @@ Mix and match. The Djinn wires it up.
 
 ```
 Dev:         SQLite in-process. pip install and go. Zero cloud dependencies.
-Integration: MiniStack on Docker Desktop. Real AWS semantics, local.
+Integration: LocalStack on Docker Desktop. Real AWS semantics, local.
 Production:  Real AWS (or Azure, GCP). Same code, different endpoint.
 ```
 
 ```python
 djinn = Djinn(provider="local")                                    # dev
-djinn = Djinn(provider="aws", endpoint="http://localhost:4566")    # ministack
+djinn = Djinn(provider="aws", endpoint="http://localhost:4566")    # localstack
 djinn = Djinn(provider="aws", region="us-east-1")                 # prod
 ```
 
@@ -414,8 +414,8 @@ One line difference. Mental model doesn't change.
 
 ```yaml
 services:
-  ministack:
-    image: nahuelnucera/ministack
+  localstack:
+    image: localstack/localstack
     ports:
       - "4566:4566"
     environment:
@@ -961,7 +961,7 @@ func main() {
 - EventBridge for watch() routing
 - DynamoDB TransactWriteItems for same-provider txn optimization
 - Terraform modules for all infrastructure
-- MiniStack docker-compose for integration testing
+- LocalStack docker-compose for integration testing
 
 ### Phase 9 — Dashboard + Observability
 
@@ -1007,5 +1007,5 @@ Authentic to origin story (Florida weather stations). Demonstrates every primiti
 3. **Absence is a signal.** Lease expiry is not cleanup — it's a coordination event. The thing that didn't happen is as important as the thing that did.
 4. **The space never carries heavy data.** It carries knowledge about data — indexes, handles, capabilities. The Information pattern separates coordination plane from data plane.
 5. **Transport is behind the capability.** Kafka, Kinesis, TCP, gRPC — invisible to the consumer unless they choose to filter on it.
-6. **Same code, three tiers.** Local SQLite → MiniStack → Production cloud. One line config change.
+6. **Same code, three tiers.** Local SQLite → LocalStack → Production cloud. One line config change.
 7. **Transactions are real.** Not sagas. Not compensation. Two-phase commit with lease-based failure recovery. The TransactionParticipant interface is open to any service, not just spaces.
