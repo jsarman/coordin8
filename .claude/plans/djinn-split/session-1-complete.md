@@ -51,7 +51,7 @@ chaos B: phase0=17 phase1=87 phase2=0 phase2_errors=10
 ## Follow-ups (tracked in master PRD, priority #4)
 
 1. **Docker-compose chaos** — kill a container, not a tokio task. Would catch orchestrator-level surprises the in-process test can't.
-2. **DynamoDB/LocalStack provider-swap test** — prove the `Leasing` + `CapabilityResolver` seams work across a real provider boundary, not just the local provider.
+2. **DynamoDB/MiniStack provider-swap test** — prove the `Leasing` + `CapabilityResolver` seams work across a real provider boundary, not just the local provider.
 3. **Registry redundancy in split mode** — currently one Registry. PRD open question #1 proposed either (a) lean on Dynamo's concurrent-writer story or (b) replication for local. Still unanswered.
 
 ## Key files

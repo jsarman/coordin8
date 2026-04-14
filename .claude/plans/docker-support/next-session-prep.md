@@ -20,7 +20,7 @@ adb2c08  Initial commit — Phases 0-3 complete
 ## Candidate Next Steps (in rough priority order)
 
 1. **Node greeter_service** — only Go greeter service exists; a Node version would complete the polyglot story
-2. **Phase 8: LocalStack / AWS provider** — `localstack` service already stubbed out in docker-compose.yml; DynamoDB-backed LeaseStore + RegistryStore
+2. **Phase 8: MiniStack / AWS provider** — `ministack` service in docker-compose.yml; DynamoDB-backed LeaseStore + RegistryStore
 3. **Phase 5 (design doc): Space** — tuple store; `out/take/read/watch` primitives
 4. **Make/CI** — `Makefile` exists but needs targets for full build pipeline
 5. **CLI** — `cli/` exists but minimal; `coordin8 ls` to list registry entries would be useful

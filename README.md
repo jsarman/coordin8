@@ -71,7 +71,7 @@ A distributed reactive tuple store inspired by JavaSpaces. Write tuples with `ou
 The provider layer is a set of storage traits (`LeaseStore`, `RegistryStore`, `EventStore`, `TxnStore`, `SpaceStore`) that abstract the backing store. Two implementations ship today:
 
 - **`local`** (default) — in-memory with `DashMap`. Fast, zero dependencies, perfect for dev and edge.
-- **`dynamo`** — DynamoDB-backed, 9 tables, tested against LocalStack. State survives restarts.
+- **`dynamo`** — DynamoDB-backed, 9 tables, tested against MiniStack. State survives restarts.
 
 Switch at startup: `COORDIN8_PROVIDER=dynamo`
 
@@ -200,7 +200,7 @@ Looking up Greeter in Registry...
 
 No cleanup. No stale entries. The lease expired — that's the signal.
 
-### With DynamoDB (LocalStack)
+### With DynamoDB (MiniStack)
 
 ```bash
 # Start with DynamoDB-backed persistence
@@ -300,7 +300,7 @@ coordin8/
 | **EventMgr** | Built | Durable event delivery, leased subscriptions, mailbox buffering |
 | **TransactionMgr** | Built | Real 2PC — parallel prepare, single-participant optimization, veto abort |
 | **Space** | Built | Distributed reactive tuple store with transactional isolation |
-| **DynamoDB Provider** | Built | All 5 stores backed by DynamoDB (9 tables), tested against LocalStack |
+| **DynamoDB Provider** | Built | All 5 stores backed by DynamoDB (9 tables), tested against MiniStack |
 | **Split Mode** | Built | Each service can run as its own process (`djinn lease\|registry\|event\|space\|txn\|proxy`), discoverable through Registry. Chaos-tested. |
 | Cloud Topology | Planned | Independent service deployment — Lambda + Fargate + external pub/sub |
 | Dashboard | Planned | Real-time coordination plane visualization |
