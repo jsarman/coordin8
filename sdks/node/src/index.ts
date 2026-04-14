@@ -5,4 +5,6 @@ export { RegistryClient } from "./registry-client";
 export type { CapabilityRecord, TransportDescriptor, Template, RegisterResult, RegistryEventRecord } from "./registry-client";
 export { ProxyClient } from "./proxy-client";
 export type { ProxyHandle } from "./proxy-client";
+export { SpaceClient } from "./space-client";
+export type { TupleRecord, SpaceEvent, WriteOpts, ReadOpts, TakeOpts, NotifyOpts } from "./space-client";
 export { ServiceDiscovery } from "./service-discovery";
