@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "proto": "npm run proto:coordin8",
-    "proto:coordin8": "protoc --plugin=protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=gen --ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,env=node -I ../../proto ../../proto/coordin8/lease.proto ../../proto/coordin8/registry.proto ../../proto/coordin8/common.proto"
+    "proto:coordin8": "protoc --plugin=protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=gen --ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,env=node -I ../../proto ../../proto/coordin8/lease.proto ../../proto/coordin8/registry.proto ../../proto/coordin8/common.proto ../../proto/coordin8/space.proto ../../proto/coordin8/transaction.proto ../../proto/coordin8/event.proto ../../proto/coordin8/proxy.proto"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.10.0"
