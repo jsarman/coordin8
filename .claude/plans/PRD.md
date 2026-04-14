@@ -185,7 +185,7 @@ Pluggable storage backends.
 | docker-compose.yml | Done | Djinn + greeter, ports 9001–9006 + proxy range |
 | host.docker.internal | Done | `extra_hosts: host-gateway` on djinn — 2PC callback routing |
 | .dockerignore | Done | |
-| LocalStack service | Stubbed | Commented out in compose, ready to activate |
+| MiniStack service | Stubbed | Commented out in compose, ready to activate |
 | Dashboard service | Stubbed | Commented out in compose |
 
 ---
@@ -263,7 +263,7 @@ Each service can boot as its own process, discoverable through Registry. Monolit
 | Phase 5 — Proxy split | Done | |
 | Chaos tests: RemoteLeasing + Space survive LeaseMgr kill | Done | `coordin8-djinn/tests/split_chaos.rs`, 3-phase pattern |
 | Docker-compose chaos (kill a container) | **Gap** | Follow-up from djinn-split PR |
-| DynamoDB/LocalStack provider-swap test | **Gap** | Prove the seam across a real provider boundary |
+| DynamoDB/MiniStack provider-swap test | **Gap** | Prove the seam across a real provider boundary |
 | Registry redundancy in split mode | **Gap** | Currently single Registry — open question from PRD |
 
 ---
@@ -299,7 +299,7 @@ Not in core — built on Space/EventMgr primitives. **Unblocked** — Space v1 a
 
 1. **Space CLI** — `spaces read/out/take/watch` commands in the Go CLI (Go Space SDK now done)
 2. **SDK parity gaps** — Java LeaseClient missing `keepAlive` + `watch`; Space/EventMgr/TxnMgr hand-written clients missing in Java + Node
-4. **Djinn split follow-ups** — docker-compose chaos, DynamoDB/LocalStack provider-swap test, Registry redundancy
+4. **Djinn split follow-ups** — docker-compose chaos, DynamoDB/MiniStack provider-swap test, Registry redundancy
 5. **AWS Provider** — DynamoDB/SQS/EventBridge for production
 6. **Higher-order patterns** — Lens, Reflex, Sentry (unblocked by Space + EventMgr)
 7. **Dashboard** — observability UI

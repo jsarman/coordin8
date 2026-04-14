@@ -211,7 +211,7 @@ The manager layer (`SpaceManager`, `LeaseManager`, etc.) doesn't change. It call
 
 4. **Multi-region** — DynamoDB Global Tables for lease/registry. EventBridge cross-region event bus. Space tuples — partition by attribute? This is a Phase 4 conversation.
 
-5. **Local dev story** — LocalStack for the full serverless stack locally? Or just use the monolith Djinn for dev and only deploy serverless to staging/prod?
+5. **Local dev story** — MiniStack for the full serverless stack locally? Or just use the monolith Djinn for dev and only deploy serverless to staging/prod?
 
 6. **Streaming in serverless** — Watch/Receive RPCs are server-streaming. WebSocket API Gateway handles this but adds complexity. Worth it, or do we offer polling alternatives?
 

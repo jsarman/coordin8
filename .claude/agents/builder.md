@@ -32,7 +32,7 @@ proto/coordin8/                .proto definitions
 - Use `async_trait` for trait impls. Use `Arc` for shared state.
 - Map external errors (AWS SDK, etc.) to `coordin8_core::Error::Storage(msg)`.
 - **AWS SDK error matching**: always use typed patterns (`SdkError::ServiceError` + typed method like `is_conditional_check_failed_exception()`). Never string-match on `format!("{e}")` — it's fragile and inconsistent with the rest of the crate.
-- Tests go in the same file under `#[cfg(test)]`. Integration tests that need external services (LocalStack, etc.) must be `#[ignore]`.
+- Tests go in the same file under `#[cfg(test)]`. Integration tests that need external services (MiniStack, etc.) must be `#[ignore]`.
 - Don't add dependencies that aren't specified in the task prompt.
 - Don't modify files outside the scope specified in the task prompt.
 

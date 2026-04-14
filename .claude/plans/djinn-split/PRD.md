@@ -4,7 +4,7 @@
 >
 > **Follow-ups (not blockers, tracked in master PRD):**
 > - Docker-compose chaos — kill a container instead of a tokio task
-> - DynamoDB/LocalStack provider-swap test — prove the seam across a real provider boundary
+> - DynamoDB/MiniStack provider-swap test — prove the seam across a real provider boundary
 > - Registry redundancy in split mode (PRD open question #1 below — still single Registry)
 
 ## Goal

@@ -1,8 +1,8 @@
 # Phase 3: Cloud Topology — Session 1 Prep
 
-**Goal:** Build a DynamoDB-backed provider (`coordin8-provider-dynamo`) and validate it against LocalStack. Same traits, same managers, different backing store.
+**Goal:** Build a DynamoDB-backed provider (`coordin8-provider-dynamo`) and validate it against MiniStack. Same traits, same managers, different backing store.
 
-## Why LocalStack First
+## Why MiniStack First
 
 - No AWS account needed during dev
 - Same DynamoDB API, runs locally in Docker
@@ -12,9 +12,9 @@
 
 ## What Needs to Happen
 
-### 1. Activate LocalStack in Docker Compose
+### 1. Activate MiniStack in Docker Compose
 
-Uncomment the `localstack` service. Services needed: `dynamodb`.
+Uncomment the `ministack` service. Services needed: `dynamodb`.
 
 SQS and EventBridge come later — start with the storage layer (DynamoDB) since all five store traits map to it.
 
@@ -47,7 +47,7 @@ One table per store, single-table design where it makes sense.
 
 - GSI: `resource_id-index` (resource_id → lease_id) for `get_by_resource`
 - DynamoDB TTL on `ttl` field — this IS the reaper for production
-- For LocalStack: still need our reaper since LocalStack TTL is approximate
+- For MiniStack: still need our reaper since MiniStack TTL is approximate
 
 #### `coordin8_registry`
 | PK | SK | Attributes |
@@ -98,7 +98,7 @@ Start with LeaseStore — it's the bedrock, simplest trait, and validates the Dy
 ### 5. Testing Strategy
 
 Each store gets integration tests that:
-- Create tables in LocalStack on test setup
+- Create tables in MiniStack on test setup
 - Run the same logical tests as the InMemory provider
 - Clean up or use unique table names per test run
 
@@ -109,7 +109,7 @@ Use `aws-sdk-dynamodb` crate with custom endpoint (`http://localhost:4566`).
 Environment variable: `COORDIN8_PROVIDER=local|dynamo`
 
 When `dynamo`:
-- Read `DYNAMODB_ENDPOINT` (defaults to `http://localhost:4566` for LocalStack, omit for real AWS)
+- Read `DYNAMODB_ENDPOINT` (defaults to `http://localhost:4566` for MiniStack, omit for real AWS)
 - Create shared DynamoDB client
 - Ensure all tables exist (create if missing)
 - Instantiate Dynamo stores instead of InMemory stores
@@ -158,9 +158,9 @@ serde_json        = { workspace = true }
 
 Token-conscious — checkpoint after each milestone, ask to continue.
 
-1. Activate LocalStack in docker-compose, verify it starts → **checkpoint**
+1. Activate MiniStack in docker-compose, verify it starts → **checkpoint**
 2. Create the `providers/dynamo/` crate skeleton, shared client + table helpers → **checkpoint**
-3. Implement `DynamoLeaseStore` + test against LocalStack → **checkpoint**
+3. Implement `DynamoLeaseStore` + test against MiniStack → **checkpoint**
 4. Implement `DynamoRegistryStore` + test → **checkpoint**
 5. Implement `DynamoTxnStore` + test → **checkpoint**
 6. Implement `DynamoEventStore` + test → **checkpoint**
@@ -172,14 +172,14 @@ Each step: implement, test, commit, ask to continue. No hog wild.
 
 ## Risks
 
-- **LocalStack DynamoDB fidelity** — conditional expressions, GSI consistency, and TTL behavior may differ from real DynamoDB. Test against real AWS before shipping.
+- **MiniStack DynamoDB fidelity** — conditional expressions, GSI consistency, and TTL behavior may differ from real DynamoDB. Test against real AWS before shipping.
 - **Template matching on DynamoDB** — `contains:` and `starts_with:` operators don't map cleanly to DynamoDB filter expressions for arbitrary attribute keys. May need client-side filtering on scan results (like InMemory does today). Acceptable for v1.
 - **Scan performance** — `find_match`, `take_match`, `find_all_matches` all do full table scans with template matching. Fine for small spaces, needs GSI strategy for scale. Park for later.
 - **Uncommitted buffer tables** — three tables for Space (committed, uncommitted, txn_taken) feels heavy. Could use a single table with a `status` attribute instead. Decide during implementation.
 
 ## Files to Touch
 
-- `docker-compose.yml` — uncomment LocalStack
+- `docker-compose.yml` — uncomment MiniStack
 - `djinn/Cargo.toml` — add workspace member + dependencies
 - `djinn/providers/dynamo/` — new crate (all files)
 - `djinn/crates/coordin8-djinn/Cargo.toml` — add dynamo provider dependency

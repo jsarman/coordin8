@@ -76,7 +76,7 @@ services:
     networks:
       - coordin8-net
 
-  # MiniStack — free, MIT-licensed AWS emulation (replaces LocalStack)
+  # MiniStack — free, MIT-licensed AWS emulation
   ministack:
     image: nahuelnucera/ministack
     ports:

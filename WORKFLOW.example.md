@@ -24,5 +24,5 @@ Copy this to `WORKFLOW.md` and customize. This file is gitignored — each devel
 ## Testing
 
 - Run `cargo test` before committing Rust changes
-- Run integration tests with `--ignored` flag (requires LocalStack)
+- Run integration tests with `--ignored` flag (requires MiniStack)
 - Use the test-runner agent for visible test output in tmux
