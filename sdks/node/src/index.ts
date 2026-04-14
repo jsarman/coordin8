@@ -7,4 +7,6 @@ export { ProxyClient } from "./proxy-client";
 export type { ProxyHandle } from "./proxy-client";
 export { SpaceClient } from "./space-client";
 export type { TupleRecord, SpaceEvent, WriteOpts, ReadOpts, TakeOpts, NotifyOpts } from "./space-client";
+export { EventClient } from "./event-client";
+export type { EventRegistration, EventRecord, SubscribeOpts } from "./event-client";
 export { ServiceDiscovery } from "./service-discovery";
