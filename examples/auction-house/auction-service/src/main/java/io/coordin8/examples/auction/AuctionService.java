@@ -43,6 +43,7 @@ public class AuctionService {
     public Map<String, Object> createAuction(String item, double startingPrice,
                                               double reservePrice, int durationSeconds) {
         String auctionId = UUID.randomUUID().toString();
+        long endEpoch = System.currentTimeMillis() / 1000 + durationSeconds;
 
         var tuple = space.write(
                 Map.of(
@@ -54,7 +55,8 @@ public class AuctionService {
                         "current_bid", "0.00",
                         "current_bidder", "",
                         "status", "open",
-                        "duration_seconds", String.valueOf(durationSeconds)
+                        "duration_seconds", String.valueOf(durationSeconds),
+                        "end_epoch", String.valueOf(endEpoch)
                 ),
                 null, durationSeconds, "auction-service", null, null);
 
@@ -65,53 +67,66 @@ public class AuctionService {
     // ── Place Bid ───────────────────────────────────────────────────────────
 
     public Map<String, Object> placeBid(String auctionId, String bidder, double amount) {
-        // Read current auction state
-        var auction = space.read(Map.of("type", "auction", "auction_id", auctionId));
-        if (auction.isEmpty()) {
+        // Atomic take — validates and removes in one step (no read/take TOCTOU race)
+        var taken = space.take(Map.of("type", "auction", "auction_id", auctionId));
+        if (taken.isEmpty()) {
             throw new IllegalStateException("Auction not found or already ended");
         }
 
-        var attrs = auction.get().attrs();
+        var attrs = taken.get().attrs();
         double currentBid = Double.parseDouble(attrs.getOrDefault("current_bid", "0"));
         String currentBidder = attrs.getOrDefault("current_bidder", "");
 
-        // Validate
-        if (amount <= currentBid + MIN_INCREMENT && currentBid > 0) {
-            throw new IllegalArgumentException(
-                    String.format("Bid must exceed current bid ($%.2f) by at least $%.2f", currentBid, MIN_INCREMENT));
-        }
-        double startingPrice = Double.parseDouble(attrs.getOrDefault("starting_price", "0"));
-        if (amount < startingPrice) {
-            throw new IllegalArgumentException(
-                    String.format("Bid must be at least the starting price ($%.2f)", startingPrice));
-        }
-        if (bidder.equals(currentBidder)) {
-            throw new IllegalArgumentException("You are already the highest bidder");
+        // Validate — if invalid, re-write the original tuple before throwing
+        try {
+            if (amount <= currentBid + MIN_INCREMENT && currentBid > 0) {
+                throw new IllegalArgumentException(
+                        String.format("Bid must exceed current bid ($%.2f) by at least $%.2f", currentBid, MIN_INCREMENT));
+            }
+            double startingPrice = Double.parseDouble(attrs.getOrDefault("starting_price", "0"));
+            if (amount < startingPrice) {
+                throw new IllegalArgumentException(
+                        String.format("Bid must be at least the starting price ($%.2f)", startingPrice));
+            }
+            if (bidder.equals(currentBidder)) {
+                throw new IllegalArgumentException("You are already the highest bidder");
+            }
+        } catch (IllegalArgumentException e) {
+            // Put the auction back untouched
+            long remainingTtl = computeRemainingTtl(attrs);
+            space.write(attrs, null, remainingTtl, "auction-service", null, null);
+            throw e;
         }
 
-        // Write bid record (permanent history)
+        // Compute remaining TTL from stored end_epoch so bids don't reset the clock
+        long remainingTtl = computeRemainingTtl(attrs);
+
+        // Write bid record (permanent — outlives the auction for audit trail)
         space.write(Map.of(
                 "type", "bid",
                 "auction_id", auctionId,
                 "bidder", bidder,
                 "amount", String.format("%.2f", amount),
                 "timestamp", java.time.Instant.now().toString()
-        ), 300);
+        ), 0);
 
-        // Update auction current bid — take + re-write with same lease duration
-        // (simplified: we write a new bid tuple; the auction tuple's current_bid
-        //  is updated by taking and re-writing)
-        var taken = space.take(Map.of("type", "auction", "auction_id", auctionId));
-        if (taken.isPresent()) {
-            var oldAttrs = new java.util.HashMap<>(taken.get().attrs());
-            oldAttrs.put("current_bid", String.format("%.2f", amount));
-            oldAttrs.put("current_bidder", bidder);
-            int remainingTtl = Integer.parseInt(oldAttrs.getOrDefault("duration_seconds", "30"));
-            space.write(oldAttrs, null, remainingTtl, "auction-service", null, null);
-        }
+        // Re-write auction with updated bid, preserving remaining lease time
+        var updatedAttrs = new java.util.HashMap<>(attrs);
+        updatedAttrs.put("current_bid", String.format("%.2f", amount));
+        updatedAttrs.put("current_bidder", bidder);
+        space.write(updatedAttrs, null, remainingTtl, "auction-service", null, null);
 
         System.out.printf("  $ Bid: $%.2f by %s on %s%n", amount, bidder, auctionId.substring(0, 8));
         return Map.of("auction_id", auctionId, "bidder", bidder, "amount", amount, "status", "accepted");
+    }
+
+    private static long computeRemainingTtl(Map<String, String> attrs) {
+        String endEpochStr = attrs.get("end_epoch");
+        if (endEpochStr != null) {
+            long remaining = Long.parseLong(endEpochStr) - (System.currentTimeMillis() / 1000);
+            return Math.max(remaining, 1);
+        }
+        return Long.parseLong(attrs.getOrDefault("duration_seconds", "30"));
     }
 
     // ── HTTP Server ─────────────────────────────────────────────────────────
@@ -184,13 +199,31 @@ public class AuctionService {
 
     @SuppressWarnings("unchecked")
     private static Map<String, Object> parseJson(InputStream is) throws IOException {
-        String raw = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-        // Dirt-simple JSON parser for flat objects — good enough for a demo
+        String raw = new String(is.readAllBytes(), StandardCharsets.UTF_8).trim();
+        // Simple JSON parser for flat objects — handles commas inside quoted strings
         Map<String, Object> map = new java.util.HashMap<>();
-        raw = raw.trim();
         if (raw.startsWith("{")) raw = raw.substring(1);
         if (raw.endsWith("}")) raw = raw.substring(0, raw.length() - 1);
-        for (String pair : raw.split(",")) {
+
+        // Split on commas that aren't inside quotes
+        java.util.List<String> pairs = new java.util.ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (c == '"' && (i == 0 || raw.charAt(i - 1) != '\\')) {
+                inQuotes = !inQuotes;
+            }
+            if (c == ',' && !inQuotes) {
+                pairs.add(current.toString());
+                current.setLength(0);
+            } else {
+                current.append(c);
+            }
+        }
+        if (current.length() > 0) pairs.add(current.toString());
+
+        for (String pair : pairs) {
             String[] kv = pair.split(":", 2);
             if (kv.length == 2) {
                 String key = kv[0].trim().replace("\"", "");

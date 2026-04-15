@@ -35,37 +35,26 @@ app.get("/events", (_req, res) => {
   });
 });
 
-// ── Bid proxy ───────────────────────────────────────────────────────────────
+// ── Auction service proxy ────────────────────────────────────────────────────
 
-app.post("/bid", async (req, res) => {
-  try {
-    const resp = await fetch(`${AUCTION_SERVICE}/bid`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req.body),
-    });
-    const data = await resp.json();
-    res.status(resp.status).json(data);
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
-  }
-});
+function proxyPost(path: string) {
+  return async (req: express.Request, res: express.Response) => {
+    try {
+      const resp = await fetch(`${AUCTION_SERVICE}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req.body),
+      });
+      const data = await resp.json();
+      res.status(resp.status).json(data);
+    } catch (err: any) {
+      res.status(502).json({ error: err.message });
+    }
+  };
+}
 
-// ── Create auction proxy ────────────────────────────────────────────────────
-
-app.post("/auction", async (req, res) => {
-  try {
-    const resp = await fetch(`${AUCTION_SERVICE}/auction`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req.body),
-    });
-    const data = await resp.json();
-    res.status(resp.status).json(data);
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
-  }
-});
+app.post("/bid", proxyPost("/bid"));
+app.post("/auction", proxyPost("/auction"));
 
 // ── Space watchers ──────────────────────────────────────────────────────────
 
@@ -74,8 +63,13 @@ async function watchLoop(
   opts: { template: Record<string, string>; on: "appearance" | "expiration"; ttlSeconds: number },
   handler: (evt: import("@coordin8/sdk").SpaceEvent) => void
 ) {
-  for await (const evt of djinn.space().watch(opts)) {
-    handler(evt);
+  try {
+    for await (const evt of djinn.space().watch(opts)) {
+      handler(evt);
+    }
+    console.error(`  watch ended: ${opts.template.type}/${opts.on}`);
+  } catch (err) {
+    console.error(`  watch error (${opts.template.type}/${opts.on}):`, err);
   }
 }
 
