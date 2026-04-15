@@ -1,0 +1,10 @@
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY sdks/go/ /src/sdks/go/
+COPY examples/auction-house/settlement-engine/ /src/examples/auction-house/settlement-engine/
+WORKDIR /src/examples/auction-house/settlement-engine
+RUN go build -o /settlement-engine .
+
+FROM alpine:3.19
+COPY --from=build /settlement-engine /settlement-engine
+ENTRYPOINT ["/settlement-engine"]

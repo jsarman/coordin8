@@ -1,0 +1,19 @@
+{
+  "name": "auction-board",
+  "version": "0.1.0",
+  "description": "Auction House browser UI — watches Space via SSE",
+  "scripts": {
+    "start": "ts-node src/server.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@coordin8/sdk": "file:../../../sdks/node",
+    "express": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  }
+}

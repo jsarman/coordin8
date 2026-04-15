@@ -1,0 +1,3 @@
+rootProject.name = 'auction-service'
+
+includeBuild '../../../sdks/java'
