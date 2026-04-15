@@ -1,5 +1,6 @@
 FROM gradle:8.7-jdk21 AS build
 WORKDIR /src
+COPY proto/ /src/proto/
 COPY sdks/java/ /src/sdks/java/
 COPY examples/auction-house/auction-service/ /src/examples/auction-house/auction-service/
 WORKDIR /src/examples/auction-house/auction-service
