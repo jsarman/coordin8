@@ -367,12 +367,14 @@ impl TxnManager {
 }
 
 /// Convert proto PrepareVote i32 to core enum.
-/// Default to Prepared (0) for unknown values.
+/// Fail safe: only explicitly recognized values map to a committable vote.
+/// Unknown values (garbled wire data, newer proto enum variants) map to
+/// Aborted — never default toward commit.
 fn vote_from_i32(v: i32) -> PrepareVote {
     match v {
+        0 => PrepareVote::Prepared,
         1 => PrepareVote::NotChanged,
-        2 => PrepareVote::Aborted,
-        _ => PrepareVote::Prepared,
+        _ => PrepareVote::Aborted,
     }
 }
 

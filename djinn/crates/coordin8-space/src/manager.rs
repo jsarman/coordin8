@@ -153,6 +153,11 @@ impl SpaceManager {
         timeout_ms: u64,
         txn_id: Option<String>,
     ) -> Result<Option<TupleRecord>, Error> {
+        // Subscribe BEFORE the initial query so a tuple written between the
+        // query and the subscription is not missed (TOCTOU). The subscription
+        // is cheap and dropped immediately on the non-blocking paths.
+        let mut rx = self.tuple_tx.subscribe();
+
         // Try immediate match.
         if let Some(record) = self.store.find_match(&template, txn_id.as_deref()).await? {
             return Ok(Some(record));
@@ -162,9 +167,11 @@ impl SpaceManager {
             return Ok(None);
         }
 
-        // Block: subscribe to broadcast and wait for a matching tuple.
+        // Block: wait on the broadcast for a matching tuple.
         let ops = parse_template(&template);
-        let mut rx = self.tuple_tx.subscribe();
+        let store = Arc::clone(&self.store);
+        let template_clone = template.clone();
+        let txn_id_clone = txn_id.clone();
 
         let wait_future = async {
             loop {
@@ -175,7 +182,17 @@ impl SpaceManager {
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => return None,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // We lagged — broadcasts were dropped, so a matching
+                        // tuple may already be sitting in the store. Re-query
+                        // instead of waiting for the next broadcast.
+                        if let Ok(Some(record)) = store
+                            .find_match(&template_clone, txn_id_clone.as_deref())
+                            .await
+                        {
+                            return Some(record);
+                        }
+                    }
                 }
             }
         };
@@ -208,6 +225,11 @@ impl SpaceManager {
             self.ensure_enlisted(tid).await?;
         }
 
+        // Subscribe BEFORE the initial take attempt so a tuple written between
+        // the attempt and the subscription is not missed (TOCTOU). The
+        // subscription is cheap and dropped immediately on non-blocking paths.
+        let mut rx = self.tuple_tx.subscribe();
+
         // Try immediate atomic take.
         if let Some(record) = self.store.take_match(&template, txn_id.as_deref()).await? {
             // Only cancel lease immediately for non-transactional takes.
@@ -222,9 +244,7 @@ impl SpaceManager {
             return Ok(None);
         }
 
-        // Block: subscribe to broadcast, re-query store on each notification.
-        let mut rx = self.tuple_tx.subscribe();
-
+        // Block: wait on the broadcast, re-query store on each notification.
         let store = Arc::clone(&self.store);
         let lease_mgr = Arc::clone(&self.lease_manager);
         let template_clone = template.clone();
