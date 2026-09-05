@@ -19,10 +19,11 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
@@ -688,6 +689,115 @@ impl TxnEnlister for RemoteTxnEnlister {
                     .map_err(|s| CoreError::Internal(format!("enlist failed: {s}")))
             }
             Err(status) => Err(CoreError::Internal(format!("enlist failed: {status}"))),
+        }
+    }
+}
+
+// ── PendingLeasing / PendingCapabilityResolver ───────────────────────────────
+//
+// A service that depends on Registry/LeaseMgr shouldn't have to block its
+// entire gRPC serve loop behind discovery before it can start accepting
+// connections at all — that's the boot-order gap this pair closes. Each
+// wraps a not-yet-resolved dependency: constructible immediately, so the
+// manager built around it (and therefore the server) can start right away.
+// Every call fails fast with `Error::Unavailable` until `install()` is
+// called by a background discovery task, never hanging the caller.
+
+/// A [`Leasing`] impl that starts unresolved and becomes ready once a
+/// background task calls [`install`](Self::install) with a real
+/// [`RemoteLeasing`]. See the module note above.
+pub struct PendingLeasing {
+    inner: RwLock<Option<Arc<RemoteLeasing>>>,
+}
+
+impl Default for PendingLeasing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PendingLeasing {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(None),
+        }
+    }
+
+    /// Install the resolved dependency. Called once, by the background
+    /// discovery task, after which every call delegates to it.
+    pub async fn install(&self, resolved: RemoteLeasing) {
+        *self.inner.write().await = Some(Arc::new(resolved));
+    }
+}
+
+#[async_trait]
+impl Leasing for PendingLeasing {
+    async fn grant(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, CoreError> {
+        match self.inner.read().await.as_ref() {
+            Some(leasing) => leasing.grant(resource_id, ttl_secs).await,
+            None => Err(CoreError::Unavailable(
+                "waiting on dependency: LeaseMgr".to_string(),
+            )),
+        }
+    }
+
+    async fn renew(&self, lease_id: &str, ttl_secs: u64) -> Result<LeaseRecord, CoreError> {
+        match self.inner.read().await.as_ref() {
+            Some(leasing) => leasing.renew(lease_id, ttl_secs).await,
+            None => Err(CoreError::Unavailable(
+                "waiting on dependency: LeaseMgr".to_string(),
+            )),
+        }
+    }
+
+    async fn cancel(&self, lease_id: &str) -> Result<(), CoreError> {
+        match self.inner.read().await.as_ref() {
+            Some(leasing) => leasing.cancel(lease_id).await,
+            None => Err(CoreError::Unavailable(
+                "waiting on dependency: LeaseMgr".to_string(),
+            )),
+        }
+    }
+}
+
+/// A [`CapabilityResolver`] impl that starts unresolved and becomes ready
+/// once a background task calls [`install`](Self::install) with a real
+/// [`RemoteCapabilityResolver`]. See the module note above.
+pub struct PendingCapabilityResolver {
+    inner: RwLock<Option<Arc<RemoteCapabilityResolver>>>,
+}
+
+impl Default for PendingCapabilityResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PendingCapabilityResolver {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(None),
+        }
+    }
+
+    /// Install the resolved dependency. Called once, by the background
+    /// discovery task, after which every call delegates to it.
+    pub async fn install(&self, resolved: RemoteCapabilityResolver) {
+        *self.inner.write().await = Some(Arc::new(resolved));
+    }
+}
+
+#[async_trait]
+impl CapabilityResolver for PendingCapabilityResolver {
+    async fn resolve(
+        &self,
+        template: &HashMap<String, String>,
+    ) -> Result<Option<RegistryEntry>, CoreError> {
+        match self.inner.read().await.as_ref() {
+            Some(resolver) => resolver.resolve(template).await,
+            None => Err(CoreError::Unavailable(
+                "waiting on dependency: Registry".to_string(),
+            )),
         }
     }
 }

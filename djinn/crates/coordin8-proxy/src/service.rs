@@ -6,7 +6,20 @@ use tracing::debug;
 use coordin8_proto::coordin8::proxy_service_server::ProxyService;
 use coordin8_proto::coordin8::{OpenRequest, ProxyHandle, ReleaseRequest};
 
-use crate::manager::ProxyManager;
+use crate::manager::{ProxyError, ProxyManager};
+
+/// Map a proxy error to a gRPC status. A `Store` error wrapping
+/// `Unavailable` gets its own code (the dependency isn't ready yet, safe to
+/// retry) rather than falling into the generic `not_found` bucket used for
+/// everything else here.
+fn map_err(e: ProxyError) -> Status {
+    match e {
+        ProxyError::Store(coordin8_core::error::Error::Unavailable(_)) => {
+            Status::unavailable(e.to_string())
+        }
+        _ => Status::not_found(e.to_string()),
+    }
+}
 
 pub struct ProxyServiceImpl {
     manager: Arc<ProxyManager>,
@@ -28,7 +41,7 @@ impl ProxyService for ProxyServiceImpl {
             .manager
             .open(template)
             .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+            .map_err(map_err)?;
 
         Ok(Response::new(ProxyHandle {
             proxy_id,
@@ -43,7 +56,7 @@ impl ProxyService for ProxyServiceImpl {
         self.manager
             .close(&proxy_id)
             .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+            .map_err(map_err)?;
 
         Ok(Response::new(()))
     }

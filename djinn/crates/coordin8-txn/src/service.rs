@@ -11,6 +11,16 @@ use coordin8_proto::coordin8::{
 
 use crate::manager::TxnManager;
 
+/// Map a core error to a gRPC status. `Unavailable` gets its own code (the
+/// dependency isn't ready yet, safe to retry) rather than falling into the
+/// generic `internal` bucket.
+fn map_err(e: coordin8_core::Error) -> Status {
+    match e {
+        coordin8_core::Error::Unavailable(_) => Status::unavailable(e.to_string()),
+        _ => Status::internal(e.to_string()),
+    }
+}
+
 fn to_timestamp(dt: chrono::DateTime<chrono::Utc>) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: dt.timestamp(),
@@ -49,7 +59,7 @@ impl TransactionService for TxnServiceImpl {
             .manager
             .begin(r.ttl_seconds)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         debug!(txn_id, "begin rpc");
 
@@ -70,7 +80,7 @@ impl TransactionService for TxnServiceImpl {
         self.manager
             .enlist(&r.txn_id, r.participant_endpoint, r.crash_count)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
         Ok(Response::new(()))
     }
 
@@ -105,7 +115,7 @@ impl TransactionService for TxnServiceImpl {
         self.manager
             .abort(&r.txn_id)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
         Ok(Response::new(()))
     }
 }

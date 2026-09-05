@@ -40,4 +40,7 @@ pub enum Error {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("unavailable: {0}")]
+    Unavailable(String),
 }
