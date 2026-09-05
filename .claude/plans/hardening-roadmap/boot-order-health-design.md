@@ -1,6 +1,6 @@
 # Boot-Order Independence + Health Signaling — Design Draft
 
-> **Status: Draft, not yet reviewed or implemented.** Detailed design for roadmap item 1. Findings below are from live code reading + an empirical test in a worktree on 2026-09-05 (build, run split-mode services out of order, observe). See `.claude/plans/space-race-txn-failsafe/session-1-complete.md` for the session that led here.
+> **Status: Design decided 2026-09-05, implementation starting.** Detailed design for roadmap item 1. Findings below are from live code reading + an empirical test in a worktree on 2026-09-05 (build, run split-mode services out of order, observe). See `.claude/plans/space-race-txn-failsafe/session-1-complete.md` for the session that led here, and `decisions.md` for the two open questions below, now resolved: background-resolve + fast-fail (Option B), and Check-only for the health RPC surface.
 
 ## Problem Statement (what's actually true today)
 
@@ -55,7 +55,7 @@ Keep `RemoteLeasing::connect` blocking as today, but run it in a background task
 - **Pros:** Directly satisfies goal 2 (explicit fast-fail, not a hang) without changing `RemoteLeasing`'s existing contract. Clean mapping to the health-check states below (`None` → NOT_SERVING).
 - **Cons:** More boilerplate — every RPC handler on the four affected services needs an early "is my dependency ready" check. Two closely-related-but-distinct "waiting" mechanisms exist afterward (`RemoteLeasing`'s own retry-forever for *transport failures after* initial resolution, vs. this new pre-resolution gate).
 
-**Leaning:** Option B, because it directly produces the explicit "healthy but waiting" signal this whole effort is about, and health-check state falls out of it almost for free. Want your call before implementing either.
+**Decided: Option B** — see `decisions.md`.
 
 ## Health-Check Surface
 
@@ -76,6 +76,6 @@ CLAUDE.md's "Docker" gotchas section documents the current bare-TCP healthcheck 
 
 ## Open Questions
 
-1. Option A vs. B (above) — needs your call before implementation starts.
-2. Does `Watch` (streaming health status) matter for this use case, or is `Check` (poll) sufification enough? Docker's own healthcheck mechanism polls, so `Check` alone may be enough for goal 4; `Watch` would matter more for a future dashboard/observability consumer.
-3. Per-service granularity: `tonic-health` reports status per registered gRPC service name (or empty string for "overall") — do we want one overall status per Djinn split-mode process, or does it matter that e.g. Space's ParticipantService and its main SpaceService could theoretically report differently? (Probably not distinct — a Space process is either ready or not as a whole.)
+1. ~~Option A vs. B~~ — resolved, see `decisions.md`.
+2. ~~Check vs. Check+Watch~~ — resolved, see `decisions.md`.
+3. Per-service granularity: `tonic-health` reports status per registered gRPC service name (or empty string for "overall") — do we want one overall status per Djinn split-mode process, or does it matter that e.g. Space's ParticipantService and its main SpaceService could theoretically report differently? (Probably not distinct — a Space process is either ready or not as a whole.) Still open, low-stakes — will default to "overall" unless implementation surfaces a reason not to.
