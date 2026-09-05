@@ -8,7 +8,9 @@ Coordin8 is a distributed coordination platform inspired by Jini/JavaSpaces (Sun
 
 **"Describe what you need, not where it is."**
 
-The full vision (Space, EventMgr, TransactionMgr, AWS provider, higher-order patterns) is in `coordin8-design-napkin.md`. Session plans live in `.claude/plans/`.
+The full vision (Space, EventMgr, TransactionMgr, AWS provider, higher-order patterns) is in `coordin8-design-napkin.md`.
+
+> **Plans:** Work is tracked in `.claude/plans/<topic>/` — one folder per initiative (e.g. `djinn-split/`, `eventmgr/`, `hardening-roadmap/`), **committed to GitHub** (unlike `WORKFLOW.md`/blackboard below). Each topic folder has a `PRD.md` (goal, motivation, non-goals; a status line at the top — `Not started` / `In progress` / `COMPLETE (merged to main, <date>)` + PR link once shipped) and a `session-N-complete.md` per session that finished real work (narrative: what shipped, what was found, links to PRs/issues — a future session should be able to read it and know what happened in under a minute). Some topics also have `session-N-prep.md` (context queued for the next session) or `decisions.md` (specific design calls, each as Decision/Why/Trade-off — see `eventmgr/decisions.md`). `.claude/plans/PRD.md` (no subfolder) is the master index: one status table per architecture area, cross-referencing every topic folder — update its relevant table row(s) whenever a topic's status changes, and add a new topic folder for any initiative substantial enough to need its own goal/motivation/non-goals rather than just a table row.
 
 > **Workflow:** If a `WORKFLOW.md` exists at the repo root, read it at session start. It contains developer-specific pacing and coordination preferences. This file is gitignored — each developer may have their own or none at all.
 
