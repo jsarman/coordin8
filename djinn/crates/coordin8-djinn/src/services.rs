@@ -51,6 +51,94 @@ pub fn advertise_host() -> String {
     std::env::var("COORDIN8_ADVERTISE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
+// ── Provider selection (pub(crate) — shared by run_all() and every split-mode
+//    function, so COORDIN8_PROVIDER=dynamo works the same in both) ───────────
+
+/// Read `COORDIN8_PROVIDER`, defaulting to `"local"`.
+fn provider_from_env() -> String {
+    std::env::var("COORDIN8_PROVIDER").unwrap_or_else(|_| "local".into())
+}
+
+async fn lease_store_from_env() -> Result<Arc<dyn LeaseStore>> {
+    Ok(match provider_from_env().as_str() {
+        "dynamo" => {
+            let client = coordin8_provider_dynamo::make_dynamo_client().await;
+            let store = Arc::new(coordin8_provider_dynamo::DynamoLeaseStore::new(client));
+            store.init().await?;
+            info!("  ✓ Provider: dynamo (DynamoDB) — LeaseStore");
+            store
+        }
+        _ => {
+            info!("  ✓ Provider: local (in-memory) — LeaseStore");
+            Arc::new(InMemoryLeaseStore::new())
+        }
+    })
+}
+
+async fn registry_store_from_env() -> Result<Arc<dyn RegistryStore>> {
+    Ok(match provider_from_env().as_str() {
+        "dynamo" => {
+            let client = coordin8_provider_dynamo::make_dynamo_client().await;
+            let store = Arc::new(coordin8_provider_dynamo::DynamoRegistryStore::new(client));
+            store.init().await?;
+            info!("  ✓ Provider: dynamo (DynamoDB) — RegistryStore");
+            store
+        }
+        _ => {
+            info!("  ✓ Provider: local (in-memory) — RegistryStore");
+            Arc::new(InMemoryRegistryStore::new())
+        }
+    })
+}
+
+async fn event_store_from_env() -> Result<Arc<dyn EventStore>> {
+    Ok(match provider_from_env().as_str() {
+        "dynamo" => {
+            let client = coordin8_provider_dynamo::make_dynamo_client().await;
+            let store = Arc::new(coordin8_provider_dynamo::DynamoEventStore::new(client));
+            store.init().await?;
+            info!("  ✓ Provider: dynamo (DynamoDB) — EventStore");
+            store
+        }
+        _ => {
+            info!("  ✓ Provider: local (in-memory) — EventStore");
+            Arc::new(InMemoryEventStore::new())
+        }
+    })
+}
+
+async fn txn_store_from_env() -> Result<Arc<dyn TxnStore>> {
+    Ok(match provider_from_env().as_str() {
+        "dynamo" => {
+            let client = coordin8_provider_dynamo::make_dynamo_client().await;
+            let store = Arc::new(coordin8_provider_dynamo::DynamoTxnStore::new(client));
+            store.init().await?;
+            info!("  ✓ Provider: dynamo (DynamoDB) — TxnStore");
+            store
+        }
+        _ => {
+            info!("  ✓ Provider: local (in-memory) — TxnStore");
+            Arc::new(InMemoryTxnStore::new())
+        }
+    })
+}
+
+async fn space_store_from_env() -> Result<Arc<dyn SpaceStore>> {
+    Ok(match provider_from_env().as_str() {
+        "dynamo" => {
+            let client = coordin8_provider_dynamo::make_dynamo_client().await;
+            let store = Arc::new(coordin8_provider_dynamo::DynamoSpaceStore::new(client));
+            store.init().await?;
+            info!("  ✓ Provider: dynamo (DynamoDB) — SpaceStore");
+            store
+        }
+        _ => {
+            info!("  ✓ Provider: local (in-memory) — SpaceStore");
+            Arc::new(InMemorySpaceStore::new())
+        }
+    })
+}
+
 // ── Monolith boot ─────────────────────────────────────────────────────────────
 
 /// Boot every service in a single process on fixed ports (the original monolith).
@@ -61,71 +149,11 @@ pub async fn run_all() -> Result<()> {
     info!("Djinn starting...");
 
     // ── Layer 0: Provider ────────────────────────────────────────────────────
-    let provider = std::env::var("COORDIN8_PROVIDER").unwrap_or_else(|_| "local".into());
-
-    type Stores = (
-        Arc<dyn LeaseStore>,
-        Arc<dyn RegistryStore>,
-        Arc<dyn EventStore>,
-        Arc<dyn TxnStore>,
-        Arc<dyn SpaceStore>,
-    );
-    let (lease_store, registry_store, event_store, txn_store, space_store): Stores =
-        match provider.as_str() {
-            "dynamo" => {
-                let client = coordin8_provider_dynamo::make_dynamo_client().await;
-
-                let lease_store = Arc::new(coordin8_provider_dynamo::DynamoLeaseStore::new(
-                    client.clone(),
-                ));
-                lease_store.init().await?;
-
-                let registry_store = Arc::new(coordin8_provider_dynamo::DynamoRegistryStore::new(
-                    client.clone(),
-                ));
-                registry_store.init().await?;
-
-                let event_store = Arc::new(coordin8_provider_dynamo::DynamoEventStore::new(
-                    client.clone(),
-                ));
-                event_store.init().await?;
-
-                let txn_store = Arc::new(coordin8_provider_dynamo::DynamoTxnStore::new(
-                    client.clone(),
-                ));
-                txn_store.init().await?;
-
-                let space_store = Arc::new(coordin8_provider_dynamo::DynamoSpaceStore::new(
-                    client.clone(),
-                ));
-                space_store.init().await?;
-
-                info!("  ✓ Provider: dynamo (DynamoDB)");
-
-                (
-                    lease_store,
-                    registry_store,
-                    event_store,
-                    txn_store,
-                    space_store,
-                )
-            }
-            _ => {
-                let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
-                let registry_store: Arc<dyn RegistryStore> = Arc::new(InMemoryRegistryStore::new());
-                let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
-                let txn_store: Arc<dyn TxnStore> = Arc::new(InMemoryTxnStore::new());
-                let space_store: Arc<dyn SpaceStore> = Arc::new(InMemorySpaceStore::new());
-                info!("  ✓ Provider: local (in-memory)");
-                (
-                    lease_store,
-                    registry_store,
-                    event_store,
-                    txn_store,
-                    space_store,
-                )
-            }
-        };
+    let lease_store = lease_store_from_env().await?;
+    let registry_store = registry_store_from_env().await?;
+    let event_store = event_store_from_env().await?;
+    let txn_store = txn_store_from_env().await?;
+    let space_store = space_store_from_env().await?;
 
     // ── Layer 1: LeaseMgr ────────────────────────────────────────────────────
     let (expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);
@@ -317,9 +345,9 @@ pub async fn run_registry() -> Result<()> {
 /// pass the listener here. The caller knows the exact address before the server
 /// starts accepting.
 pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Result<()> {
-    let registry_store: Arc<dyn RegistryStore> = Arc::new(InMemoryRegistryStore::new());
+    let registry_store = registry_store_from_env().await?;
 
-    let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+    let lease_store = lease_store_from_env().await?;
     let lease_config = coordin8_core::LeaseConfig::from_env();
     let lease_manager = Arc::new(LeaseManager::new(lease_store, lease_config));
     let leasing: Arc<dyn Leasing> = lease_manager.clone();
@@ -437,7 +465,7 @@ pub async fn run_lease_on_listener_with_shutdown(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
 
-    let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+    let lease_store = lease_store_from_env().await?;
     let lease_config = coordin8_core::LeaseConfig::from_env();
     let lease_manager = Arc::new(LeaseManager::new(lease_store, lease_config));
 
@@ -580,7 +608,7 @@ pub async fn run_event_on_listener(
     let leasing: Arc<dyn Leasing> = Arc::clone(&pending_leasing) as Arc<dyn Leasing>;
 
     // Local in-memory event store — events live in the EventMgr process.
-    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let event_store = event_store_from_env().await?;
     let (event_tx, _) = broadcast::channel::<coordin8_core::EventRecord>(256);
     let event_manager = Arc::new(EventManager::new(
         event_store,
@@ -740,7 +768,7 @@ pub async fn run_space_on_listener(
     let space_enlister = Arc::new(RemoteTxnEnlister::new(registry_addr));
     let space_participant_endpoint = format!("{}:{}", advertise_host, advertise_port);
 
-    let space_store: Arc<dyn SpaceStore> = Arc::new(InMemorySpaceStore::new());
+    let space_store = space_store_from_env().await?;
     let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let space_manager = Arc::new(SpaceManager::with_enlister(
@@ -924,7 +952,7 @@ pub async fn run_txn_on_listener(
     let pending_leasing = Arc::new(coordin8_bootstrap::PendingLeasing::new());
     let leasing: Arc<dyn Leasing> = Arc::clone(&pending_leasing) as Arc<dyn Leasing>;
 
-    let txn_store: Arc<dyn TxnStore> = Arc::new(InMemoryTxnStore::new());
+    let txn_store = txn_store_from_env().await?;
     let txn_manager = Arc::new(TxnManager::new(txn_store, Arc::clone(&leasing)));
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
