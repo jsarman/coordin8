@@ -1,0 +1,156 @@
+# Split-mode Djinn: each service in its own container, reusing the same
+# image as the monolith (Dockerfile.djinn already has ENTRYPOINT ["djinn"],
+# so `command: ["registry"]` etc. just runs that subcommand).
+#
+# No `depends_on` on purpose. Roadmap item 1 (see
+# .claude/plans/hardening-roadmap/) made every split-mode service tolerate
+# starting in any order — it serves immediately and resolves its
+# dependency (Registry/LeaseMgr) in the background, reporting itself
+# NOT_SERVING on the standard gRPC health check until then. Omitting
+# depends_on here is deliberate: it's the real-world proof of that, not
+# just a unit test. `docker compose up` starts all six with no ordering
+# guarantee, and they still converge.
+#
+# Uses COORDIN8_PROVIDER=local (in-memory) — each service's data is
+# private to its own container. DynamoDB backing for split mode is a
+# separate, not-yet-done roadmap item (item 4); running more than one
+# instance of any of these services isn't meaningful until that lands,
+# since in-memory stores wouldn't be shared across instances.
+
+services:
+  registry:
+    build:
+      context: .
+      dockerfile: Dockerfile.djinn
+    container_name: coordin8-registry
+    command: ["registry"]
+    environment:
+      RUST_LOG: "coordin8_registry=debug,coordin8_djinn=info"
+      COORDIN8_BIND_ADDR: "0.0.0.0:9002"
+      COORDIN8_ADVERTISE_HOST: "registry"
+    ports:
+      - "9002:9002"
+    networks:
+      - coordin8-split-net
+    healthcheck:
+      test: ["CMD", "djinn", "healthcheck", "--addr", "http://127.0.0.1:9002"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  lease:
+    build:
+      context: .
+      dockerfile: Dockerfile.djinn
+    container_name: coordin8-lease
+    command: ["lease"]
+    environment:
+      RUST_LOG: "coordin8_lease=debug,coordin8_djinn=info"
+      COORDIN8_BIND_ADDR: "0.0.0.0:9001"
+      COORDIN8_ADVERTISE_HOST: "lease"
+      COORDIN8_REGISTRY: "http://registry:9002"
+    ports:
+      - "9001:9001"
+    networks:
+      - coordin8-split-net
+    healthcheck:
+      test: ["CMD", "djinn", "healthcheck", "--addr", "http://127.0.0.1:9001"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  event:
+    build:
+      context: .
+      dockerfile: Dockerfile.djinn
+    container_name: coordin8-event
+    command: ["event"]
+    environment:
+      RUST_LOG: "coordin8_event=debug,coordin8_djinn=info"
+      COORDIN8_BIND_ADDR: "0.0.0.0:9005"
+      COORDIN8_ADVERTISE_HOST: "event"
+      COORDIN8_REGISTRY: "http://registry:9002"
+    ports:
+      - "9005:9005"
+    networks:
+      - coordin8-split-net
+    healthcheck:
+      test: ["CMD", "djinn", "healthcheck", "--addr", "http://127.0.0.1:9005"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  space:
+    build:
+      context: .
+      dockerfile: Dockerfile.djinn
+    container_name: coordin8-space
+    command: ["space"]
+    environment:
+      RUST_LOG: "coordin8_space=debug,coordin8_djinn=info"
+      COORDIN8_BIND_ADDR: "0.0.0.0:9006"
+      COORDIN8_ADVERTISE_HOST: "space"
+      COORDIN8_REGISTRY: "http://registry:9002"
+    ports:
+      - "9006:9006"
+    networks:
+      - coordin8-split-net
+    healthcheck:
+      test: ["CMD", "djinn", "healthcheck", "--addr", "http://127.0.0.1:9006"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  txn:
+    build:
+      context: .
+      dockerfile: Dockerfile.djinn
+    container_name: coordin8-txn
+    command: ["txn"]
+    environment:
+      RUST_LOG: "coordin8_txn=debug,coordin8_djinn=info"
+      COORDIN8_BIND_ADDR: "0.0.0.0:9004"
+      COORDIN8_ADVERTISE_HOST: "txn"
+      COORDIN8_REGISTRY: "http://registry:9002"
+    ports:
+      - "9004:9004"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # 2PC callbacks to host-run participants
+    networks:
+      - coordin8-split-net
+    healthcheck:
+      test: ["CMD", "djinn", "healthcheck", "--addr", "http://127.0.0.1:9004"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.djinn
+    container_name: coordin8-proxy
+    command: ["proxy"]
+    environment:
+      RUST_LOG: "coordin8_proxy=debug,coordin8_djinn=info"
+      COORDIN8_BIND_ADDR: "0.0.0.0:9003"
+      COORDIN8_ADVERTISE_HOST: "proxy"
+      COORDIN8_REGISTRY: "http://registry:9002"
+      PROXY_BIND_HOST: "0.0.0.0"
+      PROXY_PORT_MIN: "9100"
+      PROXY_PORT_MAX: "9200"
+    ports:
+      - "9003:9003"
+      - "9100-9200:9100-9200"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # forwards to host-run services (e.g. examples)
+    networks:
+      - coordin8-split-net
+    healthcheck:
+      test: ["CMD", "djinn", "healthcheck", "--addr", "http://127.0.0.1:9003"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  coordin8-split-net:
+    driver: bridge
