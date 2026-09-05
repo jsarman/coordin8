@@ -37,11 +37,7 @@ impl ProxyService for ProxyServiceImpl {
         let template = request.into_inner().template;
         debug!(?template, "proxy open request");
 
-        let (proxy_id, local_port) = self
-            .manager
-            .open(template)
-            .await
-            .map_err(map_err)?;
+        let (proxy_id, local_port) = self.manager.open(template).await.map_err(map_err)?;
 
         Ok(Response::new(ProxyHandle {
             proxy_id,
@@ -53,10 +49,7 @@ impl ProxyService for ProxyServiceImpl {
         let proxy_id = request.into_inner().proxy_id;
         debug!(%proxy_id, "proxy release request");
 
-        self.manager
-            .close(&proxy_id)
-            .await
-            .map_err(map_err)?;
+        self.manager.close(&proxy_id).await.map_err(map_err)?;
 
         Ok(Response::new(()))
     }

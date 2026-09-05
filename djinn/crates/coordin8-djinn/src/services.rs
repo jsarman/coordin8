@@ -614,10 +614,9 @@ pub async fn run_event_on_listener(
             // Drive subscription cleanup off remote LeaseMgr expiry events.
             // Needs its own LeaseServiceClient for the streaming WatchExpiry
             // RPC — the stream reconnects itself via Registry on failure.
-            let lease_stream_client =
-                coordin8_bootstrap::discover_lease_mgr(&registry_addr)
-                    .await
-                    .expect("discover_lease_mgr retries forever, never returns Err");
+            let lease_stream_client = coordin8_bootstrap::discover_lease_mgr(&registry_addr)
+                .await
+                .expect("discover_lease_mgr retries forever, never returns Err");
             watch_expiry_prefix(
                 lease_stream_client,
                 registry_addr,
@@ -1071,8 +1070,8 @@ pub async fn run_proxy_on_listener(
     // below; requests made before it resolves fail fast with Unavailable
     // instead of the server not being reachable at all.
     let pending_resolver = Arc::new(coordin8_bootstrap::PendingCapabilityResolver::new());
-    let resolver: Arc<dyn coordin8_core::CapabilityResolver> = Arc::clone(&pending_resolver)
-        as Arc<dyn coordin8_core::CapabilityResolver>;
+    let resolver: Arc<dyn coordin8_core::CapabilityResolver> =
+        Arc::clone(&pending_resolver) as Arc<dyn coordin8_core::CapabilityResolver>;
     let proxy_config = ProxyConfig::from_env();
     let proxy_manager = Arc::new(ProxyManager::new(resolver, proxy_config));
 

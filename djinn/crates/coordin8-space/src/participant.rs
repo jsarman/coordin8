@@ -48,11 +48,7 @@ impl ParticipantService for SpaceParticipantService {
 
         // If we have uncommitted state, vote PREPARED.
         // If no state (read-only), vote NOTCHANGED.
-        let has_state = self
-            .manager
-            .has_txn(&txn_id)
-            .await
-            .map_err(map_err)?;
+        let has_state = self.manager.has_txn(&txn_id).await.map_err(map_err)?;
 
         let vote = if has_state {
             debug!(txn_id, "space participant: PREPARED");
@@ -95,11 +91,7 @@ impl ParticipantService for SpaceParticipantService {
     ) -> Result<Response<PrepareResponse>, Status> {
         let txn_id = req.into_inner().txn_id;
 
-        let has_state = self
-            .manager
-            .has_txn(&txn_id)
-            .await
-            .map_err(map_err)?;
+        let has_state = self.manager.has_txn(&txn_id).await.map_err(map_err)?;
 
         if has_state {
             self.manager

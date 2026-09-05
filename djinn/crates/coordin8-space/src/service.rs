@@ -254,10 +254,7 @@ impl SpaceService for SpaceServiceImpl {
 
     async fn cancel(&self, req: Request<CancelTupleRequest>) -> Result<Response<()>, Status> {
         let tuple_id = req.into_inner().tuple_id;
-        self.manager
-            .cancel(&tuple_id)
-            .await
-            .map_err(map_err)?;
+        self.manager.cancel(&tuple_id).await.map_err(map_err)?;
 
         Ok(Response::new(()))
     }

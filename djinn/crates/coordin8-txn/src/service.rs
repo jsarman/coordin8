@@ -55,11 +55,7 @@ impl TransactionService for TxnServiceImpl {
         req: Request<BeginRequest>,
     ) -> Result<Response<TransactionCreated>, Status> {
         let r = req.into_inner();
-        let (txn_id, lease) = self
-            .manager
-            .begin(r.ttl_seconds)
-            .await
-            .map_err(map_err)?;
+        let (txn_id, lease) = self.manager.begin(r.ttl_seconds).await.map_err(map_err)?;
 
         debug!(txn_id, "begin rpc");
 
@@ -112,10 +108,7 @@ impl TransactionService for TxnServiceImpl {
 
     async fn abort(&self, req: Request<AbortRequest>) -> Result<Response<()>, Status> {
         let r = req.into_inner();
-        self.manager
-            .abort(&r.txn_id)
-            .await
-            .map_err(map_err)?;
+        self.manager.abort(&r.txn_id).await.map_err(map_err)?;
         Ok(Response::new(()))
     }
 }
