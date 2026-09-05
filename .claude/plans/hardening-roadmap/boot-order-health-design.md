@@ -1,6 +1,6 @@
 # Boot-Order Independence + Health Signaling — Design Draft
 
-> **Status: Design decided 2026-09-05, implementation starting.** Detailed design for roadmap item 1. Findings below are from live code reading + an empirical test in a worktree on 2026-09-05 (build, run split-mode services out of order, observe). See `.claude/plans/space-race-txn-failsafe/session-1-complete.md` for the session that led here, and `decisions.md` for the two open questions below, now resolved: background-resolve + fast-fail (Option B), and Check-only for the health RPC surface.
+> **Status: COMPLETE, implemented and verified live 2026-09-05, not yet merged to main.** Detailed design for roadmap item 1. Findings below are from live code reading + an empirical test in a worktree on 2026-09-05 (build, run split-mode services out of order, observe). See `.claude/plans/space-race-txn-failsafe/session-1-complete.md` for the session that led here, `decisions.md` for the two design questions (background-resolve + fast-fail / Check-only), and `session-1-complete.md` (this folder) for the implementation + live-verification writeup. Work lives on branch `worktree-boot-order-analysis`, not yet PR'd.
 
 ## Problem Statement (what's actually true today)
 
@@ -70,9 +70,9 @@ CLAUDE.md's "Docker" gotchas section documents the current bare-TCP healthcheck 
 
 ## Suggested Sequencing
 
-1. ~~Land the health-check surface first~~ — **done.** `tonic-health` wired into all six split-mode services, verified live with `grpcurl` against Registry/LeaseMgr/EventMgr (the three structurally distinct patterns). All report `SERVING` at the point they're about to accept requests — no behavior change yet, since none have been restructured to serve before their dependency resolves.
-2. **Next:** restructure EventMgr/Space/TxnMgr/Proxy per Option B (background-resolve + fast-fail, see `decisions.md`), wiring `set_not_serving`/`set_serving` to the actual dependency-resolution state (currently always `Serving` since step 1 landed with no behavior change).
-3. Update CLAUDE.md's Docker gotchas + the master `.claude/plans/PRD.md` Docker & Orchestration table once this ships.
+1. ~~Land the health-check surface first~~ — **done.** `tonic-health` wired into all six split-mode services.
+2. ~~Restructure EventMgr/Space/TxnMgr/Proxy~~ — **done.** All four now construct immediately against a `PendingLeasing`/`PendingCapabilityResolver` and serve right away; a background task resolves the real dependency, installs it, and flips health `NotServing` → `Serving`. Verified live end-to-end (EventMgr and Proxy, the two structurally distinct dependency types): server up immediately with dependency missing, health `NOT_SERVING`, a real RPC fails in ~0.02s with `Status::Unavailable` and a clear message (not a hang), then flips to `SERVING` and the same RPC succeeds the instant Registry/LeaseMgr come up — no restart needed anywhere. `cargo test --all` clean throughout.
+3. Update CLAUDE.md's Docker gotchas + the master `.claude/plans/PRD.md` Docker & Orchestration table once this ships (merged to main).
 
 ## Open Questions
 
