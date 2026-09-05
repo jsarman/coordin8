@@ -1,5 +1,5 @@
 [tools]
-rust = "1.93"
+rust = "1.94.1"
 go   = "1.22"
 node = "23"
 java = "openjdk-21"
@@ -7,6 +7,10 @@ java = "openjdk-21"
 [env]
 # Override the Makefile's legacy Go path so mise-managed `go` is used.
 GO = "go"
+# CGO's external linker on this Xcode/ld toolchain drops LC_UUID from Mach-O
+# binaries that import `net` (dyld: "missing LC_UUID load command" at launch).
+# Go's SDK/CLI/examples don't need cgo, so build with the internal linker.
+CGO_ENABLED = "0"
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
 

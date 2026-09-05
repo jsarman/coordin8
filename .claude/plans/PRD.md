@@ -169,7 +169,7 @@ Pluggable storage backends.
 | InMemoryTxnStore | Done | Participants embedded in TransactionRecord |
 | InMemorySpaceStore | Done | DashMap + lease_index, race-safe take_match |
 | SQLite (local persistence) | Not started | Napkin mentions, not prioritized |
-| AWS: DynamoDB | Not started | Phase 8 — primary prod provider |
+| AWS: DynamoDB | **Done, bundled mode only** | `providers/dynamo` crate implements all five store traits, wired via `COORDIN8_PROVIDER=dynamo` in `run_all()`. Split-mode functions in `services.rs` hardcode `InMemory*Store` with no such branch — see `.claude/plans/hardening-roadmap/PRD.md` item 4 |
 | AWS: SQS (durable events) | Not started | Phase 8 |
 | AWS: EventBridge (watch routing) | Not started | Phase 8 |
 | Terraform modules | Not started | |
@@ -213,6 +213,7 @@ Pluggable storage backends.
 | Node greeter client | Done | `examples/hello-coordin8/node/` |
 | market-watch (EventMgr demo) | Done | `examples/market-watch/` — subscribe, mailbox drain, live stream |
 | double-entry (TransactionMgr demo) | Done | `examples/double-entry/` — happy-path + veto abort |
+| auction-house (polyglot: Java + Go + Node, Docker) | Done | `examples/auction-house/` — Space + lease-expiry-as-settlement-trigger demo. Settlement-engine's advertised restart-durability doesn't hold (Space `watch()` is best-effort by design) — [issue #17](https://github.com/jsarman/coordin8/issues/17) |
 | Node greeter service | Not started | Would complete polyglot service story |
 | Java greeter service | Not started | |
 | IoT sensor mesh | Not started | Napkin showcase example |
@@ -263,8 +264,18 @@ Each service can boot as its own process, discoverable through Registry. Monolit
 | Phase 5 — Proxy split | Done | |
 | Chaos tests: RemoteLeasing + Space survive LeaseMgr kill | Done | `coordin8-djinn/tests/split_chaos.rs`, 3-phase pattern |
 | Docker-compose chaos (kill a container) | **Gap** | Follow-up from djinn-split PR |
-| DynamoDB/MiniStack provider-swap test | **Gap** | Prove the seam across a real provider boundary |
+| DynamoDB/MiniStack provider-swap test | **Gap** | Split-mode functions in `services.rs` hardcode InMemory stores, no `COORDIN8_PROVIDER` branch at all (unlike `run_all()`) — exact locations in `.claude/plans/hardening-roadmap/PRD.md` item 4 |
 | Registry redundancy in split mode | **Gap** | Currently single Registry — open question from PRD |
+| Per-service Docker containers, flexible inter-service boot order, JWT auth | **Not started** | `.claude/plans/hardening-roadmap/PRD.md` |
+
+---
+
+## Security
+
+| Item | Status | Notes |
+|------|--------|-------|
+| gRPC auth (JWT) | Not started | `.claude/plans/hardening-roadmap/PRD.md` item 6 — token issuance/rotation, which services validate, service-to-service vs client-to-service, mTLS vs JWT-over-TLS, interaction with Registry self-registration all open questions |
+| mTLS | Not started | |
 
 ---
 
@@ -299,7 +310,8 @@ Not in core — built on Space/EventMgr primitives. **Unblocked** — Space v1 a
 
 1. **Space CLI** — `spaces read/out/take/watch` commands in the Go CLI (Go Space SDK now done)
 2. **SDK parity gaps** — Java LeaseClient missing `keepAlive` + `watch`; Space/EventMgr/TxnMgr hand-written clients missing in Java + Node
-4. **Djinn split follow-ups** — docker-compose chaos, DynamoDB/MiniStack provider-swap test, Registry redundancy
-5. **AWS Provider** — DynamoDB/SQS/EventBridge for production
+3. **Hardening roadmap** (`.claude/plans/hardening-roadmap/PRD.md`, next up as of 2026-09-05) — DynamoDB split-mode wiring, per-service Docker containers, flexible inter-service boot order + graceful degraded health, cross-platform fixes, JWT auth
+4. **Djinn split follow-ups** — docker-compose chaos, Registry redundancy (DynamoDB/MiniStack provider-swap test moved into hardening roadmap above, exact gap now scoped)
+5. **AWS Provider** — DynamoDB/SQS/EventBridge for production (bundled-mode DynamoDB already done, see Providers table)
 6. **Higher-order patterns** — Lens, Reflex, Sentry (unblocked by Space + EventMgr)
 7. **Dashboard** — observability UI
