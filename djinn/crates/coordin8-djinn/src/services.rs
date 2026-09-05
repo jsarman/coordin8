@@ -1160,3 +1160,38 @@ pub async fn run_proxy_on_listener(
 
     Ok(())
 }
+
+// ── Healthcheck (CLI) ─────────────────────────────────────────────────────────
+
+/// Check a Djinn service's health via the standard gRPC Health Checking
+/// Protocol. Connects to `addr`, calls `Check` for the overall ("") service
+/// name, and returns `Ok(())` only if the reported status is `Serving`.
+///
+/// Bounded by an overall 3s timeout so a hung dial can't wedge `docker
+/// healthcheck` past its own `timeout:` setting.
+pub async fn run_healthcheck(addr: &str) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let channel = tonic::transport::Channel::from_shared(addr.to_string())
+            .map_err(|e| anyhow::anyhow!("invalid addr: {e}"))?
+            .connect()
+            .await
+            .map_err(|e| anyhow::anyhow!("connect failed: {e}"))?;
+        let mut client = tonic_health::pb::health_client::HealthClient::new(channel);
+
+        let resp = client
+            .check(tonic_health::pb::HealthCheckRequest {
+                service: String::new(),
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("check rpc failed: {e}"))?
+            .into_inner();
+
+        if resp.status() == tonic_health::pb::health_check_response::ServingStatus::Serving {
+            Ok(())
+        } else {
+            anyhow::bail!("status: {:?}", resp.status())
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("healthcheck timed out"))?
+}

@@ -56,20 +56,34 @@ enum Command {
     /// under interface=Proxy with a 30-second self-lease. Reads the usual
     /// PROXY_BIND_HOST / PROXY_PORT_MIN / PROXY_PORT_MAX env vars.
     Proxy,
+    /// Check a running Djinn service's health via the standard gRPC Health
+    /// Checking Protocol. Exits 0 if SERVING, 1 otherwise (NOT_SERVING,
+    /// unreachable, or timed out). Meant for `docker healthcheck` / `docker
+    /// compose` — no separate grpc_health_probe binary needed.
+    Healthcheck {
+        /// gRPC target to check, e.g. `http://127.0.0.1:9002`.
+        #[arg(long)]
+        addr: String,
+    },
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("coordin8=info".parse()?),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // Skip the log subscriber for healthcheck — it runs every few seconds
+    // under `docker healthcheck`, and its own pass/fail is signaled purely
+    // via exit code, not logs.
+    if !matches!(cli.command, Some(Command::Healthcheck { .. })) {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive("coordin8=info".parse()?),
+            )
+            .init();
+    }
 
     match cli.command {
         None | Some(Command::All) => services::run_all().await,
@@ -79,5 +93,6 @@ async fn main() -> Result<()> {
         Some(Command::Space) => services::run_space().await,
         Some(Command::Txn) => services::run_txn().await,
         Some(Command::Proxy) => services::run_proxy().await,
+        Some(Command::Healthcheck { addr }) => services::run_healthcheck(&addr).await,
     }
 }
