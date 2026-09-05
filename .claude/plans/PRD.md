@@ -264,7 +264,7 @@ Each service can boot as its own process, discoverable through Registry. Monolit
 | Phase 5 — Proxy split | Done | |
 | Chaos tests: RemoteLeasing + Space survive LeaseMgr kill | Done | `coordin8-djinn/tests/split_chaos.rs`, 3-phase pattern |
 | Docker-compose chaos (kill a container) | **Gap** | Follow-up from djinn-split PR |
-| DynamoDB/MiniStack provider-swap test | **Gap** | Split-mode functions in `services.rs` hardcode InMemory stores, no `COORDIN8_PROVIDER` branch at all (unlike `run_all()`) — exact locations in `.claude/plans/hardening-roadmap/PRD.md` item 4 |
+| DynamoDB/MiniStack provider-swap test | Done | Fixed — split-mode functions now share the same `COORDIN8_PROVIDER` selection `run_all()` uses. Verified live: registered an entry, killed the process, restarted, entry still there via MiniStack. `.claude/plans/hardening-roadmap/PRD.md` item 4 |
 | Registry redundancy in split mode | **Gap** | Currently single Registry — open question from PRD |
 | Per-service Docker containers, flexible inter-service boot order, JWT auth | **Not started** | `.claude/plans/hardening-roadmap/PRD.md` |
 

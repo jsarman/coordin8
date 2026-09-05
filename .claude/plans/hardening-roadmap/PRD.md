@@ -1,6 +1,6 @@
 # Hardening Roadmap — PRD
 
-> **Status: In progress.** Items 1 and 2 are COMPLETE (implemented + verified live 2026-09-05). Item 1 is on branch `worktree-boot-order-analysis`, PR'd as #20, not yet merged. Item 2 is on branch `feat/per-service-docker` (stacked on top of item 1's branch), not yet PR'd. See `session-1-complete.md` for the full implementation writeup. Started right after `.claude/plans/space-race-txn-failsafe/` (merged 2026-09-05). Docker-centric and near-term — a precursor to, not a duplicate of, `.claude/plans/phase3-cloud-topology/` (which is the full AWS-serverless endgame). Where they overlap, this PRD cross-references rather than repeats.
+> **Status: In progress.** Items 1, 2, and 4 are COMPLETE (implemented + verified live 2026-09-05). Item 1 is on branch `worktree-boot-order-analysis`, PR'd as #20. Item 2 is on branch `feat/per-service-docker`, PR'd as #21 (stacked on #20). Item 4 is on branch `feat/split-mode-dynamo` (stacked on #21), not yet PR'd. None merged yet. See `session-1-complete.md` for the full implementation writeup. Started right after `.claude/plans/space-race-txn-failsafe/` (merged 2026-09-05). Docker-centric and near-term — a precursor to, not a duplicate of, `.claude/plans/phase3-cloud-topology/` (which is the full AWS-serverless endgame). Where they overlap, this PRD cross-references rather than repeats.
 
 ## Goal
 
@@ -37,11 +37,13 @@ Full design + implementation in `boot-order-health-design.md` and `decisions.md`
 
 A few not-yet-enumerated hardcoded OS-specific bits break cross-platform use. Needs an audit pass to enumerate before scoping further.
 
-### 4. Persistent backing store outside bundled mode
+### 4. Persistent backing store outside bundled mode — ✅ DONE
 
-**Scoped precisely during the validation session.** The trait abstraction (`LeaseStore`/`RegistryStore`/`EventStore`/`TxnStore`/`SpaceStore` in `coordin8-core`, implemented by both `providers/local` and `providers/dynamo`) is solid. The gap is purely in `djinn/crates/coordin8-djinn/src/services.rs`: `run_all()` branches on `COORDIN8_PROVIDER` (dynamo vs local, lines 63-118); every split-mode function — `run_registry_on_listener` (:319,:321), `run_lease_on_listener_with_shutdown` (:430), `run_event_on_listener` (:562), `run_space_on_listener` (:694), `run_txn_on_listener` (:847) — hardcodes `Arc::new(InMemory*Store::new())` directly, no branch at all. `run_proxy` needs nothing (stateless). Fix is mechanical: thread the same match arm into each split-mode function.
+Extracted the provider-selection logic `run_all()` already had into five shared helpers (`lease_store_from_env()` etc., `services.rs`) and refactored `run_all()` to use them (same behavior, less duplication). Every split-mode function now calls the matching helper instead of hardcoding `Arc::new(InMemory*Store::new())` — `COORDIN8_PROVIDER=dynamo` works identically in split mode and bundled mode now. `run_registry_on_listener`'s own private lease bookkeeping (its entries' TTLs) is included too, so Registry entries also survive a restart under the dynamo provider. `run_proxy` needed nothing (stateless).
 
-Matches the master PRD's existing "DynamoDB/MiniStack provider-swap test — Gap" line under Djinn Split Mode (`.claude/plans/PRD.md`), now with exact fix locations.
+**Verified live, definitively:** brought up MiniStack + deployed the DynamoDB tables (existing `infra/dynamodb-tables.cfn.yml`, same CFN template the bundled compose already uses), ran `djinn registry` standalone with `COORDIN8_PROVIDER=dynamo`, registered a test entry via the `coordin8` CLI, confirmed it was queryable, then `kill -9`'d the process and started a fresh one with identical config. **The entry was still there** — genuine persistence across a process crash/restart, not just "constructs without erroring."
+
+Matches the master PRD's existing "DynamoDB/MiniStack provider-swap test — Gap" line under Djinn Split Mode (`.claude/plans/PRD.md`), now resolved.
 
 ### 5. Space watch durability (tracked separately as issue #17)
 
