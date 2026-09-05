@@ -33,6 +33,7 @@ use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
 use coordin8_space::{SpaceManager, SpaceParticipantService, SpaceServiceImpl};
 use coordin8_txn::{LocalTxnEnlister, TxnManager, TxnServiceImpl};
+use tonic_health::ServingStatus;
 
 // ── Env var helpers (pub for tests) ──────────────────────────────────────────
 
@@ -368,7 +369,16 @@ pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Resu
         listener.local_addr()?
     );
 
+    // Registry has no blocking external dependency (its entry-TTL bookkeeping
+    // is a private in-process LeaseManager), so it's healthy the moment it's
+    // about to serve.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
+
     Server::builder()
+        .add_service(health_service)
         .add_service(registry_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
         .await?;
@@ -502,7 +512,16 @@ pub async fn run_lease_on_listener_with_shutdown(
         }
     };
 
+    // LeaseMgr has no blocking external dependency — Registry is only needed
+    // for optional self-registration, which already retries concurrently
+    // below rather than gating startup. Healthy the moment it's about to serve.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
+
     let server_fut = Server::builder()
+        .add_service(health_service)
         .add_service(lease_svc)
         .serve_with_incoming_shutdown(
             tokio_stream::wrappers::TcpListenerStream::new(listener),
@@ -638,7 +657,17 @@ pub async fn run_event_on_listener(
         }
     };
 
+    // Reaching this point means LeaseMgr discovery (above) already succeeded,
+    // so this is genuinely healthy. Once the serve-immediately restructure
+    // lands (roadmap item 1, next step), this will instead start as
+    // NotServing and flip once the background discovery resolves.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
+
     let server_fut = Server::builder()
+        .add_service(health_service)
         .add_service(event_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
@@ -795,7 +824,17 @@ pub async fn run_space_on_listener(
         }
     };
 
+    // Reaching this point means LeaseMgr discovery (above) already succeeded,
+    // so this is genuinely healthy. Once the serve-immediately restructure
+    // lands (roadmap item 1, next step), this will instead start as
+    // NotServing and flip once the background discovery resolves.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
+
     let server_fut = Server::builder()
+        .add_service(health_service)
         .add_service(space_svc)
         .add_service(space_participant_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
@@ -917,7 +956,17 @@ pub async fn run_txn_on_listener(
         }
     };
 
+    // Reaching this point means LeaseMgr discovery (above) already succeeded,
+    // so this is genuinely healthy. Once the serve-immediately restructure
+    // lands (roadmap item 1, next step), this will instead start as
+    // NotServing and flip once the background discovery resolves.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
+
     let server_fut = Server::builder()
+        .add_service(health_service)
         .add_service(txn_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
@@ -1014,7 +1063,17 @@ pub async fn run_proxy_on_listener(
         }
     };
 
+    // Reaching this point means Registry discovery (above) already succeeded,
+    // so this is genuinely healthy. Once the serve-immediately restructure
+    // lands (roadmap item 1, next step), this will instead start as
+    // NotServing and flip once the background discovery resolves.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
+
     let server_fut = Server::builder()
+        .add_service(health_service)
         .add_service(proxy_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
