@@ -70,8 +70,8 @@ CLAUDE.md's "Docker" gotchas section documents the current bare-TCP healthcheck 
 
 ## Suggested Sequencing
 
-1. Land the health-check surface first (`tonic-health` wired into all six split-mode services, `SERVING` from the start for Registry/LeaseMgr since they have nothing to wait on) — self-contained, testable in isolation, no behavior change to existing request handling.
-2. Then restructure EventMgr/Space/TxnMgr/Proxy per whichever of Option A/B is chosen, wiring `set_not_serving`/`set_serving` to the actual dependency-resolution state.
+1. ~~Land the health-check surface first~~ — **done.** `tonic-health` wired into all six split-mode services, verified live with `grpcurl` against Registry/LeaseMgr/EventMgr (the three structurally distinct patterns). All report `SERVING` at the point they're about to accept requests — no behavior change yet, since none have been restructured to serve before their dependency resolves.
+2. **Next:** restructure EventMgr/Space/TxnMgr/Proxy per Option B (background-resolve + fast-fail, see `decisions.md`), wiring `set_not_serving`/`set_serving` to the actual dependency-resolution state (currently always `Serving` since step 1 landed with no behavior change).
 3. Update CLAUDE.md's Docker gotchas + the master `.claude/plans/PRD.md` Docker & Orchestration table once this ships.
 
 ## Open Questions
