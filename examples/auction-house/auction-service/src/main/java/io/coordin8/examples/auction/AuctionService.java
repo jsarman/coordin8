@@ -132,19 +132,20 @@ public class AuctionService {
     // ── HTTP Server ─────────────────────────────────────────────────────────
 
     public static void main(String[] args) throws Exception {
-        String djinnHost = System.getenv().getOrDefault("DJINN_HOST", "localhost");
+        String registryAddr = System.getenv().getOrDefault("COORDIN8_REGISTRY", "localhost:9002");
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
 
         System.out.println("Auction Service starting...");
-        System.out.printf("  djinn: %s%n", djinnHost);
+        System.out.printf("  registry: %s%n", registryAddr);
 
-        DjinnClient djinn = DjinnClient.connect(djinnHost);
+        DjinnClient djinn = DjinnClient.connect(registryAddr);
         AuctionService service = new AuctionService(djinn);
 
         // Register with Djinn
         var reg = djinn.registry().register("AuctionManager",
                 Map.of("version", "1.0"), 30, null);
-        Closeable keepAlive = djinn.leases().keepAlive(reg.leaseId(), 30);
+        Closeable keepAlive = djinn.registryLeases().keepAlive(reg.leaseId(), 30,
+                err -> System.err.printf("  ! lease renewal failed: %s%n", err.getMessage()));
         System.out.printf("  registered: AuctionManager (lease=%s)%n", reg.leaseId());
 
         // Start HTTP server
@@ -189,7 +190,7 @@ public class AuctionService {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\nShutting down...");
             try { keepAlive.close(); } catch (Exception ignored) {}
-            try { djinn.leases().cancel(reg.leaseId()); } catch (Exception ignored) {}
+            try { djinn.registryLeases().cancel(reg.leaseId()); } catch (Exception ignored) {}
             server.stop(0);
             try { djinn.close(); } catch (Exception ignored) {}
         }));
