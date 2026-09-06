@@ -25,11 +25,33 @@ async fn ephemeral_listener() -> (tokio::net::TcpListener, u16) {
     (l, port)
 }
 
-async fn spawn_registry() -> (JoinHandle<()>, String) {
+/// A stable LeaseMgr instance that exists only to satisfy Registry's own
+/// internal dependency (`run_registry_on_listener`'s `lease_addr` param).
+/// Kept separate from the LeaseMgr instance(s) under test in each scenario
+/// below — those get killed/restarted/run redundantly, which is unrelated
+/// to whether Registry itself can keep functioning. Registry can't recover
+/// if ITS OWN dependency dies without restarting at the same address (a
+/// known, accepted limitation; see `.claude/plans/registry-bootstrap/PRD.md`).
+/// Standalone (no `COORDIN8_REGISTRY`) so it doesn't also show up as a
+/// competing `interface=LeaseMgr` entry in these tests' own lookups.
+async fn spawn_backbone_lease() -> String {
     let (listener, port) = ephemeral_listener().await;
     let addr = format!("http://127.0.0.1:{port}");
+    tokio::spawn(async move {
+        run_lease_on_listener(listener, None, "127.0.0.1", 30)
+            .await
+            .ok();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    addr
+}
+
+async fn spawn_registry(lease_addr: &str) -> (JoinHandle<()>, String) {
+    let (listener, port) = ephemeral_listener().await;
+    let addr = format!("http://127.0.0.1:{port}");
+    let lease_addr = lease_addr.to_string();
     let handle = tokio::spawn(async move {
-        run_registry_on_listener(listener).await.ok();
+        run_registry_on_listener(listener, &lease_addr).await.ok();
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     (handle, addr)
@@ -103,7 +125,8 @@ async fn lookup_all_lease_ports(
 /// port. Registry must end up with one entry pointing at the new instance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phase1_lease_restart_replaces_entry() {
-    let (_reg_task, registry_addr) = spawn_registry().await;
+    let backbone_lease_addr = spawn_backbone_lease().await;
+    let (_reg_task, registry_addr) = spawn_registry(&backbone_lease_addr).await;
 
     // Boot first LeaseMgr with a short 3s TTL.
     let (first_task, first_port) = spawn_lease(&registry_addr, 3).await;
@@ -149,7 +172,8 @@ async fn phase1_lease_restart_replaces_entry() {
 /// survivor's entry stays — LookupAll returns exactly that survivor.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phase1_redundant_lease_survives_one_kill() {
-    let (_reg_task, registry_addr) = spawn_registry().await;
+    let backbone_lease_addr = spawn_backbone_lease().await;
+    let (_reg_task, registry_addr) = spawn_registry(&backbone_lease_addr).await;
 
     let (task_a, port_a) = spawn_lease(&registry_addr, 3).await;
     let (_task_b, port_b) = spawn_lease(&registry_addr, 3).await;

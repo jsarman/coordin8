@@ -3,6 +3,7 @@ package coordin8
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -70,7 +71,15 @@ func (sd *ServiceDiscovery) refresh(ctx context.Context, key string, tmpl Templa
 		return nil, fmt.Errorf("service discovery: %w", err)
 	}
 
-	addr := fmt.Sprintf("localhost:%d", handle.LocalPort)
+	// The forwarded port is bound on whatever host Proxy itself is running
+	// on — not necessarily "localhost" relative to this process (e.g. Proxy
+	// in one container, this client in another). Derive it from the actual
+	// address we dialed Proxy at rather than assuming.
+	proxyHost, _, err := net.SplitHostPort(sd.client.proxyConn.Target())
+	if err != nil {
+		return nil, fmt.Errorf("service discovery: parse proxy target: %w", err)
+	}
+	addr := fmt.Sprintf("%s:%d", proxyHost, handle.LocalPort)
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		_ = sd.client.Proxy().Release(ctx, handle.ProxyID)

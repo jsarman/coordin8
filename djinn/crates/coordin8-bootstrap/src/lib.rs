@@ -343,6 +343,41 @@ pub async fn watch_expiry_prefix(
     }
 }
 
+/// Same as [`watch_expiry_prefix`], but for the one caller that cannot use
+/// Registry lookup to reconnect: split-mode Registry itself. On stream
+/// failure, reconnects by redialing `lease_addr` directly rather than doing a
+/// Registry `Lookup` (Registry cannot discover its own dependency through
+/// itself). See [`RemoteLeasing::connect_direct`] for why this direct-dial
+/// path exists at all.
+pub async fn watch_expiry_direct(
+    lease_client: LeaseServiceClient<Channel>,
+    lease_addr: String,
+    prefix: String,
+    handler: impl Fn(ExpiryEvent) + Send + 'static,
+) {
+    let mut client = lease_client;
+
+    loop {
+        match run_watch_expiry_stream(&mut client, &prefix, &handler).await {
+            Ok(()) => {
+                debug!(prefix, "WatchExpiry stream ended, reconnecting");
+            }
+            Err(e) => {
+                warn!(
+                    prefix,
+                    "WatchExpiry stream error: {e}, redialing LeaseMgr directly"
+                );
+                client = retry_forever("watch_expiry_redial_direct", || async {
+                    LeaseServiceClient::connect(lease_addr.clone())
+                        .await
+                        .map_err(Error::from)
+                })
+                .await;
+            }
+        }
+    }
+}
+
 /// Drive a single WatchExpiry stream until it ends or errors.
 async fn run_watch_expiry_stream(
     client: &mut LeaseServiceClient<Channel>,
@@ -377,8 +412,27 @@ async fn run_watch_expiry_stream(
 /// is then retried exactly once on the new client. Per-call semantic errors
 /// (`NotFound`, `FailedPrecondition`) propagate as typed `coordin8_core::Error`
 /// values without a reconnect.
+/// How a [`RemoteLeasing`] finds LeaseMgr, both initially and on reconnect
+/// after a transport failure.
+enum LeaseSource {
+    /// Look LeaseMgr up through Registry's `Lookup` RPC. Used by every
+    /// service except Registry itself — they all sit above Registry in the
+    /// boot order and can use it as their one well-known point.
+    ViaRegistry(String),
+    /// Dial LeaseMgr's own address directly, no Registry involved. The one
+    /// caller that needs this is split-mode Registry: it cannot discover its
+    /// own LeaseMgr dependency through itself, so it's given LeaseMgr's fixed
+    /// address directly — mirroring how every other split-mode service is
+    /// given Registry's fixed address directly rather than looking *that*
+    /// up through something else. Correct as long as LeaseMgr's address is
+    /// stable across restarts, which it is under both Docker Compose and
+    /// Kubernetes (a container/pod dying and coming back keeps the same
+    /// service name / ClusterIP DNS).
+    Direct(String),
+}
+
 pub struct RemoteLeasing {
-    registry_addr: String,
+    source: LeaseSource,
     client: Mutex<LeaseServiceClient<Channel>>,
 }
 
@@ -390,18 +444,53 @@ impl RemoteLeasing {
     pub async fn connect(registry_addr: &str) -> Result<Self, Error> {
         let client = discover_lease_mgr(registry_addr).await?;
         Ok(Self {
-            registry_addr: registry_addr.to_string(),
+            source: LeaseSource::ViaRegistry(registry_addr.to_string()),
             client: Mutex::new(client),
         })
     }
 
-    /// Re-discover LeaseMgr through Registry and swap in the new client.
+    /// Build a `RemoteLeasing` by dialing LeaseMgr's address directly, with
+    /// no Registry lookup at all.
+    ///
+    /// Split-mode Registry is the only caller that needs this: every other
+    /// split-mode service resolves LeaseMgr through Registry's `Lookup` RPC,
+    /// but Registry can't look itself up to bootstrap its own dependency on
+    /// LeaseMgr. See [`LeaseSource::Direct`].
+    ///
+    /// Blocks (with exponential backoff) until LeaseMgr is reachable at
+    /// `lease_addr`.
+    pub async fn connect_direct(lease_addr: &str) -> Result<Self, Error> {
+        let client = retry_forever("lease_dial_direct", || async {
+            LeaseServiceClient::connect(lease_addr.to_string())
+                .await
+                .map_err(Error::from)
+        })
+        .await;
+        Ok(Self {
+            source: LeaseSource::Direct(lease_addr.to_string()),
+            client: Mutex::new(client),
+        })
+    }
+
+    /// Re-resolve LeaseMgr (via Registry lookup or direct redial, matching
+    /// however this instance was originally connected) and swap in the new
+    /// client.
     async fn rediscover(&self) -> Result<(), CoreError> {
-        let fresh = discover_lease_mgr(&self.registry_addr)
-            .await
-            .map_err(|e| CoreError::Internal(format!("rediscover failed: {e}")))?;
+        let fresh = match &self.source {
+            LeaseSource::ViaRegistry(registry_addr) => discover_lease_mgr(registry_addr)
+                .await
+                .map_err(|e| CoreError::Internal(format!("rediscover failed: {e}")))?,
+            LeaseSource::Direct(lease_addr) => {
+                retry_forever("lease_redial_direct", || async {
+                    LeaseServiceClient::connect(lease_addr.clone())
+                        .await
+                        .map_err(Error::from)
+                })
+                .await
+            }
+        };
         *self.client.lock().await = fresh;
-        warn!(registry = %self.registry_addr, "RemoteLeasing reconnected to LeaseMgr");
+        warn!("RemoteLeasing reconnected to LeaseMgr");
         Ok(())
     }
 

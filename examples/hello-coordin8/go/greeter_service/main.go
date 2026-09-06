@@ -41,8 +41,8 @@ func (s *greeterServer) Hello(_ context.Context, req *gen.HelloRequest) (*gen.He
 }
 
 func main() {
-	grpcPort     := envOr("GRPC_PORT", "50051")
-	djinnHost    := envOr("DJINN_HOST", "localhost")
+	grpcPort      := envOr("GRPC_PORT", "50051")
+	registryAddr  := envOr("COORDIN8_REGISTRY", "localhost:9002")
 	advertiseHost := envOr("ADVERTISE_HOST", "localhost")
 
 	// ── 1. Start the gRPC server ──────────────────────────────────────────────
@@ -61,7 +61,7 @@ func main() {
 	fmt.Printf("Greeter gRPC server listening on :%s\n", grpcPort)
 
 	// ── 2. Connect to the Djinn ───────────────────────────────────────────────
-	djinn, err := coordin8.Connect(djinnHost)
+	djinn, err := coordin8.Connect(registryAddr)
 	if err != nil {
 		log.Fatalf("connect to djinn: %v", err)
 	}

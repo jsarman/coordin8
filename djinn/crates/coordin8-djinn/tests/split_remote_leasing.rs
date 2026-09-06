@@ -30,11 +30,34 @@ async fn ephemeral_listener() -> (tokio::net::TcpListener, u16) {
     (l, port)
 }
 
-async fn spawn_registry() -> (JoinHandle<()>, String) {
+/// A stable LeaseMgr instance that exists only to satisfy Registry's own
+/// internal dependency (`run_registry_on_listener`'s `lease_addr` param).
+/// Kept separate from the lease_a/lease_b instances under test — those get
+/// killed and replaced as part of exercising `RemoteLeasing`'s own failover,
+/// which is unrelated to whether Registry itself can keep functioning.
+/// Registry can't recover if ITS OWN dependency dies without restarting at
+/// the same address (a known, accepted limitation; see
+/// `.claude/plans/registry-bootstrap/PRD.md`). Standalone (no
+/// `COORDIN8_REGISTRY`) so it doesn't also show up as a competing
+/// `interface=LeaseMgr` entry in this test's own lookups.
+async fn spawn_backbone_lease() -> String {
     let (listener, port) = ephemeral_listener().await;
     let addr = format!("http://127.0.0.1:{port}");
+    tokio::spawn(async move {
+        run_lease_on_listener(listener, None, "127.0.0.1", 30)
+            .await
+            .ok();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    addr
+}
+
+async fn spawn_registry(lease_addr: &str) -> (JoinHandle<()>, String) {
+    let (listener, port) = ephemeral_listener().await;
+    let addr = format!("http://127.0.0.1:{port}");
+    let lease_addr = lease_addr.to_string();
     let handle = tokio::spawn(async move {
-        run_registry_on_listener(listener).await.ok();
+        run_registry_on_listener(listener, &lease_addr).await.ok();
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     (handle, addr)
@@ -57,7 +80,8 @@ async fn spawn_lease(registry_addr: &str, ttl: u64) -> JoinHandle<()> {
 /// Happy-path: grant, then cancel, through a RemoteLeasing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_leasing_grant_and_cancel_round_trip() {
-    let (_reg, registry_addr) = spawn_registry().await;
+    let backbone_lease_addr = spawn_backbone_lease().await;
+    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
     let _lease = spawn_lease(&registry_addr, 30).await;
 
     let leasing = RemoteLeasing::connect(&registry_addr)
@@ -80,7 +104,8 @@ async fn remote_leasing_grant_and_cancel_round_trip() {
 /// the gRPC `Status::NotFound` → `CoreError::LeaseNotFound` mapping works.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_leasing_maps_not_found_to_typed_error() {
-    let (_reg, registry_addr) = spawn_registry().await;
+    let backbone_lease_addr = spawn_backbone_lease().await;
+    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
     let _lease = spawn_lease(&registry_addr, 30).await;
 
     let leasing = RemoteLeasing::connect(&registry_addr)
@@ -114,7 +139,8 @@ async fn remote_leasing_maps_not_found_to_typed_error() {
 /// through Registry and succeed against the new instance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_leasing_survives_leasemgr_failover() {
-    let (_reg, registry_addr) = spawn_registry().await;
+    let backbone_lease_addr = spawn_backbone_lease().await;
+    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
 
     // Boot a single LeaseMgr with a short TTL so the Registry entry clears
     // quickly after we kill it.

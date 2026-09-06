@@ -1,12 +1,24 @@
 //! Phase 0 integration test — Registry + LeaseMgr split boot.
 //!
 //! Proves the end-to-end Phase 0 contract:
-//!   1. Registry starts alone on an ephemeral port.
+//!   1. Registry starts alone on an ephemeral port, wired directly to
+//!      LeaseMgr's address (Registry can't discover its own LeaseMgr
+//!      dependency through itself the way every other split-mode service
+//!      discovers it through Registry — see `run_registry_on_listener`).
 //!   2. LeaseMgr starts, self-registers with that Registry (3s TTL).
 //!   3. A client looking up `interface=LeaseMgr` finds exactly one entry with
 //!      the correct advertise address.
 //!   4. When the LeaseMgr task is aborted the entry self-cleans: after the TTL
 //!      elapses a fresh lookup returns nothing.
+//!
+//! Note on (4): in this in-process harness, aborting the outer task closes
+//! the listening socket but does *not* stop the independently-spawned reaper
+//! task or the already-open `WatchExpiry` stream forwarding its events to
+//! Registry — there's no real process boundary to simulate a true crash.
+//! So this test genuinely does still observe self-clean. A true permanent
+//! death of the sole LeaseMgr (a real separate process that never comes
+//! back) is a different, narrower case this harness can't reproduce — see
+//! `.claude/plans/registry-bootstrap/PRD.md` for that discussion.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -28,47 +40,56 @@ async fn ephemeral_listener() -> (tokio::net::TcpListener, u16) {
     (l, port)
 }
 
-/// Spawn Registry in a background task. Returns the task handle and the HTTP
-/// address callers should use (e.g. "http://127.0.0.1:PORT").
-async fn spawn_registry() -> (JoinHandle<()>, String) {
+/// Spawn Registry in a background task, wired directly to `lease_addr` for
+/// its own leasing dependency. Returns the task handle and the HTTP address
+/// callers should use (e.g. "http://127.0.0.1:PORT").
+async fn spawn_registry(lease_addr: &str) -> (JoinHandle<()>, String) {
     let (listener, port) = ephemeral_listener().await;
     let addr = format!("http://127.0.0.1:{port}");
+    let lease_addr = lease_addr.to_string();
     let handle = tokio::spawn(async move {
-        run_registry_on_listener(listener).await.ok();
+        run_registry_on_listener(listener, &lease_addr).await.ok();
     });
     // Give the server a moment to start accepting.
     tokio::time::sleep(Duration::from_millis(50)).await;
     (handle, addr)
 }
 
-/// Spawn LeaseMgr in a background task. Returns the task handle and the HTTP
-/// URL that peers should use to reach it (host+port reconstructed).
-async fn spawn_lease(registry_addr: &str, self_lease_ttl: u64) -> (JoinHandle<()>, String) {
-    let (listener, port) = ephemeral_listener().await;
-    let advertise_url = format!("http://127.0.0.1:{port}");
+/// Spawn LeaseMgr on a pre-bound listener, self-registering with `registry_addr`.
+async fn spawn_lease_on(
+    listener: tokio::net::TcpListener,
+    registry_addr: &str,
+    self_lease_ttl: u64,
+) -> JoinHandle<()> {
     let registry_addr = registry_addr.to_string();
-
     let handle = tokio::spawn(async move {
         run_lease_on_listener(listener, Some(&registry_addr), "127.0.0.1", self_lease_ttl)
             .await
             .ok();
     });
-
     tokio::time::sleep(Duration::from_millis(50)).await;
-    (handle, advertise_url)
+    handle
 }
 
 // ── test ──────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phase0_registry_and_lease_self_register_and_self_clean() {
-    // --- 1. Boot Registry ---------------------------------------------------
-    let (_reg_task, registry_addr) = spawn_registry().await;
+    // Bind LeaseMgr's listener first so its address is known up front —
+    // Registry needs it directly, and LeaseMgr needs Registry's address to
+    // self-register. Both sides retry forever, so which one actually starts
+    // serving first doesn't matter.
+    let (lease_listener, lease_port) = ephemeral_listener().await;
+    let lease_advertise_addr = format!("http://127.0.0.1:{lease_port}");
+
+    // --- 1. Boot Registry, wired directly to LeaseMgr's address -------------
+    let (_reg_task, registry_addr) = spawn_registry(&lease_advertise_addr).await;
 
     // --- 2. Boot LeaseMgr with a short 3s self-lease ------------------------
-    let (lease_task, lease_advertise_addr) = spawn_lease(&registry_addr, 3).await;
+    let lease_task = spawn_lease_on(lease_listener, &registry_addr, 3).await;
 
-    // Give LeaseMgr time to connect to Registry and complete self-registration.
+    // Give LeaseMgr time to connect to Registry and complete self-registration,
+    // and Registry time to resolve its own direct LeaseMgr dependency.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // --- 3. Assert one LeaseMgr entry visible in Registry -------------------

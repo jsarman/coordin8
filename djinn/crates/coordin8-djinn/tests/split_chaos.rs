@@ -41,12 +41,42 @@ async fn ephemeral_listener() -> tokio::net::TcpListener {
     tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()
 }
 
-async fn spawn_registry() -> (JoinHandle<()>, String) {
+/// A stable LeaseMgr instance that exists only to satisfy Registry's own
+/// internal dependency (`run_registry_on_listener`'s `lease_addr` param).
+/// Kept separate from lease_a/lease_b — this instance is never killed, even
+/// during Phase 2 where both lease_a and lease_b are dead, so Registry
+/// itself keeps functioning (granting/renewing entries) throughout the whole
+/// chaos run. Registry can't recover if ITS OWN dependency dies without
+/// restarting at the same address (a known, accepted limitation; see
+/// `.claude/plans/registry-bootstrap/PRD.md`). Standalone (no
+/// `COORDIN8_REGISTRY`) so it doesn't also show up as a competing
+/// `interface=LeaseMgr` entry in this test's own lookups.
+async fn spawn_backbone_lease() -> String {
     let listener = ephemeral_listener().await;
     let port = listener.local_addr().unwrap().port();
     let addr = format!("http://127.0.0.1:{port}");
+    tokio::spawn(async move {
+        run_lease_on_listener_with_shutdown(
+            listener,
+            None,
+            "127.0.0.1",
+            30,
+            std::future::pending::<()>(),
+        )
+        .await
+        .ok();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    addr
+}
+
+async fn spawn_registry(lease_addr: &str) -> (JoinHandle<()>, String) {
+    let listener = ephemeral_listener().await;
+    let port = listener.local_addr().unwrap().port();
+    let addr = format!("http://127.0.0.1:{port}");
+    let lease_addr = lease_addr.to_string();
     let handle = tokio::spawn(async move {
-        run_registry_on_listener(listener).await.ok();
+        run_registry_on_listener(listener, &lease_addr).await.ok();
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     (handle, addr)
@@ -185,7 +215,8 @@ impl Counters {
 ///   and the test's failover claim is a false positive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chaos_remote_leasing_survives_leasemgr_kill() {
-    let (_reg, registry_addr) = spawn_registry().await;
+    let backbone_lease_addr = spawn_backbone_lease().await;
+    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
 
     // 3s TTL so killed instances drop out of Registry fast.
     let lease_a = spawn_lease(&registry_addr, 3).await;
@@ -311,7 +342,8 @@ async fn chaos_remote_leasing_survives_leasemgr_kill() {
 /// holding RemoteLeasing directly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chaos_split_space_survives_leasemgr_kill() {
-    let (_reg, registry_addr) = spawn_registry().await;
+    let backbone_lease_addr = spawn_backbone_lease().await;
+    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
 
     // LeaseMgr A alone — Space's internal RemoteLeasing will discover A
     // during boot and stay pinned to it. B comes up after Space is already

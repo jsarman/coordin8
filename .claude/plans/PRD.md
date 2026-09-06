@@ -310,7 +310,8 @@ Not in core — built on Space/EventMgr primitives. **Unblocked** — Space v1 a
 
 1. **Space CLI** — `spaces read/out/take/watch` commands in the Go CLI (Go Space SDK now done)
 2. **SDK parity gaps** — Java LeaseClient missing `keepAlive` + `watch`; Space/EventMgr/TxnMgr hand-written clients missing in Java + Node
-3. **Hardening roadmap** (`.claude/plans/hardening-roadmap/PRD.md`, next up as of 2026-09-05) — DynamoDB split-mode wiring, per-service Docker containers, flexible inter-service boot order + graceful degraded health, cross-platform fixes, JWT auth
+3. **Hardening roadmap** (`.claude/plans/hardening-roadmap/PRD.md`, items 1/2/4 done 2026-09-05/06) — remaining: cross-platform fixes, JWT auth
+3b. **Registry-only bootstrap** (`.claude/plans/registry-bootstrap/PRD.md`, started 2026-09-06) — SDKs (Go/Java/Node) need only Registry's address, look up LeaseMgr/Space/EventMgr/Proxy through it instead of hardcoding a fixed multi-port host; found while running auction-house against split mode. Bundled `run_all()` needs to self-register its own services first (currently doesn't at all).
 4. **Djinn split follow-ups** — docker-compose chaos, Registry redundancy (DynamoDB/MiniStack provider-swap test moved into hardening roadmap above, exact gap now scoped)
 5. **AWS Provider** — DynamoDB/SQS/EventBridge for production (bundled-mode DynamoDB already done, see Providers table)
 6. **Higher-order patterns** — Lens, Reflex, Sentry (unblocked by Space + EventMgr)

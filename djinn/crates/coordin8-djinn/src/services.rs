@@ -51,6 +51,61 @@ pub fn advertise_host() -> String {
     std::env::var("COORDIN8_ADVERTISE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
+/// Self-register a bundled-mode service into the same process's Registry.
+///
+/// Split mode already self-registers every service (see the `run_*_on_listener`
+/// functions); bundled mode never did, since a client could always assume
+/// "one host, fixed ports" and skip Registry entirely for the core services.
+/// That assumption is what the registry-bootstrap effort
+/// (`.claude/plans/registry-bootstrap/`) removes — clients should look up
+/// LeaseMgr/Space/EventMgr/Proxy/TransactionMgr through Registry the same way
+/// whether bundled or split. This makes that true for bundled mode too.
+///
+/// Retries the initial dial (Registry's own server task may not have started
+/// accepting yet) and then holds the registration alive for the process
+/// lifetime — matching the split-mode self-registration futures' pattern.
+fn spawn_bundled_self_register(interface: &'static str, port: u16) {
+    let advertise = advertise_host();
+    tokio::spawn(async move {
+        let registry_client = loop {
+            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
+                "http://localhost:9002".to_string(),
+            )
+            .await
+            {
+                Ok(c) => break c,
+                Err(e) => {
+                    tracing::warn!("{interface}: registry dial failed: {e}, retrying in 200ms");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        };
+
+        match self_register(
+            registry_client,
+            interface,
+            std::collections::HashMap::new(),
+            &advertise,
+            port,
+            30,
+        )
+        .await
+        {
+            Ok(handle) => {
+                info!(
+                    "  ✓ {interface}: self-registered (capability: {}, lease: {})",
+                    handle.capability_id(),
+                    handle.lease_id()
+                );
+                std::future::pending::<()>().await;
+            }
+            Err(e) => {
+                tracing::error!("{interface}: self_register failed: {e}");
+            }
+        }
+    });
+}
+
 // ── Provider selection (pub(crate) — shared by run_all() and every split-mode
 //    function, so COORDIN8_PROVIDER=dynamo works the same in both) ───────────
 
@@ -302,6 +357,15 @@ pub async fn run_all() -> Result<()> {
     info!("  ✓ TransactionMgr: listening on {}", txn_addr);
     info!("  ✓ EventMgr:      listening on {}", event_addr);
     info!("  ✓ Space:         listening on {}", space_addr);
+
+    // Self-register every core service into the same process's Registry —
+    // see spawn_bundled_self_register's doc comment for why this matters now.
+    spawn_bundled_self_register("LeaseMgr", 9001);
+    spawn_bundled_self_register("EventMgr", 9005);
+    spawn_bundled_self_register("Proxy", 9003);
+    spawn_bundled_self_register("TransactionMgr", 9004);
+    spawn_bundled_self_register("Space", 9006);
+
     info!("Djinn ready.");
 
     tokio::try_join!(
@@ -325,8 +389,11 @@ pub async fn run_all() -> Result<()> {
 
 /// Boot Registry alone on the given bind address.
 ///
-/// Registry is the well-known anchor and does not self-register. Includes its
-/// own local LeaseMgr for the `registry:` lease namespace.
+/// Registry is the well-known anchor and does not self-register. It does,
+/// however, depend on the real LeaseMgr for its own entries' TTL bookkeeping
+/// — and since it can't discover that dependency through itself the way
+/// every other split-mode service discovers it through Registry, it's given
+/// LeaseMgr's address directly via `COORDIN8_LEASE`.
 ///
 /// Pass `bind` as `"0.0.0.0:0"` to let the OS assign a port. Use
 /// `serve_with_incoming` if you need the actual port before serving — see
@@ -336,55 +403,107 @@ pub async fn run_registry() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     let actual_addr = listener.local_addr()?;
     info!("Djinn registry starting on {actual_addr}...");
-    run_registry_on_listener(listener).await
+    let lease_addr = std::env::var("COORDIN8_LEASE")
+        .map_err(|_| anyhow::anyhow!("COORDIN8_LEASE must be set for split-mode Registry"))?;
+    run_registry_on_listener(listener, &lease_addr).await
 }
 
-/// Boot Registry on a pre-bound [`TcpListener`].
+/// Boot Registry on a pre-bound [`TcpListener`], wired to a directly-dialed
+/// LeaseMgr at `lease_addr`.
 ///
 /// This variant is test-friendly: bind port 0, read the actual address, then
 /// pass the listener here. The caller knows the exact address before the server
 /// starts accepting.
-pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Result<()> {
+///
+/// Serves immediately on `NotServing` health, exactly like every other
+/// split-mode service — `Register`/`ModifyAttrs` calls fail fast with
+/// `Unavailable` until the background task below resolves LeaseMgr and flips
+/// health to `Serving`. See [`coordin8_bootstrap::RemoteLeasing::connect_direct`]
+/// for why Registry dials LeaseMgr directly instead of through a Lookup, and
+/// `.claude/plans/registry-bootstrap/PRD.md` for the full bootstrap-cycle
+/// writeup this resolves.
+pub async fn run_registry_on_listener(
+    listener: tokio::net::TcpListener,
+    lease_addr: &str,
+) -> Result<()> {
     let registry_store = registry_store_from_env().await?;
-
-    let lease_store = lease_store_from_env().await?;
-    let lease_config = coordin8_core::LeaseConfig::from_env();
-    let lease_manager = Arc::new(LeaseManager::new(lease_store, lease_config));
-    let leasing: Arc<dyn Leasing> = lease_manager.clone();
-
-    let (expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);
-    let reaper_manager = Arc::clone(&lease_manager);
-    let reaper_tx = expiry_tx.clone();
-    tokio::spawn(async move {
-        coordin8_lease::reaper::run_reaper(reaper_manager, reaper_tx, Duration::from_secs(1)).await;
-    });
-
-    let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
     let registry_index = Arc::new(RegistryIndex::new(registry_store));
 
-    let registry_expiry_index = Arc::clone(&registry_index);
-    let registry_expiry_tx = registry_tx.clone();
-    let mut registry_expiry_rx = expiry_tx.subscribe();
-    tokio::spawn(async move {
-        while let Ok(lease) = registry_expiry_rx.recv().await {
-            if lease.resource_id.starts_with("registry:") {
-                if let Ok(Some(entry)) = registry_expiry_index
-                    .unregister_by_lease(&lease.lease_id)
-                    .await
+    // Construct immediately against a not-yet-resolved LeaseMgr — see
+    // PendingLeasing. Discovery happens in the background task below;
+    // requests made before it resolves fail fast with Unavailable instead
+    // of the server not being reachable at all.
+    let pending_leasing = Arc::new(coordin8_bootstrap::PendingLeasing::new());
+    let leasing: Arc<dyn Leasing> = Arc::clone(&pending_leasing) as Arc<dyn Leasing>;
+
+    let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
+
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::NotServing)
+        .await;
+
+    // Resolve LeaseMgr in the background: install it once found, flip
+    // health to Serving, then start the WatchExpiry-driven cleanup for our
+    // own "registry:" prefixed entries — mirroring EventMgr/Space/TxnMgr,
+    // except reconnect redials `lease_addr` directly (no Registry lookup;
+    // see watch_expiry_direct).
+    {
+        let pending_leasing = Arc::clone(&pending_leasing);
+        let lease_addr = lease_addr.to_string();
+        let mut health_reporter = health_reporter.clone();
+        let registry_expiry_index = Arc::clone(&registry_index);
+        let registry_expiry_tx = registry_tx.clone();
+        tokio::spawn(async move {
+            let resolved = coordin8_bootstrap::RemoteLeasing::connect_direct(&lease_addr)
+                .await
+                .expect("connect_direct retries forever, never returns Err");
+            pending_leasing.install(resolved).await;
+            health_reporter
+                .set_service_status("", ServingStatus::Serving)
+                .await;
+            info!("  ✓ Registry: LeaseMgr resolved, now Serving");
+
+            let lease_stream_client = loop {
+                match coordin8_proto::coordin8::lease_service_client::LeaseServiceClient::connect(
+                    lease_addr.clone(),
+                )
+                .await
                 {
-                    tracing::debug!(
-                        capability_id = %entry.capability_id,
-                        "registry entry expired (split mode)"
-                    );
-                    let _ =
-                        registry_expiry_tx.send(coordin8_registry::service::RegistryChangedEvent {
-                            event_type: 1,
-                            entry,
-                        });
+                    Ok(c) => break c,
+                    Err(e) => {
+                        tracing::warn!("lease dial failed: {e}, retrying in 500ms");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
                 }
-            }
-        }
-    });
+            };
+            coordin8_bootstrap::watch_expiry_direct(
+                lease_stream_client,
+                lease_addr,
+                "registry:".to_string(),
+                move |evt| {
+                    let index = Arc::clone(&registry_expiry_index);
+                    let tx = registry_expiry_tx.clone();
+                    let lease_id = evt.lease_id;
+                    tokio::spawn(async move {
+                        if let Ok(Some(entry)) = index.unregister_by_lease(&lease_id).await {
+                            tracing::debug!(
+                                capability_id = %entry.capability_id,
+                                interface = %entry.interface,
+                                lease_id = %lease_id,
+                                "registry entry expired (split mode)"
+                            );
+                            let _ = tx.send(coordin8_registry::service::RegistryChangedEvent {
+                                event_type: 1,
+                                entry,
+                            });
+                        }
+                    });
+                },
+            )
+            .await;
+        });
+    }
 
     let registry_svc = RegistryServiceServer::new(RegistryServiceImpl::new(
         registry_index,
@@ -396,14 +515,6 @@ pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Resu
         "  ✓ Registry (split): listening on {}",
         listener.local_addr()?
     );
-
-    // Registry has no blocking external dependency (its entry-TTL bookkeeping
-    // is a private in-process LeaseManager), so it's healthy the moment it's
-    // about to serve.
-    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
-    health_reporter
-        .set_service_status("", ServingStatus::Serving)
-        .await;
 
     Server::builder()
         .add_service(health_service)

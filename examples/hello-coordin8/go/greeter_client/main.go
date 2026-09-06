@@ -16,7 +16,12 @@ func main() {
 		name = os.Args[1]
 	}
 
-	djinn, err := coordin8.Connect("localhost")
+	registryAddr := "localhost:9002"
+	if v := os.Getenv("COORDIN8_REGISTRY"); v != "" {
+		registryAddr = v
+	}
+
+	djinn, err := coordin8.Connect(registryAddr)
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}

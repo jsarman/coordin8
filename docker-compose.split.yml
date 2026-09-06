@@ -28,6 +28,10 @@ services:
       RUST_LOG: "coordin8_registry=debug,coordin8_djinn=info"
       COORDIN8_BIND_ADDR: "0.0.0.0:9002"
       COORDIN8_ADVERTISE_HOST: "registry"
+      # Registry can't discover LeaseMgr through itself, so it's the one
+      # split-mode service given a direct address instead of a Registry
+      # lookup — see .claude/plans/registry-bootstrap/PRD.md.
+      COORDIN8_LEASE: "http://lease:9001"
     ports:
       - "9002:9002"
     networks:
