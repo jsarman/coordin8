@@ -14,8 +14,9 @@ services:
     environment:
       RUST_LOG: "info"
       PROXY_BIND_HOST: "0.0.0.0"
+      COORDIN8_ADVERTISE_HOST: "djinn"
     healthcheck:
-      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/localhost/9001'"]
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/localhost/9002'"]
       interval: 5s
       retries: 10
     networks:
@@ -45,7 +46,7 @@ services:
       djinn:
         condition: service_healthy
     environment:
-      DJINN_HOST: djinn
+      COORDIN8_REGISTRY: djinn:9002
     restart: on-failure
     networks:
       - auction-net
