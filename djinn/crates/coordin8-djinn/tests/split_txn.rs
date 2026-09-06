@@ -1,18 +1,14 @@
 //! Integration tests for split-mode TransactionMgr.
 //!
-//! Boots Registry + LeaseMgr + TransactionMgr as three separate services.
-//! TxnMgr runs against `RemoteLeasing`, so every `begin` grant and every
-//! `abort`/`commit` lease cancel crosses a gRPC hop to the remote LeaseMgr.
-//! The `txn:` expiry prefix is driven by `watch_expiry_prefix` so dead
-//! transactions are auto-aborted even when the lease died remotely.
+//! Boots Registry + TransactionMgr as two separate services. TxnMgr embeds
+//! its own `LeaseManager` for transaction leases — no external LeaseMgr
+//! dependency at all; Registry is only used for (optional) self-registration.
 
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
 
-use coordin8_djinn::services::{
-    run_lease_on_listener, run_registry_on_listener, run_txn_on_listener,
-};
+use coordin8_djinn::services::{run_registry_on_listener, run_txn_on_listener};
 use coordin8_proto::coordin8::{
     transaction_service_client::TransactionServiceClient, BeginRequest, CommitRequest,
     GetStateRequest, TransactionState,
@@ -24,47 +20,14 @@ async fn ephemeral_listener() -> (tokio::net::TcpListener, u16) {
     (l, port)
 }
 
-/// A stable LeaseMgr instance that exists only to satisfy Registry's own
-/// internal dependency (`run_registry_on_listener`'s `lease_addr` param).
-/// Kept separate from whatever LeaseMgr instance the test itself is
-/// exercising, and never killed — Registry can't recover if ITS OWN
-/// dependency dies without restarting at the same address (a known, accepted
-/// limitation; see `.claude/plans/registry-bootstrap/PRD.md`). Standalone
-/// (no `COORDIN8_REGISTRY`) so it doesn't also show up as a competing
-/// `interface=LeaseMgr` entry in the test's own lookups.
-async fn spawn_backbone_lease() -> String {
+async fn spawn_registry() -> (JoinHandle<()>, String) {
     let (listener, port) = ephemeral_listener().await;
     let addr = format!("http://127.0.0.1:{port}");
-    tokio::spawn(async move {
-        run_lease_on_listener(listener, None, "127.0.0.1", 30)
-            .await
-            .ok();
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    addr
-}
-
-async fn spawn_registry(lease_addr: &str) -> (JoinHandle<()>, String) {
-    let (listener, port) = ephemeral_listener().await;
-    let addr = format!("http://127.0.0.1:{port}");
-    let lease_addr = lease_addr.to_string();
     let handle = tokio::spawn(async move {
-        run_registry_on_listener(listener, &lease_addr).await.ok();
+        run_registry_on_listener(listener).await.ok();
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     (handle, addr)
-}
-
-async fn spawn_lease(registry_addr: &str, ttl: u64) -> JoinHandle<()> {
-    let (listener, _) = ephemeral_listener().await;
-    let registry_addr = registry_addr.to_string();
-    let handle = tokio::spawn(async move {
-        run_lease_on_listener(listener, Some(&registry_addr), "127.0.0.1", ttl)
-            .await
-            .ok();
-    });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    handle
 }
 
 async fn spawn_txn(registry_addr: &str) -> (JoinHandle<()>, String) {
@@ -76,18 +39,16 @@ async fn spawn_txn(registry_addr: &str) -> (JoinHandle<()>, String) {
             .await
             .ok();
     });
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     (handle, addr)
 }
 
 /// Happy path: begin a zero-participant transaction, commit it, confirm the
 /// state transitions through the split-mode wire. Every lease grant/cancel
-/// crosses `RemoteLeasing`.
+/// is handled by TxnMgr's own embedded LeaseManager.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_txn_begin_and_commit_round_trip() {
-    let backbone_lease_addr = spawn_backbone_lease().await;
-    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
-    let _lease = spawn_lease(&registry_addr, 30).await;
+    let (_reg, registry_addr) = spawn_registry().await;
     let (_txn, txn_addr) = spawn_txn(&registry_addr).await;
 
     let mut client = TransactionServiceClient::connect(txn_addr)
@@ -97,11 +58,15 @@ async fn split_txn_begin_and_commit_round_trip() {
     let created = client
         .begin(BeginRequest { ttl_seconds: 30 })
         .await
-        .expect("begin (proves RemoteLeasing.grant worked)")
+        .expect("begin (proves the embedded LeaseManager grant worked)")
         .into_inner();
 
     assert!(!created.txn_id.is_empty());
-    assert!(created.lease.is_some(), "begin should return a lease");
+    let lease = created.lease.expect("begin should return a lease");
+    assert!(
+        !lease.grantor_host.is_empty() && lease.grantor_port != 0,
+        "lease should carry a grantor address to renew against"
+    );
 
     client
         .commit(CommitRequest {
@@ -126,15 +91,12 @@ async fn split_txn_begin_and_commit_round_trip() {
     );
 }
 
-/// A short-TTL transaction whose lease expires on the remote LeaseMgr must
-/// be auto-aborted on the split TxnMgr. This exercises the
-/// `watch_expiry_prefix("txn:")` task in `run_txn_on_listener` — without it,
-/// `abort_expired` never fires and the txn stays Active forever.
+/// A short-TTL transaction whose lease expires must be auto-aborted on the
+/// split TxnMgr. This exercises the cascade wired in `run_txn_on_listener` —
+/// without it, `abort_expired` never fires and the txn stays Active forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn split_txn_remote_expiry_auto_aborts() {
-    let backbone_lease_addr = spawn_backbone_lease().await;
-    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
-    let _lease = spawn_lease(&registry_addr, 30).await;
+async fn split_txn_expiry_auto_aborts() {
+    let (_reg, registry_addr) = spawn_registry().await;
     let (_txn, txn_addr) = spawn_txn(&registry_addr).await;
 
     let mut client = TransactionServiceClient::connect(txn_addr)
@@ -157,9 +119,8 @@ async fn split_txn_remote_expiry_auto_aborts() {
         .into_inner();
     assert_eq!(initial.state, TransactionState::Active as i32);
 
-    // Wait for: TTL (2s) + reaper tick (≤1s) + WatchExpiry delivery +
-    // abort_expired to run on the split TxnMgr.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Wait for: TTL (2s) + reaper tick (≤1s) + cascade to run.
+    tokio::time::sleep(Duration::from_secs(4)).await;
 
     let after = client
         .get_state(GetStateRequest {
@@ -172,6 +133,6 @@ async fn split_txn_remote_expiry_auto_aborts() {
     assert_eq!(
         after.state,
         TransactionState::Aborted as i32,
-        "txn should have been auto-aborted via watch_expiry_prefix path"
+        "txn should have been auto-aborted via the embedded LeaseManager cascade"
     );
 }

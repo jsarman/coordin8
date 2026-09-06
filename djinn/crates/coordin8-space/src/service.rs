@@ -59,11 +59,38 @@ fn parse_txn_id(txn_id: String) -> Option<String> {
 
 pub struct SpaceServiceImpl {
     manager: Arc<SpaceManager>,
+    /// Stamped onto every `Lease` returned from `Write`/`Notify`/`RenewTuple`
+    /// so a holder always knows where to renew — Space grants its own tuple
+    /// and watch leases in-process (see
+    /// `.claude/plans/distributed-leasing/PRD.md`), so this is simply
+    /// Space's own listening address.
+    grantor_host: String,
+    grantor_port: u16,
 }
 
 impl SpaceServiceImpl {
-    pub fn new(manager: Arc<SpaceManager>) -> Self {
-        Self { manager }
+    pub fn new(
+        manager: Arc<SpaceManager>,
+        grantor_host: impl Into<String>,
+        grantor_port: u16,
+    ) -> Self {
+        Self {
+            manager,
+            grantor_host: grantor_host.into(),
+            grantor_port,
+        }
+    }
+
+    fn lease_to_proto(&self, lease: coordin8_core::LeaseRecord) -> Lease {
+        Lease {
+            lease_id: lease.lease_id,
+            resource_id: lease.resource_id,
+            granted_at: Some(to_timestamp(lease.granted_at)),
+            expires_at: Some(to_timestamp(lease.expires_at)),
+            ttl_seconds: lease.ttl_seconds,
+            grantor_host: self.grantor_host.clone(),
+            grantor_port: self.grantor_port as u32,
+        }
     }
 }
 
@@ -95,13 +122,7 @@ impl SpaceService for SpaceServiceImpl {
 
         debug!(tuple_id = %record.tuple_id, "write rpc");
 
-        let lease = Some(Lease {
-            lease_id: lease_record.lease_id,
-            resource_id: lease_record.resource_id,
-            granted_at: Some(to_timestamp(lease_record.granted_at)),
-            expires_at: Some(to_timestamp(lease_record.expires_at)),
-            ttl_seconds: lease_record.ttl_seconds,
-        });
+        let lease = Some(self.lease_to_proto(lease_record));
 
         Ok(Response::new(WriteResponse {
             tuple: Some(tuple_record_to_proto(&record, lease)),
@@ -243,13 +264,7 @@ impl SpaceService for SpaceServiceImpl {
             .await
             .map_err(map_err)?;
 
-        Ok(Response::new(Lease {
-            lease_id: record.lease_id,
-            resource_id: record.resource_id,
-            granted_at: Some(to_timestamp(record.granted_at)),
-            expires_at: Some(to_timestamp(record.expires_at)),
-            ttl_seconds: record.ttl_seconds,
-        }))
+        Ok(Response::new(self.lease_to_proto(record)))
     }
 
     async fn cancel(&self, req: Request<CancelTupleRequest>) -> Result<Response<()>, Status> {

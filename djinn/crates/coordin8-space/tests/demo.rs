@@ -14,9 +14,11 @@ use tokio::sync::broadcast;
 
 fn make_manager() -> (Arc<SpaceManager>, broadcast::Sender<TupleRecord>) {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
+    let (lease_expiry_tx, _) = broadcast::channel(256);
     let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
         lease_store,
         coordin8_core::LeaseConfig::default(),
+        lease_expiry_tx,
     ));
     let space_store = Arc::new(InMemorySpaceStore::new());
     let (tuple_tx, _) = broadcast::channel(256);
@@ -32,9 +34,11 @@ fn make_manager() -> (Arc<SpaceManager>, broadcast::Sender<TupleRecord>) {
 
 fn make_manager_with_reaper() -> Arc<SpaceManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
+    let (lease_expiry_tx, _) = broadcast::channel(256);
     let lease_manager = Arc::new(LeaseManager::new(
         lease_store.clone(),
         coordin8_core::LeaseConfig::default(),
+        lease_expiry_tx,
     ));
     let leasing: Arc<dyn Leasing> = lease_manager.clone();
     let space_store = Arc::new(InMemorySpaceStore::new());
@@ -43,22 +47,23 @@ fn make_manager_with_reaper() -> Arc<SpaceManager> {
 
     let mgr = Arc::new(SpaceManager::new(space_store, leasing, tuple_tx, expiry_tx));
 
-    // Start reaper + expiry listener
-    let (reaper_expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);
+    // Start reaper + expiry listener, subscribed to the same LeaseManager's
+    // own broadcast — cancel() publishes to it too, matching how a real
+    // embedded Landlord's cascade handler works (see services.rs).
     let reaper_mgr = Arc::clone(&lease_manager);
-    let reaper_tx = reaper_expiry_tx.clone();
+    let reaper_tx = lease_manager.expiry_tx();
     tokio::spawn(async move {
         coordin8_lease::reaper::run_reaper(reaper_mgr, reaper_tx, Duration::from_millis(100)).await;
     });
 
     let space_expiry_mgr = Arc::clone(&mgr);
-    let mut space_expiry_rx = reaper_expiry_tx.subscribe();
+    let mut space_expiry_rx = lease_manager.expiry_tx().subscribe();
     tokio::spawn(async move {
-        while let Ok(lease) = space_expiry_rx.recv().await {
-            if lease.resource_id.starts_with("space:") {
-                space_expiry_mgr.on_tuple_expired(&lease.lease_id).await;
-            } else if lease.resource_id.starts_with("space-watch:") {
-                space_expiry_mgr.on_watch_expired(&lease.lease_id).await;
+        while let Ok(coordin8_core::LeaseReclaimed { record, .. }) = space_expiry_rx.recv().await {
+            if record.resource_id.starts_with("space:") {
+                space_expiry_mgr.on_tuple_expired(&record.lease_id).await;
+            } else if record.resource_id.starts_with("space-watch:") {
+                space_expiry_mgr.on_watch_expired(&record.lease_id).await;
             }
         }
     });

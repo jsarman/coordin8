@@ -40,11 +40,25 @@ fn state_to_proto(s: &TransactionState) -> i32 {
 
 pub struct TxnServiceImpl {
     manager: Arc<TxnManager>,
+    /// Stamped onto every `Lease` returned from `Begin` so a holder always
+    /// knows where to renew — TxnMgr grants its own transaction leases
+    /// in-process (see `.claude/plans/distributed-leasing/PRD.md`), so this
+    /// is simply TxnMgr's own listening address.
+    grantor_host: String,
+    grantor_port: u16,
 }
 
 impl TxnServiceImpl {
-    pub fn new(manager: Arc<TxnManager>) -> Self {
-        Self { manager }
+    pub fn new(
+        manager: Arc<TxnManager>,
+        grantor_host: impl Into<String>,
+        grantor_port: u16,
+    ) -> Self {
+        Self {
+            manager,
+            grantor_host: grantor_host.into(),
+            grantor_port,
+        }
     }
 }
 
@@ -67,6 +81,8 @@ impl TransactionService for TxnServiceImpl {
                 granted_at: Some(to_timestamp(lease.granted_at)),
                 expires_at: Some(to_timestamp(lease.expires_at)),
                 ttl_seconds: lease.ttl_seconds,
+                grantor_host: self.grantor_host.clone(),
+                grantor_port: self.grantor_port as u32,
             }),
         }))
     }

@@ -22,32 +22,29 @@ enum Command {
     All,
     /// Boot the Registry service alone on COORDIN8_BIND_ADDR.
     ///
-    /// Registry is the well-known anchor and does not self-register.
+    /// Registry is the well-known anchor and does not self-register. Embeds
+    /// its own LeaseManager for its own entries' leases — no external
+    /// leasing dependency at all.
     Registry,
-    /// Boot LeaseMgr alone on COORDIN8_BIND_ADDR.
-    ///
-    /// If COORDIN8_REGISTRY is set, self-registers under interface=LeaseMgr
-    /// with a 30-second self-lease. Otherwise logs a warning and runs
-    /// standalone.
-    Lease,
     /// Boot EventMgr alone on COORDIN8_BIND_ADDR.
     ///
-    /// Requires COORDIN8_REGISTRY to be set — EventMgr discovers LeaseMgr
-    /// through Registry (via RemoteLeasing) and self-registers under
-    /// interface=EventMgr with a 30-second self-lease.
+    /// Requires COORDIN8_REGISTRY to be set for self-registration under
+    /// interface=EventMgr with a 30-second self-lease. Embeds its own
+    /// LeaseManager for subscription leases.
     Event,
     /// Boot Space alone on COORDIN8_BIND_ADDR.
     ///
-    /// Requires COORDIN8_REGISTRY to be set — Space discovers LeaseMgr
-    /// through Registry (via RemoteLeasing) and self-registers under
-    /// interface=Space with a 30-second self-lease. Mounts both the
-    /// SpaceService and its 2PC ParticipantService on the same port.
+    /// Requires COORDIN8_REGISTRY to be set for self-registration under
+    /// interface=Space with a 30-second self-lease, and for lazy TxnMgr
+    /// discovery (auto-enlist). Embeds its own LeaseManager for tuple and
+    /// watch leases. Mounts both the SpaceService and its 2PC
+    /// ParticipantService on the same port.
     Space,
     /// Boot TransactionMgr alone on COORDIN8_BIND_ADDR.
     ///
-    /// Requires COORDIN8_REGISTRY to be set — TxnMgr discovers LeaseMgr
-    /// through Registry (via RemoteLeasing) and self-registers under
-    /// interface=TransactionMgr with a 30-second self-lease.
+    /// Requires COORDIN8_REGISTRY to be set for self-registration under
+    /// interface=TransactionMgr with a 30-second self-lease. Embeds its own
+    /// LeaseManager for transaction leases.
     Txn,
     /// Boot Proxy alone on COORDIN8_BIND_ADDR.
     ///
@@ -88,7 +85,6 @@ async fn main() -> Result<()> {
     match cli.command {
         None | Some(Command::All) => services::run_all().await,
         Some(Command::Registry) => services::run_registry().await,
-        Some(Command::Lease) => services::run_lease().await,
         Some(Command::Event) => services::run_event().await,
         Some(Command::Space) => services::run_space().await,
         Some(Command::Txn) => services::run_txn().await,

@@ -128,8 +128,11 @@ mod tests {
     #[tokio::test]
     async fn forever_lease_never_expires() {
         let store = InMemoryLeaseStore::new();
-        let record = store.create("worker-forever", 0).await.unwrap(); // ttl=0 → FOREVER
-        assert_eq!(record.ttl_seconds, 0);
+        let record = store
+            .create("worker-forever", coordin8_core::LEASE_FOREVER)
+            .await
+            .unwrap();
+        assert_eq!(record.ttl_seconds, coordin8_core::LEASE_FOREVER);
         assert!(!record.is_expired());
         sleep(Duration::from_millis(10)).await;
         let expired = store.list_expired().await.unwrap();

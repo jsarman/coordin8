@@ -93,7 +93,16 @@ func main() {
 	fmt.Println("Serving... (Ctrl+C to stop)")
 
 	// ── 4. Keep lease alive in background ─────────────────────────────────────
-	go djinn.Leases().KeepAlive(ctx, reg.LeaseID, leaseTTL)
+	// Registration lease was granted by Registry itself, so it's renewed
+	// against Registry's own LeaseService (mounted on the same connection).
+	// KeepAlive reports renewal failures on its channel instead of silently
+	// swallowing them — log so we notice if the registration is ever lost.
+	keepAliveFailures := djinn.RegistryLeases().KeepAlive(ctx, reg.LeaseID, leaseTTL)
+	go func() {
+		for err := range keepAliveFailures {
+			log.Printf("lease renewal failed: %v", err)
+		}
+	}()
 
 	// ── 5. Wait for shutdown signal ───────────────────────────────────────────
 	sigCh := make(chan os.Signal, 1)
@@ -102,7 +111,7 @@ func main() {
 
 	fmt.Println("\nShutting down — cancelling registration lease...")
 	// Cancel explicitly so the Registry clears immediately (no waiting for TTL)
-	_ = djinn.Leases().Cancel(context.Background(), reg.LeaseID)
+	_ = djinn.RegistryLeases().Cancel(context.Background(), reg.LeaseID)
 	grpcServer.GracefulStop()
 	fmt.Println("Gone.")
 }

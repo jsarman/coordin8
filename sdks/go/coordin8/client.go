@@ -5,8 +5,14 @@
 //	djinn, err := coordin8.Connect("localhost:9002")
 //	defer djinn.Close()
 //
-//	leases := djinn.Leases()
 //	registry := djinn.Registry()
+//
+// There is no single "LeaseMgr" to connect to — leasing is distributed.
+// Registry, Space, and EventMgr each grant their own leases and mount
+// LeaseService on their own connection; renew/cancel a lease by dialing
+// whichever one granted it (its address is carried on the Lease itself, in
+// GrantorHost/GrantorPort) via lease.DialLease. See
+// .claude/plans/distributed-leasing/PRD.md.
 package coordin8
 
 import (
@@ -22,7 +28,6 @@ import (
 
 // Client is the entry point for all Djinn interactions.
 type Client struct {
-	leaseConn    *grpc.ClientConn
 	registryConn *grpc.ClientConn
 	proxyConn    *grpc.ClientConn
 	spaceConn    *grpc.ClientConn
@@ -33,17 +38,9 @@ type Client struct {
 type ConnectOption func(*connectOptions)
 
 type connectOptions struct {
-	leaseAddr string
 	proxyAddr string
 	spaceAddr string
 	eventAddr string
-}
-
-// WithLeaseAddr pins the LeaseMgr address instead of looking it up through
-// Registry. Useful for tests, or reaching a service on a network segment
-// Registry's lookup result isn't itself reachable from.
-func WithLeaseAddr(addr string) ConnectOption {
-	return func(o *connectOptions) { o.leaseAddr = addr }
 }
 
 // WithProxyAddr pins the Proxy address instead of looking it up through Registry.
@@ -62,14 +59,14 @@ func WithEventAddr(addr string) ConnectOption {
 }
 
 // Connect dials Registry directly at registryAddr — the one address a
-// caller needs to know in advance — then looks up LeaseMgr, Proxy, Space,
-// and EventMgr through it, the same way any application service is
-// discovered via ServiceDiscovery. Works identically against a bundled
-// monolith or a fully split, multi-host deployment: Registry just returns
-// whatever address each service actually registered.
+// caller needs to know in advance — then looks up Proxy, Space, and EventMgr
+// through it, the same way any application service is discovered via
+// ServiceDiscovery. Works identically against a bundled monolith or a fully
+// split, multi-host deployment: Registry just returns whatever address each
+// service actually registered.
 //
-// Use WithLeaseAddr / WithProxyAddr / WithSpaceAddr / WithEventAddr to pin
-// a specific service's address instead of looking it up.
+// Use WithProxyAddr / WithSpaceAddr / WithEventAddr to pin a specific
+// service's address instead of looking it up.
 func Connect(registryAddr string, opts ...ConnectOption) (*Client, error) {
 	cfg := &connectOptions{}
 	for _, o := range opts {
@@ -93,11 +90,6 @@ func Connect(registryAddr string, opts ...ConnectOption) (*Client, error) {
 		return lookupAddr(registryClient, interfaceName)
 	}
 
-	leaseAddr, err := resolve(cfg.leaseAddr, "LeaseMgr")
-	if err != nil {
-		registryConn.Close()
-		return nil, err
-	}
 	proxyAddr, err := resolve(cfg.proxyAddr, "Proxy")
 	if err != nil {
 		registryConn.Close()
@@ -114,22 +106,14 @@ func Connect(registryAddr string, opts ...ConnectOption) (*Client, error) {
 		return nil, err
 	}
 
-	leaseConn, err := grpc.NewClient(leaseAddr, dialOpts...)
-	if err != nil {
-		registryConn.Close()
-		return nil, err
-	}
-
 	proxyConn, err := grpc.NewClient(proxyAddr, dialOpts...)
 	if err != nil {
-		leaseConn.Close()
 		registryConn.Close()
 		return nil, err
 	}
 
 	spaceConn, err := grpc.NewClient(spaceAddr, dialOpts...)
 	if err != nil {
-		leaseConn.Close()
 		registryConn.Close()
 		proxyConn.Close()
 		return nil, err
@@ -137,7 +121,6 @@ func Connect(registryAddr string, opts ...ConnectOption) (*Client, error) {
 
 	eventConn, err := grpc.NewClient(eventAddr, dialOpts...)
 	if err != nil {
-		leaseConn.Close()
 		registryConn.Close()
 		proxyConn.Close()
 		spaceConn.Close()
@@ -145,7 +128,6 @@ func Connect(registryAddr string, opts ...ConnectOption) (*Client, error) {
 	}
 
 	return &Client{
-		leaseConn:    leaseConn,
 		registryConn: registryConn,
 		proxyConn:    proxyConn,
 		spaceConn:    spaceConn,
@@ -175,9 +157,16 @@ func lookupAddr(registryClient pb.RegistryServiceClient, interfaceName string) (
 	return host + ":" + port, nil
 }
 
+// RegistryLeases returns a LeaseClient for renewing/cancelling leases that
+// Registry itself granted — every self-registration via Registry().Register()
+// returns one. LeaseService is mounted on Registry's own connection (no
+// separate dial needed), matching how Registry embeds its own LeaseManager.
+func (c *Client) RegistryLeases() *LeaseClient {
+	return NewLeaseClient(c.registryConn)
+}
+
 // Close releases all gRPC connections.
 func (c *Client) Close() error {
-	c.leaseConn.Close()
 	c.registryConn.Close()
 	c.proxyConn.Close()
 	c.spaceConn.Close()

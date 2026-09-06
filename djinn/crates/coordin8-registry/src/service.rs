@@ -49,6 +49,12 @@ pub struct RegistryServiceImpl {
     index: Arc<RegistryIndex>,
     lease_manager: Arc<dyn Leasing>,
     event_tx: RegistryBroadcast,
+    /// Stamped onto every `Lease` returned from `Register` so a holder
+    /// always knows where to renew — Registry grants its own entries'
+    /// leases in-process (see `.claude/plans/distributed-leasing/PRD.md`),
+    /// so this is simply Registry's own listening address.
+    grantor_host: String,
+    grantor_port: u16,
 }
 
 impl RegistryServiceImpl {
@@ -56,11 +62,27 @@ impl RegistryServiceImpl {
         index: Arc<RegistryIndex>,
         lease_manager: Arc<dyn Leasing>,
         event_tx: RegistryBroadcast,
+        grantor_host: impl Into<String>,
+        grantor_port: u16,
     ) -> Self {
         Self {
             index,
             lease_manager,
             event_tx,
+            grantor_host: grantor_host.into(),
+            grantor_port,
+        }
+    }
+
+    fn lease_to_proto(&self, lease: coordin8_core::LeaseRecord) -> Lease {
+        Lease {
+            lease_id: lease.lease_id,
+            resource_id: lease.resource_id,
+            granted_at: Some(to_timestamp(lease.granted_at)),
+            expires_at: Some(to_timestamp(lease.expires_at)),
+            ttl_seconds: lease.ttl_seconds,
+            grantor_host: self.grantor_host.clone(),
+            grantor_port: self.grantor_port as u32,
         }
     }
 }
@@ -124,13 +146,7 @@ impl RegistryService for RegistryServiceImpl {
 
             Ok(Response::new(RegisterResponse {
                 capability_id: r.capability_id,
-                lease: Some(Lease {
-                    lease_id: lease.lease_id,
-                    resource_id: lease.resource_id,
-                    granted_at: Some(to_timestamp(lease.granted_at)),
-                    expires_at: Some(to_timestamp(lease.expires_at)),
-                    ttl_seconds: lease.ttl_seconds,
-                }),
+                lease: Some(self.lease_to_proto(lease)),
             }))
         } else {
             // New registration.
@@ -181,13 +197,7 @@ impl RegistryService for RegistryServiceImpl {
 
             Ok(Response::new(RegisterResponse {
                 capability_id,
-                lease: Some(Lease {
-                    lease_id: lease.lease_id,
-                    resource_id: lease.resource_id,
-                    granted_at: Some(to_timestamp(lease.granted_at)),
-                    expires_at: Some(to_timestamp(lease.expires_at)),
-                    ttl_seconds: lease.ttl_seconds,
-                }),
+                lease: Some(self.lease_to_proto(lease)),
             }))
         }
     }

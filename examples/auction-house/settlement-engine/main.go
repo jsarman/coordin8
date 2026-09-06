@@ -53,7 +53,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("register: %v", err)
 	}
-	go djinn.Leases().KeepAlive(ctx, reg.LeaseID, 30*time.Second)
+	// Registration lease was granted by Registry itself, so it's renewed
+	// against Registry's own LeaseService (mounted on the same connection).
+	keepAliveFailures := djinn.RegistryLeases().KeepAlive(ctx, reg.LeaseID, 30*time.Second)
+	go func() {
+		for err := range keepAliveFailures {
+			log.Printf("lease renewal failed: %v", err)
+		}
+	}()
 	fmt.Printf("  registered: Settlement (lease=%s)\n", reg.LeaseID)
 
 	// Watch for auction expiry
@@ -82,7 +89,7 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
 	fmt.Println("\nShutting down...")
-	_ = djinn.Leases().Cancel(context.Background(), reg.LeaseID)
+	_ = djinn.RegistryLeases().Cancel(context.Background(), reg.LeaseID)
 }
 
 func settle(ctx context.Context, djinn *coordin8.Client, auction *coordin8.TupleRecord) {

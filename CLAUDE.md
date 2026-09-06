@@ -25,24 +25,26 @@ Boot order is strict and load-bearing. No circular dependencies.
 | Layer | Service | Port | Role |
 |-------|---------|------|------|
 | 0 | Provider | — | Storage backend (InMemory for dev) |
-| 1 | LeaseMgr | 9001 | TTL-based liveness contracts. Bedrock — everything depends on leases. |
-| 2a | Registry | 9002 | Attribute-based service discovery. Entries are leased — stop renewing, disappear. |
-| 2b | EventMgr | 9005 | Durable event delivery. Leased subscriptions, mailbox buffering, sequence numbers. |
-| 2c | Space | 9006 | Tuple store. `out/take/read/watch` with leased tuples and reactive streams. |
-| 3 | Proxy | 9003 | TCP forwarding. `OpenProxy(template)` → local port with live failover. |
-| 4 | TransactionMgr | 9004 | 2PC coordinator. Participants expose their own gRPC `ParticipantService`. |
+| 1 | Registry | 9002 | Attribute-based service discovery. Entries are leased — stop renewing, disappear. |
+| 1 | EventMgr | 9005 | Durable event delivery. Leased subscriptions, mailbox buffering, sequence numbers. |
+| 1 | Space | 9006 | Tuple store. `out/take/read/watch` with leased tuples and reactive streams. |
+| 2 | Proxy | 9003 | TCP forwarding. `OpenProxy(template)` → local port with live failover. |
+| 3 | TransactionMgr | 9004 | 2PC coordinator. Participants expose their own gRPC `ParticipantService`. |
+
+**Leasing is distributed, not a layer.** There is no standalone LeaseMgr service. Registry, EventMgr, Space, and TransactionMgr each embed their own `LeaseManager` and mount `LeaseService` on their own port — matching Jini/Apache River's `Landlord` pattern, where every service that grants leases manages them in-process rather than depending on a shared external service. This is why Registry, EventMgr, and Space all sit at Layer 1: none of them has a blocking dependency on anything else for their own operation. See `.claude/plans/distributed-leasing/PRD.md` for the full rationale (this replaced an earlier centralized-LeaseMgr design that turned out to be the root cause of a whole class of bootstrap-cycle bugs).
+
+A lease is self-describing: the `Lease` message carries `grantor_host`/`grantor_port`, so a holder always knows where to renew without prior knowledge of which service granted it (mirrors Jini's `LandlordLease`).
 
 ### Split Mode
 
-The default `djinn` binary boots all services in-process (bundled mode). Each service can also run as its own process via subcommands: `djinn lease | registry | event | space | txn | proxy`. Split services discover each other through Registry — `COORDIN8_REGISTRY=host:9002` is the one well-known endpoint. Everything else self-registers under a short-TTL self-lease and is found by template lookup.
+The default `djinn` binary boots all services in-process (bundled mode). Each service can also run as its own process via subcommands: `djinn registry | event | space | txn | proxy`. Split services discover each other through Registry — `COORDIN8_REGISTRY=host:9002` is the one well-known endpoint, used for self-registration and application-service discovery (unrelated to leasing, which each service handles itself).
 
-Three trait seams make this possible without touching manager internals:
+Two trait seams make this possible without touching manager internals:
 
-- **`Leasing` trait** (`coordin8-core`) — abstracts lease operations. `LocalLeasing` wraps the in-process `LeaseManager`; `RemoteLeasing` (`coordin8-bootstrap`) wraps a gRPC client with transparent reconnect + retry on transport failure. Services written against the trait work identically in bundled and split mode.
-- **`CapabilityResolver` trait** (`coordin8-core`) — abstracts Registry template resolution with the same local/remote split.
+- **`CapabilityResolver` trait** (`coordin8-core`) — abstracts Registry template resolution. `LocalCapabilityResolver` reads the in-process `RegistryStore` directly (bundled mode); `RemoteCapabilityResolver` (`coordin8-bootstrap`) forwards to a Registry gRPC client with transparent reconnect (split-mode Proxy).
 - **`TxnEnlister` trait** (`coordin8-core`) — abstracts 2PC enlist. `LocalTxnEnlister` (`coordin8-txn`) calls directly into `TxnManager`; `RemoteTxnEnlister` (`coordin8-bootstrap`) discovers TxnMgr lazily through Registry (Space can boot before TxnMgr exists). Space auto-enlists on the first transactional write/take.
 
-Split mode survives LeaseMgr kills: a `RemoteLeasing` service whose current LeaseMgr dies re-resolves through Registry and continues against whatever instance is still up. Chaos tests in `djinn/crates/coordin8-djinn/tests/split_chaos.rs` enforce this.
+(The `Leasing` trait still exists in `coordin8-core`, but only to decouple downstream code from the concrete `LeaseManager` type — there's no remote/local split for it anymore, since every service's `LeaseManager` is always its own, in-process.)
 
 ### Smart Proxy
 
@@ -87,7 +89,7 @@ coordin8/
     crates/
       coordin8-core/           Shared types, store traits
       coordin8-proto/          Generated gRPC bindings (tonic)
-      coordin8-lease/          LeaseMgr + reaper
+      coordin8-lease/          LeaseManager + reaper (library — each service embeds its own)
       coordin8-registry/       Registry + template matcher
       coordin8-proxy/          ProxyManager + TCP forwarding
       coordin8-event/          EventMgr (durable delivery, mailbox, broadcast)
@@ -174,7 +176,7 @@ docker compose down
 - `PROXY_BIND_HOST=0.0.0.0` is required in containers — default `127.0.0.1` binds only inside the container
 - Proxy port range `9100-9200` must be exposed in compose for host clients to reach forwarded ports
 - `ADVERTISE_HOST` on services tells the Djinn proxy where to forward across the Docker bridge (e.g., `greeter` resolves to the greeter container)
-- Health check: TCP probe on `:9001` (LeaseMgr). Greeter `depends_on` this with `condition: service_healthy`.
+- Health check: TCP probe on `:9002` (Registry — bundled mode doesn't mount the gRPC Health Checking Protocol on any port; only split mode's services do). Greeter `depends_on` this with `condition: service_healthy`.
 - `restart: on-failure` on greeter handles DNS race at container startup
 - `extra_hosts: host.docker.internal:host-gateway` on the djinn service — required on Linux so the 2PC coordinator can call back to participant servers running on the host. On Mac/Windows Docker Desktop this is automatic.
 
@@ -193,5 +195,5 @@ docker compose down
 
 - **Absence is a signal** — lease expiry is a coordination event, not an error. Don't catch it, handle it.
 - **No IPs, ports, or endpoints in application code** — location is resolved through Registry + Proxy
-- **Boot order is non-negotiable** — Provider → LeaseMgr → Registry/EventMgr → Proxy → TransactionMgr. Violating this causes undefined behavior.
+- **Boot order is non-negotiable** — Provider → Registry/EventMgr/Space → Proxy → TransactionMgr. Violating this causes undefined behavior (though leasing itself is no longer part of this chain — each service embeds its own).
 - **The Space carries indexes and handles, never heavy data** — the Information pattern separates coordination from data plane

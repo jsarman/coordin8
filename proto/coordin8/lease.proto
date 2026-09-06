@@ -7,9 +7,19 @@ import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/coordin8/proto/coordin8";
 
+// LeaseService is mounted by every service that grants leased resources
+// (Registry, Space, EventMgr, TransactionMgr), each on its own address —
+// there is no separate, centralized LeaseMgr. A holder renews/cancels by
+// calling the same service it already has a connection to; see `Lease`'s
+// `grantor_host`/`grantor_port` for the case where it doesn't.
 service LeaseService {
     rpc Grant(GrantRequest) returns (Lease);
     rpc Renew(RenewRequest) returns (Lease);
+    // Batch renewal — mirrors Jini's `Landlord.renewAll`/`LeaseMap`. A holder
+    // tracking many leases from the same grantor (e.g. a Space with
+    // thousands of live tuples) renews them all in one round trip instead of
+    // one RPC per lease.
+    rpc RenewAll(RenewAllRequest) returns (RenewAllResponse);
     rpc Cancel(CancelRequest) returns (google.protobuf.Empty);
     rpc WatchExpiry(WatchExpiryRequest) returns (stream ExpiryEvent);
 }
@@ -22,6 +32,27 @@ message GrantRequest {
 message RenewRequest {
     string lease_id = 1;
     uint64 ttl_seconds = 2;
+}
+
+message RenewAllRequest {
+    message Item {
+        string lease_id = 1;
+        uint64 ttl_seconds = 2;
+    }
+    repeated Item leases = 1;
+}
+
+message RenewAllResponse {
+    message Result {
+        string lease_id = 1;
+        // Set on success; absent (and error_message set) on failure.
+        Lease lease = 2;
+        // Empty on success. "not_found" / "expired" / other on failure —
+        // mirrors the Renew RPC's per-call error mapping, just inline
+        // instead of as a gRPC status per item.
+        string error_message = 3;
+    }
+    repeated Result results = 1;
 }
 
 message CancelRequest {
@@ -39,12 +70,30 @@ message Lease {
     google.protobuf.Timestamp granted_at = 3;
     google.protobuf.Timestamp expires_at = 4;
     // The TTL actually granted by the server (may be less than requested).
-    // 0 = FOREVER (no expiry).
+    // This is the authoritative value for scheduling renewal — derive "when
+    // to renew" from ttl_seconds (a duration), never from comparing
+    // expires_at against the holder's own clock, which can be skewed
+    // relative to the grantor's. expires_at is advisory/observational only.
+    // u64::MAX = FOREVER (no expiry). See LEASE_FOREVER in coordin8-core.
     uint64 ttl_seconds = 5;
+    // Where to renew/cancel this lease: the grantor's own address. Every
+    // service that grants leases mounts LeaseService on its own port, so a
+    // holder dials grantor_host:grantor_port directly rather than assuming
+    // one well-known LeaseMgr location. Mirrors Jini's LandlordLease, which
+    // carries a reference to its grantor so a holder never needs prior
+    // knowledge of who granted a lease it holds.
+    string grantor_host = 6;
+    uint32 grantor_port = 7;
+}
+
+enum ReclaimReason {
+    EXPIRED = 0;
+    CANCELLED = 1;
 }
 
 message ExpiryEvent {
     string lease_id = 1;
     string resource_id = 2;
     google.protobuf.Timestamp expired_at = 3;
+    ReclaimReason reason = 4;
 }

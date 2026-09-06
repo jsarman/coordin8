@@ -7,7 +7,10 @@ pub mod txn;
 
 pub use error::Error;
 pub use event::{DeliveryMode, EventRecord, EventStore, SubscriptionRecord};
-pub use lease::{LeaseConfig, LeaseRecord, LeaseStore, Leasing, LEASE_ANY, LEASE_FOREVER};
+pub use lease::{
+    LeaseConfig, LeaseReclaimed, LeaseRecord, LeaseStore, Leasing, ReclaimReason, LEASE_ANY,
+    LEASE_FOREVER,
+};
 pub use registry::{CapabilityResolver, RegistryEntry, RegistryStore, TransportConfig};
 pub use space::{SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord};
 pub use txn::{
