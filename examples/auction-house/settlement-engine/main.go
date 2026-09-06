@@ -63,6 +63,14 @@ func main() {
 	}()
 	fmt.Printf("  registered: Settlement (lease=%s)\n", reg.LeaseID)
 
+	// Reconcile before going live: catch any auction that already expired while
+	// this engine was down. The live Notify watch below only ever sees expiry
+	// events that fire while it's connected — a JavaSpaces-style notify(), not a
+	// durable one — so without this pass, an auction that expires during an
+	// outage would never be settled. See createAuction's "auction-meta" write
+	// (durable, TTL=FOREVER) in AuctionService.java for the durable side of this.
+	reconcile(ctx, djinn)
+
 	// Watch for auction expiry
 	fmt.Println("  watching for expired auctions...")
 	ch, err := djinn.Space().Notify(ctx, coordin8.NotifyOpts{
@@ -79,7 +87,7 @@ func main() {
 			if evt.Tuple == nil {
 				continue
 			}
-			settle(ctx, djinn, evt.Tuple)
+			settleByAuctionID(ctx, djinn, evt.Tuple.Attrs["auction_id"])
 		}
 	}()
 
@@ -92,13 +100,87 @@ func main() {
 	_ = djinn.RegistryLeases().Cancel(context.Background(), reg.LeaseID)
 }
 
-func settle(ctx context.Context, djinn *coordin8.Client, auction *coordin8.TupleRecord) {
-	auctionID := auction.Attrs["auction_id"]
-	item := auction.Attrs["item"]
-	currentBid, _ := strconv.ParseFloat(auction.Attrs["current_bid"], 64)
-	reservePrice, _ := strconv.ParseFloat(auction.Attrs["reserve_price"], 64)
-	currentBidder := auction.Attrs["current_bidder"]
+// reconcile scans for auctions whose durable "auction-meta" record (written by
+// AuctionService at creation time, TTL=FOREVER) is still present past its
+// expires_at — meaning they expired without ever being settled, most likely
+// because this engine was down at the time. Runs once at startup, before the
+// live Notify watch takes over for the normal case.
+func reconcile(ctx context.Context, djinn *coordin8.Client) {
+	metas, err := djinn.Space().Contents(ctx, map[string]string{"type": "auction-meta"}, "")
+	if err != nil {
+		log.Printf("  ! reconcile: failed to scan auction-meta: %v", err)
+		return
+	}
 
+	now := time.Now().Unix()
+	pending := 0
+	for _, m := range metas {
+		expiresAt, _ := strconv.ParseInt(m.Attrs["expires_at"], 10, 64)
+		if expiresAt > now {
+			continue // not due yet — the live watch will catch it normally
+		}
+		pending++
+		auctionID := m.Attrs["auction_id"]
+		fmt.Printf("  ↻ reconciling auction expired while offline: %s\n", auctionID)
+		settleByAuctionID(ctx, djinn, auctionID)
+	}
+	if pending > 0 {
+		fmt.Printf("  reconciliation settled %d auction(s)\n", pending)
+	}
+}
+
+// settleByAuctionID reconstructs an auction's outcome entirely from durable
+// Space state — the permanent "bid" tuples (already written by AuctionService
+// for audit purposes) and the durable "auction-meta" tuple — rather than from
+// whatever ephemeral payload a live Notify event happened to carry. This is
+// what makes settlement correct whether it's triggered by the live watch or by
+// reconcile() after a restart: both paths go through the same durable
+// reconstruction, so there's exactly one way an auction gets settled.
+func settleByAuctionID(ctx context.Context, djinn *coordin8.Client, auctionID string) {
+	// Idempotency guard — the live watch and reconcile() could both reach the
+	// same auction (e.g. one expires right as the engine restarts).
+	if existing, _ := djinn.Space().Read(ctx, coordin8.ReadOpts{
+		Template: map[string]string{"type": "sale", "auction_id": auctionID},
+	}); existing != nil {
+		return
+	}
+
+	meta, err := djinn.Space().Read(ctx, coordin8.ReadOpts{
+		Template: map[string]string{"type": "auction-meta", "auction_id": auctionID},
+	})
+	if err != nil || meta == nil {
+		log.Printf("  ! settle %s: no durable auction-meta found, skipping", auctionID)
+		return
+	}
+
+	bids, err := djinn.Space().Contents(ctx, map[string]string{"type": "bid", "auction_id": auctionID}, "")
+	if err != nil {
+		log.Printf("  ! settle %s: failed to read bid history: %v", auctionID, err)
+		return
+	}
+
+	var currentBid float64
+	var currentBidder string
+	for _, b := range bids {
+		amount, _ := strconv.ParseFloat(b.Attrs["amount"], 64)
+		if amount > currentBid {
+			currentBid = amount
+			currentBidder = b.Attrs["bidder"]
+		}
+	}
+
+	item := meta.Attrs["item"]
+	reservePrice, _ := strconv.ParseFloat(meta.Attrs["reserve_price"], 64)
+
+	settle(ctx, djinn, auctionID, item, currentBid, currentBidder, reservePrice)
+
+	// Done with the reconciliation record — settled auctions aren't rescanned.
+	if err := djinn.Space().CancelTuple(ctx, meta.TupleID); err != nil {
+		log.Printf("  ! settle %s: failed to clean up auction-meta: %v", auctionID, err)
+	}
+}
+
+func settle(ctx context.Context, djinn *coordin8.Client, auctionID, item string, currentBid float64, currentBidder string, reservePrice float64) {
 	fmt.Printf("\n  ⏰ Auction expired: %s (%s)\n", item, auctionID)
 
 	// Determine outcome
