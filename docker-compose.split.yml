@@ -16,6 +16,10 @@
 # separate, not-yet-done roadmap item (item 4); running more than one
 # instance of any of these services isn't meaningful until that lands,
 # since in-memory stores wouldn't be shared across instances.
+#
+# Add COORDIN8_LOG_FORMAT=json to any service's environment for opt-in
+# structured (one JSON object per line) logs — see
+# .claude/plans/observability/PRD.md. Unset = today's plaintext, unchanged.
 
 services:
   registry:

@@ -74,12 +74,7 @@ async fn main() -> Result<()> {
     // under `docker healthcheck`, and its own pass/fail is signaled purely
     // via exit code, not logs.
     if !matches!(cli.command, Some(Command::Healthcheck { .. })) {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive("coordin8=info".parse()?),
-            )
-            .init();
+        coordin8_observability::LoggingConfig::from_env().init();
     }
 
     match cli.command {
