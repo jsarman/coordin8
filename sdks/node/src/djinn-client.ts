@@ -4,6 +4,7 @@ import { RegistryClient } from "./registry-client";
 import { ProxyClient } from "./proxy-client";
 import { SpaceClient } from "./space-client";
 import { EventClient } from "./event-client";
+import { interceptorsFor } from "./auth";
 
 /**
  * Options for DjinnClient.connect(). Use these to pin a specific service's
@@ -16,6 +17,13 @@ export interface ConnectOptions {
   spaceAddr?: string;
   /** Pin EventMgr's address instead of looking it up through Registry. */
   eventAddr?: string;
+  /**
+   * Bearer token attached to every call on every connection — required
+   * against a Djinn with COORDIN8_JWT_SECRET set, harmless (ignored)
+   * against one that doesn't have auth enabled. Mint one with
+   * `coordin8 auth mint-token`; see .claude/plans/grpc-security/PRD.md.
+   */
+  token?: string;
 }
 
 /**
@@ -33,6 +41,7 @@ export class DjinnClient {
   private readonly proxyChannel: grpc.Channel;
   private readonly spaceChannel: grpc.Channel;
   private readonly eventChannel: grpc.Channel;
+  private readonly interceptors: grpc.Interceptor[];
   private readonly _registry: RegistryClient;
   private readonly _proxy: ProxyClient;
   private readonly _space: SpaceClient;
@@ -42,16 +51,18 @@ export class DjinnClient {
     registryChannel: grpc.Channel,
     proxyChannel: grpc.Channel,
     spaceChannel: grpc.Channel,
-    eventChannel: grpc.Channel
+    eventChannel: grpc.Channel,
+    interceptors: grpc.Interceptor[]
   ) {
     this.registryChannel = registryChannel;
     this.proxyChannel = proxyChannel;
     this.spaceChannel = spaceChannel;
     this.eventChannel = eventChannel;
-    this._registry = new RegistryClient(registryChannel);
-    this._proxy = new ProxyClient(proxyChannel);
-    this._space = new SpaceClient(spaceChannel);
-    this._event = new EventClient(eventChannel);
+    this.interceptors = interceptors;
+    this._registry = new RegistryClient(registryChannel, interceptors);
+    this._proxy = new ProxyClient(proxyChannel, interceptors);
+    this._space = new SpaceClient(spaceChannel, interceptors);
+    this._event = new EventClient(eventChannel, interceptors);
   }
 
   /**
@@ -67,8 +78,9 @@ export class DjinnClient {
    */
   static async connect(registryAddr: string, opts: ConnectOptions = {}): Promise<DjinnClient> {
     const creds = grpc.credentials.createInsecure();
+    const interceptors = interceptorsFor(opts.token);
     const registryChannel = new grpc.Channel(registryAddr, creds, {});
-    const registry = new RegistryClient(registryChannel);
+    const registry = new RegistryClient(registryChannel, interceptors);
 
     let proxyAddr: string;
     let spaceAddr: string;
@@ -88,7 +100,7 @@ export class DjinnClient {
     const spaceChannel = new grpc.Channel(spaceAddr, creds, {});
     const eventChannel = new grpc.Channel(eventAddr, creds, {});
 
-    return new DjinnClient(registryChannel, proxyChannel, spaceChannel, eventChannel);
+    return new DjinnClient(registryChannel, proxyChannel, spaceChannel, eventChannel, interceptors);
   }
 
   registry(): RegistryClient { return this._registry; }
@@ -103,7 +115,7 @@ export class DjinnClient {
    * matching how Registry embeds its own LeaseManager.
    */
   registryLeases(): LeaseClient {
-    return LeaseClient.fromChannel(this.registryChannel);
+    return LeaseClient.fromChannel(this.registryChannel, this.interceptors);
   }
 
   close(): void {

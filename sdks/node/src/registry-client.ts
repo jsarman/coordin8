@@ -53,11 +53,11 @@ function eventTypeToString(t: RegistryEvent_EventType): "registered" | "expired"
 export class RegistryClient {
   private readonly stub: RegistryServiceClient;
 
-  constructor(channel: grpc.Channel) {
+  constructor(channel: grpc.Channel, interceptors: grpc.Interceptor[] = []) {
     this.stub = new RegistryServiceClient(
       "passthrough:///djinn",
       grpc.credentials.createInsecure(),
-      { channelOverride: channel }
+      { channelOverride: channel, interceptors }
     );
   }
 
