@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/coordin8-core",
     "crates/coordin8-proto",
+    "crates/coordin8-auth",
     "crates/coordin8-lease",
     "crates/coordin8-registry",
     "crates/coordin8-proxy",
@@ -19,6 +20,7 @@ members = [
 # Internal crates
 coordin8-core      = { path = "crates/coordin8-core" }
 coordin8-proto     = { path = "crates/coordin8-proto" }
+coordin8-auth      = { path = "crates/coordin8-auth" }
 coordin8-bootstrap = { path = "crates/coordin8-bootstrap" }
 coordin8-lease   = { path = "crates/coordin8-lease" }
 coordin8-registry = { path = "crates/coordin8-registry" }

@@ -18,6 +18,7 @@ use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tracing::info;
 
+use coordin8_auth::AuthConfig;
 use coordin8_bootstrap::{self_register, RemoteCapabilityResolver, RemoteTxnEnlister};
 use coordin8_core::{
     EventStore, LeaseReclaimed, LeaseStore, Leasing, RegistryStore, SpaceStore, TxnStore,
@@ -58,6 +59,35 @@ pub fn advertise_host() -> String {
     std::env::var("COORDIN8_ADVERTISE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
+/// Dial Registry at `registry_url`, retrying with a fixed backoff, and wrap
+/// the client with `client_auth` (Decision 8 —
+/// `.claude/plans/grpc-security/PRD.md`) so every internal self-registration
+/// call attaches whatever that strategy provides (nothing, by default).
+async fn dial_registry_authed(
+    registry_url: &str,
+    client_auth: &coordin8_auth::ClientAuthConfig,
+) -> coordin8_proto::coordin8::registry_service_client::RegistryServiceClient<
+    coordin8_auth::AuthedChannel,
+> {
+    loop {
+        match tonic::transport::Channel::from_shared(registry_url.to_string())
+            .expect("registry_url is always a valid URL by this point")
+            .connect()
+            .await
+        {
+            Ok(channel) => {
+                return coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::new(
+                    coordin8_auth::wrap_channel(channel, client_auth),
+                )
+            }
+            Err(e) => {
+                tracing::warn!("registry dial ({registry_url}) failed: {e}, retrying in 200ms");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+}
+
 /// Self-register a bundled-mode service into the same process's Registry.
 ///
 /// Split mode already self-registers every service (see the `run_*_on_listener`
@@ -71,22 +101,11 @@ pub fn advertise_host() -> String {
 /// Retries the initial dial (Registry's own server task may not have started
 /// accepting yet) and then holds the registration alive for the process
 /// lifetime — matching the split-mode self-registration futures' pattern.
-fn spawn_bundled_self_register(interface: &'static str, port: u16) {
+fn spawn_bundled_self_register(interface: &'static str, port: u16, client_auth: AuthConfig) {
     let advertise = advertise_host();
+    let client_auth = client_auth.client_config(interface);
     tokio::spawn(async move {
-        let registry_client = loop {
-            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
-                "http://localhost:9002".to_string(),
-            )
-            .await
-            {
-                Ok(c) => break c,
-                Err(e) => {
-                    tracing::warn!("{interface}: registry dial failed: {e}, retrying in 200ms");
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            }
-        };
+        let registry_client = dial_registry_authed("http://localhost:9002", &client_auth).await;
 
         match self_register(
             registry_client,
@@ -211,6 +230,11 @@ async fn space_store_from_env() -> Result<Arc<dyn SpaceStore>> {
 
 // ── Embedded Landlord (pub(crate) — every leasing service builds one) ───────
 
+/// A generated gRPC server type wrapped with [`AuthConfig`]'s interceptor —
+/// the concrete type every service's own primary/lease server ends up as
+/// once auth is wired in (Decision 3 — `.claude/plans/grpc-security/PRD.md`).
+type Authed<S> = tonic::service::interceptor::InterceptedService<S, AuthConfig>;
+
 /// Build an embedded Landlord for a service that grants leased resources:
 /// its own `LeaseManager`, its own reaper task, and the `LeaseService` gRPC
 /// glue ready to mount on that service's own server. `grantor_host`/
@@ -225,7 +249,11 @@ async fn embedded_landlord(
     namespace: &str,
     grantor_host: &str,
     grantor_port: u16,
-) -> Result<(Arc<LeaseManager>, LeaseServiceServer<LeaseServiceImpl>)> {
+    auth_config: &AuthConfig,
+) -> Result<(
+    Arc<LeaseManager>,
+    Authed<LeaseServiceServer<LeaseServiceImpl>>,
+)> {
     let store = lease_store_from_env(namespace).await?;
     let config = coordin8_core::LeaseConfig::from_env_for(Some(namespace));
     info!(
@@ -245,12 +273,10 @@ async fn embedded_landlord(
         coordin8_lease::reaper::run_reaper(reaper_manager, reaper_tx, Duration::from_secs(1)).await;
     });
 
-    let svc = LeaseServiceServer::new(LeaseServiceImpl::new(
-        Arc::clone(&manager),
-        expiry_tx,
-        grantor_host,
-        grantor_port,
-    ));
+    let svc = LeaseServiceServer::with_interceptor(
+        LeaseServiceImpl::new(Arc::clone(&manager), expiry_tx, grantor_host, grantor_port),
+        auth_config.clone(),
+    );
 
     Ok((manager, svc))
 }
@@ -306,9 +332,17 @@ pub async fn run_all() -> Result<()> {
 
     let host = advertise_host();
 
+    // gRPC auth is opt-in and off unless COORDIN8_JWT_SECRET is set — see
+    // .claude/plans/grpc-security/PRD.md Decision 6. One shared config for
+    // the whole bundled process.
+    let auth_config = AuthConfig::from_env();
+    if auth_config.enabled() {
+        info!("  gRPC auth: enabled");
+    }
+
     // ── Registry ─────────────────────────────────────────────────────────────
     let (registry_lease_manager, lease_svc_for_registry) =
-        embedded_landlord("registry", &host, 9002).await?;
+        embedded_landlord("registry", &host, 9002, &auth_config).await?;
     let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
     let registry_index = Arc::new(RegistryIndex::new(registry_store.clone()));
 
@@ -342,7 +376,7 @@ pub async fn run_all() -> Result<()> {
 
     // ── EventMgr ─────────────────────────────────────────────────────────────
     let (event_lease_manager, lease_svc_for_event) =
-        embedded_landlord("event", &host, 9005).await?;
+        embedded_landlord("event", &host, 9005, &auth_config).await?;
     let event_leasing: Arc<dyn Leasing> = event_lease_manager.clone();
     let (event_tx, _) = broadcast::channel::<coordin8_core::EventRecord>(256);
     let event_manager = Arc::new(EventManager::new(event_store, event_leasing, event_tx));
@@ -371,9 +405,14 @@ pub async fn run_all() -> Result<()> {
     info!("  ✓ Proxy: ready");
 
     // ── TransactionMgr ───────────────────────────────────────────────────────
-    let (txn_lease_manager, lease_svc_for_txn) = embedded_landlord("txn", &host, 9004).await?;
+    let (txn_lease_manager, lease_svc_for_txn) =
+        embedded_landlord("txn", &host, 9004, &auth_config).await?;
     let txn_leasing: Arc<dyn Leasing> = txn_lease_manager.clone();
-    let txn_manager = Arc::new(TxnManager::new(txn_store, txn_leasing));
+    let txn_manager = Arc::new(TxnManager::with_client_auth(
+        txn_store,
+        txn_leasing,
+        auth_config.client_config("txn"),
+    ));
 
     {
         let txn_expiry_mgr = Arc::clone(&txn_manager);
@@ -395,7 +434,7 @@ pub async fn run_all() -> Result<()> {
 
     // ── Space ────────────────────────────────────────────────────────────────
     let (space_lease_manager, lease_svc_for_space) =
-        embedded_landlord("space", &host, 9006).await?;
+        embedded_landlord("space", &host, 9006, &auth_config).await?;
     let space_leasing: Arc<dyn Leasing> = space_lease_manager.clone();
     let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
@@ -439,23 +478,30 @@ pub async fn run_all() -> Result<()> {
     let space_addr = "0.0.0.0:9006".parse()?;
 
     let registry_leasing: Arc<dyn Leasing> = registry_lease_manager;
-    let registry_svc = RegistryServiceServer::new(RegistryServiceImpl::new(
-        registry_index,
-        registry_leasing,
-        registry_tx,
-        &host,
-        9002,
-    ));
-    let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
-    let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(txn_manager, &host, 9004));
-    let event_svc = EventServiceServer::new(EventServiceImpl::new(event_manager, &host, 9005));
-    let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(
-        Arc::clone(&space_manager),
-        &host,
-        9006,
-    ));
-    let space_participant_svc =
-        ParticipantServiceServer::new(SpaceParticipantService::new(space_manager));
+    let registry_svc = RegistryServiceServer::with_interceptor(
+        RegistryServiceImpl::new(registry_index, registry_leasing, registry_tx, &host, 9002),
+        auth_config.clone(),
+    );
+    let proxy_svc = ProxyServiceServer::with_interceptor(
+        ProxyServiceImpl::new(proxy_manager),
+        auth_config.clone(),
+    );
+    let txn_svc = TransactionServiceServer::with_interceptor(
+        TxnServiceImpl::new(txn_manager, &host, 9004),
+        auth_config.clone(),
+    );
+    let event_svc = EventServiceServer::with_interceptor(
+        EventServiceImpl::new(event_manager, &host, 9005),
+        auth_config.clone(),
+    );
+    let space_svc = SpaceServiceServer::with_interceptor(
+        SpaceServiceImpl::new(Arc::clone(&space_manager), &host, 9006),
+        auth_config.clone(),
+    );
+    let space_participant_svc = ParticipantServiceServer::with_interceptor(
+        SpaceParticipantService::new(space_manager),
+        auth_config.clone(),
+    );
 
     info!(
         "  ✓ Registry:       listening on {} (+ LeaseService)",
@@ -480,10 +526,10 @@ pub async fn run_all() -> Result<()> {
     // No "LeaseMgr" entry — leasing is distributed, there's no single
     // interface to look up; a holder renews via the grantor_host/port
     // already carried on the Lease it holds.
-    spawn_bundled_self_register("EventMgr", 9005);
-    spawn_bundled_self_register("Proxy", 9003);
-    spawn_bundled_self_register("TransactionMgr", 9004);
-    spawn_bundled_self_register("Space", 9006);
+    spawn_bundled_self_register("EventMgr", 9005, auth_config.clone());
+    spawn_bundled_self_register("Proxy", 9003, auth_config.clone());
+    spawn_bundled_self_register("TransactionMgr", 9004, auth_config.clone());
+    spawn_bundled_self_register("Space", 9006, auth_config.clone());
 
     info!("Djinn ready.");
 
@@ -539,11 +585,13 @@ pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Resu
     let actual_addr = listener.local_addr()?;
     let host = advertise_host();
 
+    let auth_config = AuthConfig::from_env();
+
     let registry_store = registry_store_from_env().await?;
     let registry_index = Arc::new(RegistryIndex::new(registry_store));
 
     let (lease_manager, lease_svc) =
-        embedded_landlord("registry", &host, actual_addr.port()).await?;
+        embedded_landlord("registry", &host, actual_addr.port(), &auth_config).await?;
     let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
 
     {
@@ -574,13 +622,16 @@ pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Resu
     }
 
     let leasing: Arc<dyn Leasing> = lease_manager;
-    let registry_svc = RegistryServiceServer::new(RegistryServiceImpl::new(
-        registry_index,
-        leasing,
-        registry_tx,
-        &host,
-        actual_addr.port(),
-    ));
+    let registry_svc = RegistryServiceServer::with_interceptor(
+        RegistryServiceImpl::new(
+            registry_index,
+            leasing,
+            registry_tx,
+            &host,
+            actual_addr.port(),
+        ),
+        auth_config.clone(),
+    );
 
     // No blocking external dependency (leasing is embedded, not remote) —
     // healthy the moment it's about to serve.
@@ -631,9 +682,10 @@ pub async fn run_event_on_listener(
 ) -> Result<()> {
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
+    let auth_config = AuthConfig::from_env();
 
     let (lease_manager, lease_svc) =
-        embedded_landlord("event", advertise_host, advertise_port).await?;
+        embedded_landlord("event", advertise_host, advertise_port, &auth_config).await?;
     let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     let event_store = event_store_from_env().await?;
@@ -654,11 +706,10 @@ pub async fn run_event_on_listener(
         );
     }
 
-    let event_svc = EventServiceServer::new(EventServiceImpl::new(
-        Arc::clone(&event_manager),
-        advertise_host,
-        advertise_port,
-    ));
+    let event_svc = EventServiceServer::with_interceptor(
+        EventServiceImpl::new(Arc::clone(&event_manager), advertise_host, advertise_port),
+        auth_config.clone(),
+    );
 
     // No blocking external dependency — healthy the moment it's about to serve.
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -672,21 +723,10 @@ pub async fn run_event_on_listener(
 
     let registry_url = registry_addr.to_string();
     let advertise_host_owned = advertise_host.to_string();
+    let self_client_auth = auth_config.client_config("EventMgr");
 
     let register_fut = async move {
-        let registry_client = loop {
-            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
-                registry_url.clone(),
-            )
-            .await
-            {
-                Ok(c) => break c,
-                Err(e) => {
-                    tracing::warn!("registry dial failed: {e}, retrying in 500ms");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-        };
+        let registry_client = dial_registry_authed(&registry_url, &self_client_auth).await;
 
         match self_register(
             registry_client,
@@ -761,16 +801,20 @@ pub async fn run_space_on_listener(
 ) -> Result<()> {
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
+    let auth_config = AuthConfig::from_env();
 
     let (lease_manager, lease_svc) =
-        embedded_landlord("space", advertise_host, advertise_port).await?;
+        embedded_landlord("space", advertise_host, advertise_port, &auth_config).await?;
     let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     // Split mode: auto-enlist dials TxnMgr over Registry lazily — no I/O
     // happens at boot, so Space can come up with no TxnMgr in sight and still
     // serve non-transactional traffic. The first transactional write/take
     // drives discovery on demand.
-    let space_enlister = Arc::new(RemoteTxnEnlister::new(registry_addr));
+    let space_enlister = Arc::new(RemoteTxnEnlister::new(
+        registry_addr,
+        auth_config.client_config("space"),
+    ));
     let space_participant_endpoint = format!("{advertise_host}:{advertise_port}");
 
     let space_store = space_store_from_env().await?;
@@ -803,13 +847,14 @@ pub async fn run_space_on_listener(
         );
     }
 
-    let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(
-        Arc::clone(&space_manager),
-        advertise_host,
-        advertise_port,
-    ));
-    let space_participant_svc =
-        ParticipantServiceServer::new(SpaceParticipantService::new(space_manager));
+    let space_svc = SpaceServiceServer::with_interceptor(
+        SpaceServiceImpl::new(Arc::clone(&space_manager), advertise_host, advertise_port),
+        auth_config.clone(),
+    );
+    let space_participant_svc = ParticipantServiceServer::with_interceptor(
+        SpaceParticipantService::new(space_manager),
+        auth_config.clone(),
+    );
 
     // No blocking external dependency — healthy the moment it's about to serve.
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -823,21 +868,10 @@ pub async fn run_space_on_listener(
 
     let registry_url = registry_addr.to_string();
     let advertise_host_owned = advertise_host.to_string();
+    let self_client_auth = auth_config.client_config("Space");
 
     let register_fut = async move {
-        let registry_client = loop {
-            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
-                registry_url.clone(),
-            )
-            .await
-            {
-                Ok(c) => break c,
-                Err(e) => {
-                    tracing::warn!("registry dial failed: {e}, retrying in 500ms");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-        };
+        let registry_client = dial_registry_authed(&registry_url, &self_client_auth).await;
 
         match self_register(
             registry_client,
@@ -910,13 +944,18 @@ pub async fn run_txn_on_listener(
 ) -> Result<()> {
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
+    let auth_config = AuthConfig::from_env();
 
     let (lease_manager, lease_svc) =
-        embedded_landlord("txn", advertise_host, advertise_port).await?;
+        embedded_landlord("txn", advertise_host, advertise_port, &auth_config).await?;
     let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     let txn_store = txn_store_from_env().await?;
-    let txn_manager = Arc::new(TxnManager::new(txn_store, leasing));
+    let txn_manager = Arc::new(TxnManager::with_client_auth(
+        txn_store,
+        leasing,
+        auth_config.client_config("txn"),
+    ));
 
     {
         let expiry_txn_mgr = Arc::clone(&txn_manager);
@@ -935,11 +974,10 @@ pub async fn run_txn_on_listener(
         );
     }
 
-    let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(
-        txn_manager,
-        advertise_host,
-        advertise_port,
-    ));
+    let txn_svc = TransactionServiceServer::with_interceptor(
+        TxnServiceImpl::new(txn_manager, advertise_host, advertise_port),
+        auth_config.clone(),
+    );
 
     // No blocking external dependency — healthy the moment it's about to serve.
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -953,21 +991,10 @@ pub async fn run_txn_on_listener(
 
     let registry_url = registry_addr.to_string();
     let advertise_host_owned = advertise_host.to_string();
+    let self_client_auth = auth_config.client_config("TransactionMgr");
 
     let register_fut = async move {
-        let registry_client = loop {
-            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
-                registry_url.clone(),
-            )
-            .await
-            {
-                Ok(c) => break c,
-                Err(e) => {
-                    tracing::warn!("registry dial failed: {e}, retrying in 500ms");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-        };
+        let registry_client = dial_registry_authed(&registry_url, &self_client_auth).await;
 
         match self_register(
             registry_client,
@@ -1042,6 +1069,7 @@ pub async fn run_proxy_on_listener(
 ) -> Result<()> {
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
+    let auth_config = AuthConfig::from_env();
 
     // Construct immediately against a not-yet-resolved Registry — see
     // PendingCapabilityResolver. Discovery happens in the background task
@@ -1063,8 +1091,9 @@ pub async fn run_proxy_on_listener(
         let pending_resolver = Arc::clone(&pending_resolver);
         let registry_addr = registry_addr.to_string();
         let mut health_reporter = health_reporter.clone();
+        let client_auth = auth_config.client_config("proxy");
         tokio::spawn(async move {
-            let resolved = RemoteCapabilityResolver::connect(&registry_addr)
+            let resolved = RemoteCapabilityResolver::connect(&registry_addr, client_auth)
                 .await
                 .expect("RemoteCapabilityResolver::connect retries forever, never returns Err");
             pending_resolver.install(resolved).await;
@@ -1075,7 +1104,10 @@ pub async fn run_proxy_on_listener(
         });
     }
 
-    let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
+    let proxy_svc = ProxyServiceServer::with_interceptor(
+        ProxyServiceImpl::new(proxy_manager),
+        auth_config.clone(),
+    );
 
     info!(
         "  ✓ Proxy (split): listening on {actual_addr}, advertising {advertise_host}:{advertise_port}"
@@ -1083,21 +1115,10 @@ pub async fn run_proxy_on_listener(
 
     let registry_url = registry_addr.to_string();
     let advertise_host_owned = advertise_host.to_string();
+    let self_client_auth = auth_config.client_config("Proxy");
 
     let register_fut = async move {
-        let registry_client = loop {
-            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
-                registry_url.clone(),
-            )
-            .await
-            {
-                Ok(c) => break c,
-                Err(e) => {
-                    tracing::warn!("registry dial failed: {e}, retrying in 500ms");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-        };
+        let registry_client = dial_registry_authed(&registry_url, &self_client_auth).await;
 
         match self_register(
             registry_client,

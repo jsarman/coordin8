@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use coordin8_auth::{wrap_channel, AuthedChannel, ClientAuthConfig};
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
@@ -92,13 +93,19 @@ where
 ///
 /// Helper shared by service-specific discovery functions. Returns a connected
 /// tonic `Channel` that the caller wraps in the appropriate generated client.
-async fn discover_service_channel(registry_addr: &str, interface: &str) -> Result<Channel, Error> {
+/// The `Lookup` call this makes against Registry is itself an internal call,
+/// so it goes through `client_auth` too.
+async fn discover_service_channel(
+    registry_addr: &str,
+    interface: &str,
+    client_auth: &ClientAuthConfig,
+) -> Result<Channel, Error> {
     let channel = Channel::from_shared(registry_addr.to_string())
         .map_err(|_| Error::MissingTransport("invalid registry address"))?
         .connect()
         .await?;
 
-    let mut registry = RegistryServiceClient::new(channel);
+    let mut registry = RegistryServiceClient::with_interceptor(channel, client_auth.interceptor());
 
     let template = HashMap::from([("interface".to_string(), interface.to_string())]);
 
@@ -133,10 +140,15 @@ async fn discover_service_channel(registry_addr: &str, interface: &str) -> Resul
 /// exponential backoff. The discovery template is `interface=TransactionMgr`.
 pub async fn discover_txn_mgr(
     registry_addr: &str,
-) -> Result<TransactionServiceClient<Channel>, Error> {
+    client_auth: &ClientAuthConfig,
+) -> Result<TransactionServiceClient<AuthedChannel>, Error> {
     let client = retry_forever("discover_txn_mgr", || async {
-        let channel = discover_service_channel(registry_addr, "TransactionMgr").await?;
-        Ok::<_, Error>(TransactionServiceClient::new(channel))
+        let channel =
+            discover_service_channel(registry_addr, "TransactionMgr", client_auth).await?;
+        Ok::<_, Error>(TransactionServiceClient::new(wrap_channel(
+            channel,
+            client_auth,
+        )))
     })
     .await;
     info!(registry = registry_addr, "discovered TransactionMgr");
@@ -188,7 +200,7 @@ impl SelfRegistrationHandle {
 /// Returns `Error` if the initial `Register` call fails so callers can
 /// distinguish transient Registry unavailability from permanent failures.
 pub async fn self_register(
-    mut registry_client: RegistryServiceClient<Channel>,
+    mut registry_client: RegistryServiceClient<AuthedChannel>,
     interface: &str,
     attrs: HashMap<String, String>,
     host: &str,
@@ -287,30 +299,44 @@ pub async fn self_register(
 /// reports "no capability matches this template" via `Status::not_found`.
 pub struct RemoteCapabilityResolver {
     registry_addr: String,
-    client: Mutex<RegistryServiceClient<Channel>>,
+    client_auth: ClientAuthConfig,
+    client: Mutex<RegistryServiceClient<AuthedChannel>>,
 }
 
 impl RemoteCapabilityResolver {
     /// Build a `RemoteCapabilityResolver` by dialing the Registry at
     /// `registry_addr`. Retries forever with exponential backoff until the
-    /// Registry is reachable.
-    pub async fn connect(registry_addr: &str) -> Result<Self, Error> {
+    /// Registry is reachable. `client_auth` (Decision 8) controls what, if
+    /// anything, this resolver attaches to its own outbound `Lookup` calls.
+    pub async fn connect(
+        registry_addr: &str,
+        client_auth: ClientAuthConfig,
+    ) -> Result<Self, Error> {
         let client = retry_forever("registry_dial", || async {
-            RegistryServiceClient::connect(registry_addr.to_string())
-                .await
-                .map_err(Error::from)
+            let channel = Channel::from_shared(registry_addr.to_string())
+                .map_err(|_| Error::MissingTransport("invalid registry address"))?
+                .connect()
+                .await?;
+            Ok::<_, Error>(RegistryServiceClient::new(wrap_channel(
+                channel,
+                &client_auth,
+            )))
         })
         .await;
         Ok(Self {
             registry_addr: registry_addr.to_string(),
+            client_auth,
             client: Mutex::new(client),
         })
     }
 
     async fn reconnect(&self) -> Result<(), CoreError> {
-        let fresh = RegistryServiceClient::connect(self.registry_addr.clone())
+        let channel = Channel::from_shared(self.registry_addr.clone())
+            .map_err(|_| CoreError::Internal("invalid registry address".to_string()))?
+            .connect()
             .await
             .map_err(|e| CoreError::Internal(format!("registry reconnect failed: {e}")))?;
+        let fresh = RegistryServiceClient::new(wrap_channel(channel, &self.client_auth));
         *self.client.lock().await = fresh;
         warn!(registry = %self.registry_addr, "RemoteCapabilityResolver reconnected to Registry");
         Ok(())
@@ -400,15 +426,19 @@ fn is_transport_failure(status: &tonic::Status) -> bool {
 /// later transport failure the cached client is dropped and rediscovered.
 pub struct RemoteTxnEnlister {
     registry_addr: String,
-    client: Mutex<Option<TransactionServiceClient<Channel>>>,
+    client_auth: ClientAuthConfig,
+    client: Mutex<Option<TransactionServiceClient<AuthedChannel>>>,
 }
 
 impl RemoteTxnEnlister {
     /// Build a lazy `RemoteTxnEnlister`. Does not touch the network — the
     /// first `enlist` call will discover TxnMgr through Registry.
-    pub fn new(registry_addr: &str) -> Self {
+    /// `client_auth` (Decision 8) controls what, if anything, this enlister
+    /// attaches to its own outbound `Enlist` calls against TxnMgr.
+    pub fn new(registry_addr: &str, client_auth: ClientAuthConfig) -> Self {
         Self {
             registry_addr: registry_addr.to_string(),
+            client_auth,
             client: Mutex::new(None),
         }
     }
@@ -416,11 +446,11 @@ impl RemoteTxnEnlister {
     /// Return a ready client, discovering TxnMgr if we don't have one yet.
     /// Blocks (with exponential backoff) until Registry and TxnMgr are both
     /// reachable.
-    async fn ensure_client(&self) -> Result<TransactionServiceClient<Channel>, CoreError> {
+    async fn ensure_client(&self) -> Result<TransactionServiceClient<AuthedChannel>, CoreError> {
         if let Some(c) = self.client.lock().await.as_ref() {
             return Ok(c.clone());
         }
-        let fresh = discover_txn_mgr(&self.registry_addr)
+        let fresh = discover_txn_mgr(&self.registry_addr, &self.client_auth)
             .await
             .map_err(|e| CoreError::Internal(format!("discover txn_mgr failed: {e}")))?;
         let mut guard = self.client.lock().await;
@@ -428,8 +458,8 @@ impl RemoteTxnEnlister {
         Ok(fresh)
     }
 
-    async fn rediscover(&self) -> Result<TransactionServiceClient<Channel>, CoreError> {
-        let fresh = discover_txn_mgr(&self.registry_addr)
+    async fn rediscover(&self) -> Result<TransactionServiceClient<AuthedChannel>, CoreError> {
+        let fresh = discover_txn_mgr(&self.registry_addr, &self.client_auth)
             .await
             .map_err(|e| CoreError::Internal(format!("rediscover txn_mgr failed: {e}")))?;
         *self.client.lock().await = Some(fresh.clone());
