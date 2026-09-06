@@ -276,7 +276,7 @@ Each service can boot as its own process, discoverable through Registry. Monolit
 
 | Item | Status | Notes |
 |------|--------|-------|
-| gRPC auth (JWT) | **Planned, not started** | `.claude/plans/grpc-security/PRD.md` — full plan now written (hardening-roadmap item 6). Decisions made: HS256 shared-secret (not RS256/JWKS) for v1, static CLI-minted tokens (not a live issuance service — avoids the leasing-style bootstrap cycle entirely), every service validates independently via a shared `coordin8-auth` interceptor crate (no gateway), authentication-only (no RBAC yet). TLS and mTLS explicitly out of scope for this phase, tracked as separate future work. |
+| gRPC auth (JWT) | **Done** | `.claude/plans/grpc-security/PRD.md` — COMPLETE, [PR #34](https://github.com/jsarman/coordin8/pull/34) (hardening-roadmap item 6, closing that roadmap out). HS256 shared-secret (not RS256/JWKS) for v1, static CLI-minted tokens (`coordin8 auth mint-token` — avoids the leasing-style bootstrap cycle entirely), every service validates independently via a shared `coordin8-auth` interceptor crate (no gateway), authentication-only (no RBAC yet). Go/Java/Node SDK token support + an opt-in auth overlay for every example all shipped. TLS and mTLS explicitly out of scope for this phase, tracked as separate future work. |
 | mTLS | Not started | Deferred non-goal of `.claude/plans/grpc-security/PRD.md` — plausible later upgrade for a specific deployment target (e.g. once on a service mesh), not a parallel track to JWT |
 
 ---
@@ -285,10 +285,10 @@ Each service can boot as its own process, discoverable through Registry. Monolit
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Structured logging (tracing crate) | Done | Env-controlled log levels |
+| Structured logging (tracing crate) | Done | Env-controlled log levels (plaintext only — see below for JSON) |
+| Structured JSON logging, OTel tracing, Prometheus metrics | **Planned, not started** | `.claude/plans/observability/PRD.md` — full plan written 2026-09-06. Decisions made: JSON log lines to stdout (`COORDIN8_LOG_FORMAT`, no vendor-specific push), W3C `traceparent` propagation across every internal call (mirrors `coordin8-auth`'s interceptor split), trace-context plumbing runs unconditionally while OTLP export is opt-in (`COORDIN8_OTEL_ENDPOINT`), Prometheus stays a native pull `/metrics` endpoint rather than routed through an OTel Collector, new shared `coordin8-observability` crate. SDK-side trace propagation explicitly deferred (Djinn-only for v1). |
 | Dashboard UI (React) | Not started | Phase 9 |
 | Provenance trace explorer | Not started | |
-| Metrics (Prometheus/OTel) | Not started | |
 
 ---
 
