@@ -54,7 +54,22 @@ public class DjinnClient implements AutoCloseable {
      * @param registryAddr Registry's address, {@code "host:port"}
      */
     public static DjinnClient connect(String registryAddr) {
-        return connect(registryAddr, null, null, null);
+        return connect(registryAddr, null, null, null, null);
+    }
+
+    /**
+     * Same as {@link #connect(String)}, but attaches {@code token} as a
+     * bearer token to every RPC on every connection — required against a
+     * Djinn with {@code COORDIN8_JWT_SECRET} set, harmless (ignored) against
+     * one that doesn't have auth enabled. Mint a token with
+     * {@code coordin8 auth mint-token}; see
+     * {@code .claude/plans/grpc-security/PRD.md}.
+     *
+     * @param registryAddr Registry's address, {@code "host:port"}
+     * @param token        bearer token, or {@code null}/empty for no auth
+     */
+    public static DjinnClient connect(String registryAddr, String token) {
+        return connect(registryAddr, null, null, null, token);
     }
 
     /**
@@ -72,16 +87,32 @@ public class DjinnClient implements AutoCloseable {
      */
     public static DjinnClient connect(String registryAddr, String proxyAddr,
                                       String spaceAddr, String eventAddr) {
-        ManagedChannel registryChannel = channelFor(registryAddr);
+        return connect(registryAddr, proxyAddr, spaceAddr, eventAddr, null);
+    }
+
+    /**
+     * Combines the pinned-address escape hatch of
+     * {@link #connect(String, String, String, String)} with the bearer-token
+     * auth of {@link #connect(String, String)}.
+     *
+     * @param registryAddr Registry's address, {@code "host:port"}
+     * @param proxyAddr    pinned Proxy address, or {@code null} to look up
+     * @param spaceAddr    pinned Space address, or {@code null} to look up
+     * @param eventAddr    pinned EventMgr address, or {@code null} to look up
+     * @param token        bearer token, or {@code null}/empty for no auth
+     */
+    public static DjinnClient connect(String registryAddr, String proxyAddr,
+                                      String spaceAddr, String eventAddr, String token) {
+        ManagedChannel registryChannel = channelFor(registryAddr, token);
         ManagedChannel proxyChannel = null;
         ManagedChannel spaceChannel = null;
         ManagedChannel eventChannel = null;
         try {
             RegistryClient registryClient = new RegistryClient(registryChannel);
 
-            proxyChannel = channelFor(resolve(registryClient, proxyAddr, "Proxy"));
-            spaceChannel = channelFor(resolve(registryClient, spaceAddr, "Space"));
-            eventChannel = channelFor(resolve(registryClient, eventAddr, "EventMgr"));
+            proxyChannel = channelFor(resolve(registryClient, proxyAddr, "Proxy"), token);
+            spaceChannel = channelFor(resolve(registryClient, spaceAddr, "Space"), token);
+            eventChannel = channelFor(resolve(registryClient, eventAddr, "EventMgr"), token);
 
             return new DjinnClient(registryChannel, proxyChannel, spaceChannel, eventChannel);
         } catch (RuntimeException e) {
@@ -113,14 +144,18 @@ public class DjinnClient implements AutoCloseable {
         return host + ":" + port;
     }
 
-    private static ManagedChannel channelFor(String addr) {
+    private static ManagedChannel channelFor(String addr, String token) {
         int idx = addr.lastIndexOf(':');
         if (idx < 0) {
             throw new IllegalArgumentException("address must be host:port, got: " + addr);
         }
         String host = addr.substring(0, idx);
         int port = Integer.parseInt(addr.substring(idx + 1));
-        return ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
+        ManagedChannelBuilder<?> builder = ManagedChannelBuilder.forAddress(host, port).usePlaintext();
+        if (token != null && !token.isEmpty()) {
+            builder.intercept(Auth.bearerToken(token));
+        }
+        return builder.build();
     }
 
     /**
