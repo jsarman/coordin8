@@ -54,13 +54,26 @@ public class LeaseClient implements Closeable {
      * {@link #close()} when done.
      */
     public static LeaseClient dial(String grantorAddr) {
+        return dial(grantorAddr, null);
+    }
+
+    /**
+     * Same as {@link #dial(String)}, but attaches {@code token} as a bearer
+     * token to every call — required against a grantor with
+     * {@code COORDIN8_JWT_SECRET} set.
+     */
+    public static LeaseClient dial(String grantorAddr, String token) {
         int idx = grantorAddr.lastIndexOf(':');
         if (idx < 0) {
             throw new IllegalArgumentException("grantor address must be host:port, got: " + grantorAddr);
         }
         String host = grantorAddr.substring(0, idx);
         int port = Integer.parseInt(grantorAddr.substring(idx + 1));
-        ManagedChannel channel = ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
+        ManagedChannelBuilder<?> builder = ManagedChannelBuilder.forAddress(host, port).usePlaintext();
+        if (token != null && !token.isEmpty()) {
+            builder.intercept(Auth.bearerToken(token));
+        }
+        ManagedChannel channel = builder.build();
         return new LeaseClient(channel, channel);
     }
 

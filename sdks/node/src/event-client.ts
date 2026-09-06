@@ -45,11 +45,11 @@ function toEvent(evt: ProtoEvent): EventRecord {
 export class EventClient {
   private readonly stub: GrpcEventClient;
 
-  constructor(channel: grpc.Channel) {
+  constructor(channel: grpc.Channel, interceptors: grpc.Interceptor[] = []) {
     this.stub = new GrpcEventClient(
       "passthrough:///djinn",
       grpc.credentials.createInsecure(),
-      { channelOverride: channel }
+      { channelOverride: channel, interceptors }
     );
   }
 

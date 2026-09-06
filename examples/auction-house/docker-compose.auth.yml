@@ -1,0 +1,26 @@
+# JWT auth overlay for this stack's docker-compose.yml. Off by default —
+# apply on top of the base file to turn it on:
+#
+#   ../../scripts/gen-auth-env.sh .env.auth auction-service settlement-engine auction-board
+#   docker compose -f docker-compose.yml -f docker-compose.auth.yml --env-file .env.auth up --build
+#
+# or just: mise r demo-auction-auth
+#
+# See .claude/plans/grpc-security/PRD.md. Djinn itself needs no minted
+# token (self-mints via Decision 8); the three application services do.
+services:
+  djinn:
+    environment:
+      COORDIN8_JWT_SECRET: "${COORDIN8_JWT_SECRET}"
+
+  auction-service:
+    environment:
+      COORDIN8_TOKEN: "${COORDIN8_TOKEN_AUCTION_SERVICE}"
+
+  settlement-engine:
+    environment:
+      COORDIN8_TOKEN: "${COORDIN8_TOKEN_SETTLEMENT_ENGINE}"
+
+  auction-board:
+    environment:
+      COORDIN8_TOKEN: "${COORDIN8_TOKEN_AUCTION_BOARD}"

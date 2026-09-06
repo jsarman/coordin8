@@ -35,7 +35,12 @@ func main() {
 	fmt.Println("Settlement Engine starting...")
 	fmt.Printf("  registry: %s\n", registryAddr)
 
-	djinn, err := coordin8.Connect(registryAddr)
+	var opts []coordin8.ConnectOption
+	if token := os.Getenv("COORDIN8_TOKEN"); token != "" {
+		opts = append(opts, coordin8.WithToken(token))
+	}
+
+	djinn, err := coordin8.Connect(registryAddr, opts...)
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}

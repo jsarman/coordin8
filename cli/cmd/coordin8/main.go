@@ -10,7 +10,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var registryAddr string
+var (
+	registryAddr string
+	token        string
+)
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
@@ -26,13 +29,28 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&registryAddr, "registry", "localhost:9002", "Registry address (host:port) — every other Djinn service is looked up through it")
+	rootCmd.PersistentFlags().StringVar(&token, "token", "", "Bearer token for an auth-enabled Djinn (default: $COORDIN8_TOKEN; see 'coordin8 auth mint-token')")
 	rootCmd.AddCommand(leaseCmd)
 	rootCmd.AddCommand(registryCmd)
 	rootCmd.AddCommand(spaceCmd)
 }
 
+// effectiveToken returns --token if set, else $COORDIN8_TOKEN. Harmless
+// against a Djinn with no COORDIN8_JWT_SECRET configured — it just adds
+// metadata a no-op interceptor never inspects.
+func effectiveToken() string {
+	if token != "" {
+		return token
+	}
+	return os.Getenv("COORDIN8_TOKEN")
+}
+
 func connect() (*coordin8.Client, error) {
-	return coordin8.Connect(registryAddr)
+	var opts []coordin8.ConnectOption
+	if t := effectiveToken(); t != "" {
+		opts = append(opts, coordin8.WithToken(t))
+	}
+	return coordin8.Connect(registryAddr, opts...)
 }
 
 // ── lease ─────────────────────────────────────────────────────────────────────
@@ -64,7 +82,11 @@ func dialLeaseGrantor() (*coordin8.LeaseClient, error) {
 	if addr == "" {
 		addr = registryAddr
 	}
-	return coordin8.DialLease(addr)
+	var opts []coordin8.LeaseDialOption
+	if t := effectiveToken(); t != "" {
+		opts = append(opts, coordin8.WithLeaseToken(t))
+	}
+	return coordin8.DialLease(addr, opts...)
 }
 
 var leaseGrantCmd = &cobra.Command{

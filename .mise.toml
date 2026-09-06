@@ -62,9 +62,23 @@ run = "docker compose up --build"
 description = "Stop Docker stack"
 run = "docker compose down"
 
+[tasks.up-auth]
+description = "Start full stack in Docker with JWT auth enabled (see docker-compose.auth.yml)"
+run = """
+scripts/gen-auth-env.sh .env.auth-bundled greeter
+docker compose -f docker-compose.yml -f docker-compose.auth.yml --env-file .env.auth-bundled up --build
+"""
+
 [tasks.up-split]
 description = "Start split-mode stack in Docker (registry/event/space/txn/proxy, one container each)"
 run = "docker compose -f docker-compose.split.yml up --build"
+
+[tasks.up-split-auth]
+description = "Start split-mode stack in Docker with JWT auth enabled (see docker-compose.split.auth.yml)"
+run = """
+scripts/gen-auth-env.sh .env.auth-split
+docker compose -f docker-compose.split.yml -f docker-compose.split.auth.yml --env-file .env.auth-split up --build
+"""
 
 [tasks.down-split]
 description = "Stop split-mode Docker stack"
@@ -85,6 +99,14 @@ run = "cd examples/auction-house && docker compose up --build"
 [tasks.demo-auction-down]
 description = "Stop the Auction House demo stack"
 run = "cd examples/auction-house && docker compose down"
+
+[tasks.demo-auction-auth]
+description = "Run the Auction House demo with JWT auth enabled (see examples/auction-house/docker-compose.auth.yml)"
+run = """
+cd examples/auction-house
+../../scripts/gen-auth-env.sh .env.auth auction-service settlement-engine auction-board
+docker compose -f docker-compose.yml -f docker-compose.auth.yml --env-file .env.auth up --build
+"""
 
 [tasks.demo-greeter-go]
 description = "Run the Go hello-coordin8 greeter client (requires `mise r up` or `mise r djinn` running)"

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use coordin8_auth::{wrap_channel, ClientAuthConfig};
 use futures::future::join_all;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
@@ -17,13 +18,27 @@ use coordin8_proto::coordin8::{
 pub struct TxnManager {
     store: Arc<dyn TxnStore>,
     lease_manager: Arc<dyn Leasing>,
+    client_auth: ClientAuthConfig,
 }
 
 impl TxnManager {
     pub fn new(store: Arc<dyn TxnStore>, lease_manager: Arc<dyn Leasing>) -> Self {
+        Self::with_client_auth(store, lease_manager, ClientAuthConfig::trust())
+    }
+
+    /// Same as [`Self::new`], but with an explicit outbound auth strategy
+    /// (Decision 8 — `.claude/plans/grpc-security/PRD.md`) for the
+    /// `ParticipantService` calls (`Prepare`/`Commit`/`Abort`) this manager
+    /// makes against participants (e.g. Space) during 2PC.
+    pub fn with_client_auth(
+        store: Arc<dyn TxnStore>,
+        lease_manager: Arc<dyn Leasing>,
+        client_auth: ClientAuthConfig,
+    ) -> Self {
         Self {
             store,
             lease_manager,
+            client_auth,
         }
     }
 
@@ -97,7 +112,7 @@ impl TxnManager {
         self.store
             .update_state(txn_id, TransactionState::Aborted)
             .await?;
-        Self::do_abort_participants(txn_id, &txn.participants).await;
+        Self::do_abort_participants(txn_id, &txn.participants, &self.client_auth).await;
         debug!(txn_id, "transaction aborted (lease expired)");
         Ok(())
     }
@@ -120,7 +135,7 @@ impl TxnManager {
         self.store
             .update_state(txn_id, TransactionState::Aborted)
             .await?;
-        Self::do_abort_participants(txn_id, &txn.participants).await;
+        Self::do_abort_participants(txn_id, &txn.participants, &self.client_auth).await;
         self.lease_manager.cancel(&txn.lease_id).await.ok();
         debug!(txn_id, "transaction aborted");
         Ok(())
@@ -158,7 +173,7 @@ impl TxnManager {
             self.store
                 .update_state(txn_id, TransactionState::Voting)
                 .await?;
-            match Self::call_prepare_and_commit(ep, txn_id).await {
+            match Self::call_prepare_and_commit(ep, txn_id, &self.client_auth).await {
                 Ok(PrepareVote::Prepared) | Ok(PrepareVote::NotChanged) => {
                     self.store
                         .update_state(txn_id, TransactionState::Committed)
@@ -188,8 +203,9 @@ impl TxnManager {
             .map(|p| {
                 let ep = p.endpoint.clone();
                 let tid = txn_id.to_string();
+                let client_auth = self.client_auth.clone();
                 async move {
-                    let result = Self::call_prepare(&ep, &tid).await;
+                    let result = Self::call_prepare(&ep, &tid, &client_auth).await;
                     (ep, result)
                 }
             })
@@ -220,7 +236,7 @@ impl TxnManager {
             self.store
                 .update_state(txn_id, TransactionState::Aborted)
                 .await?;
-            Self::do_abort_participants(txn_id, &participants).await;
+            Self::do_abort_participants(txn_id, &participants, &self.client_auth).await;
             self.lease_manager.cancel(&txn.lease_id).await.ok();
             return Err(Error::TransactionAborted(txn_id.to_string()));
         }
@@ -235,7 +251,8 @@ impl TxnManager {
             .map(|ep| {
                 let ep = ep.clone();
                 let tid = txn_id.to_string();
-                async move { Self::call_commit(&ep, &tid).await }
+                let client_auth = self.client_auth.clone();
+                async move { Self::call_commit(&ep, &tid, &client_auth).await }
             })
             .collect();
 
@@ -278,13 +295,17 @@ impl TxnManager {
             })
     }
 
-    async fn call_prepare(endpoint: &str, txn_id: &str) -> Result<PrepareVote, Error> {
+    async fn call_prepare(
+        endpoint: &str,
+        txn_id: &str,
+        client_auth: &ClientAuthConfig,
+    ) -> Result<PrepareVote, Error> {
         let channel = Self::connect_to(endpoint)?
             .connect()
             .await
             .map_err(|e| Error::Internal(format!("connect to {} failed: {}", endpoint, e)))?;
 
-        let mut client = ParticipantServiceClient::new(channel);
+        let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
         let resp = client
             .prepare(ParticipantRequest {
                 txn_id: txn_id.to_string(),
@@ -295,13 +316,17 @@ impl TxnManager {
         Ok(vote_from_i32(resp.into_inner().vote))
     }
 
-    async fn call_commit(endpoint: &str, txn_id: &str) -> Result<(), Error> {
+    async fn call_commit(
+        endpoint: &str,
+        txn_id: &str,
+        client_auth: &ClientAuthConfig,
+    ) -> Result<(), Error> {
         let channel = Self::connect_to(endpoint)?
             .connect()
             .await
             .map_err(|e| Error::Internal(format!("connect to {} failed: {}", endpoint, e)))?;
 
-        let mut client = ParticipantServiceClient::new(channel);
+        let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
         client
             .commit(ParticipantRequest {
                 txn_id: txn_id.to_string(),
@@ -311,13 +336,17 @@ impl TxnManager {
         Ok(())
     }
 
-    async fn call_abort(endpoint: &str, txn_id: &str) -> Result<(), Error> {
+    async fn call_abort(
+        endpoint: &str,
+        txn_id: &str,
+        client_auth: &ClientAuthConfig,
+    ) -> Result<(), Error> {
         let channel = Self::connect_to(endpoint)?
             .connect()
             .await
             .map_err(|e| Error::Internal(format!("connect to {} failed: {}", endpoint, e)))?;
 
-        let mut client = ParticipantServiceClient::new(channel);
+        let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
         client
             .abort(ParticipantRequest {
                 txn_id: txn_id.to_string(),
@@ -327,13 +356,17 @@ impl TxnManager {
         Ok(())
     }
 
-    async fn call_prepare_and_commit(endpoint: &str, txn_id: &str) -> Result<PrepareVote, Error> {
+    async fn call_prepare_and_commit(
+        endpoint: &str,
+        txn_id: &str,
+        client_auth: &ClientAuthConfig,
+    ) -> Result<PrepareVote, Error> {
         let channel = Self::connect_to(endpoint)?
             .connect()
             .await
             .map_err(|e| Error::Internal(format!("connect to {} failed: {}", endpoint, e)))?;
 
-        let mut client = ParticipantServiceClient::new(channel);
+        let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
         let resp = client
             .prepare_and_commit(ParticipantRequest {
                 txn_id: txn_id.to_string(),
@@ -349,14 +382,19 @@ impl TxnManager {
         Ok(vote_from_i32(resp.into_inner().vote))
     }
 
-    async fn do_abort_participants(txn_id: &str, participants: &[ParticipantRecord]) {
+    async fn do_abort_participants(
+        txn_id: &str,
+        participants: &[ParticipantRecord],
+        client_auth: &ClientAuthConfig,
+    ) {
         let futs: Vec<_> = participants
             .iter()
             .map(|p| {
                 let ep = p.endpoint.clone();
                 let tid = txn_id.to_string();
+                let client_auth = client_auth.clone();
                 async move {
-                    if let Err(e) = Self::call_abort(&ep, &tid).await {
+                    if let Err(e) = Self::call_abort(&ep, &tid, &client_auth).await {
                         warn!(endpoint = %ep, error = %e, "abort call to participant failed");
                     }
                 }

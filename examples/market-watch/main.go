@@ -20,6 +20,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/coordin8/sdk-go/coordin8"
 	pb "github.com/coordin8/sdk-go/gen/coordin8"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -31,7 +32,12 @@ func main() {
 		addr = os.Args[1]
 	}
 
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if token := os.Getenv("COORDIN8_TOKEN"); token != "" {
+		dialOpts = append(dialOpts, coordin8.PerRPCToken(token))
+	}
+
+	conn, err := grpc.NewClient(addr, dialOpts...)
 	if err != nil {
 		log.Fatalf("connect %s: %v", addr, err)
 	}

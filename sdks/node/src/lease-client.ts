@@ -1,6 +1,7 @@
 import * as grpc from "@grpc/grpc-js";
 import { LeaseServiceClient } from "../gen/coordin8/lease";
 import type { Lease as ProtoLease } from "../gen/coordin8/lease";
+import { interceptorsFor } from "./auth";
 
 /**
  * There is no single "the" LeaseMgr to connect to — Registry, Space, and
@@ -55,11 +56,11 @@ export class LeaseClient {
    * lease is Registry-granted, so `DjinnClient.registryLeases()` builds one
    * this way.
    */
-  static fromChannel(channel: grpc.Channel): LeaseClient {
+  static fromChannel(channel: grpc.Channel, interceptors: grpc.Interceptor[] = []): LeaseClient {
     const stub = new LeaseServiceClient(
       "passthrough:///djinn",
       grpc.credentials.createInsecure(),
-      { channelOverride: channel }
+      { channelOverride: channel, interceptors }
     );
     return new LeaseClient(stub, false);
   }
@@ -69,10 +70,12 @@ export class LeaseClient {
    * `grantorHost:grantorPort` read off a Lease you already hold (see
    * grantorAddr()), for leases granted by Space or EventMgr instead of
    * Registry. The returned LeaseClient owns the connection; call close()
-   * when done.
+   * when done. Pass token if the grantor has COORDIN8_JWT_SECRET set.
    */
-  static dial(grantorAddr: string): LeaseClient {
-    const stub = new LeaseServiceClient(grantorAddr, grpc.credentials.createInsecure());
+  static dial(grantorAddr: string, token?: string): LeaseClient {
+    const stub = new LeaseServiceClient(grantorAddr, grpc.credentials.createInsecure(), {
+      interceptors: interceptorsFor(token),
+    });
     return new LeaseClient(stub, true);
   }
 
@@ -154,6 +157,6 @@ export class LeaseClient {
  * already hold (see grantorAddr()). The returned LeaseClient owns the
  * connection; call close() when done.
  */
-export function dialLease(grantorAddr: string): LeaseClient {
-  return LeaseClient.dial(grantorAddr);
+export function dialLease(grantorAddr: string, token?: string): LeaseClient {
+  return LeaseClient.dial(grantorAddr, token);
 }

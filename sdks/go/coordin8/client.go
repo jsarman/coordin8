@@ -41,6 +41,7 @@ type connectOptions struct {
 	proxyAddr string
 	spaceAddr string
 	eventAddr string
+	token     string
 }
 
 // WithProxyAddr pins the Proxy address instead of looking it up through Registry.
@@ -56,6 +57,14 @@ func WithSpaceAddr(addr string) ConnectOption {
 // WithEventAddr pins the EventMgr address instead of looking it up through Registry.
 func WithEventAddr(addr string) ConnectOption {
 	return func(o *connectOptions) { o.eventAddr = addr }
+}
+
+// WithToken attaches a bearer token to every call on every connection this
+// Client holds (Registry, Proxy, Space, EventMgr). Required against a Djinn
+// that has COORDIN8_JWT_SECRET set; ignored (harmlessly) against one that
+// doesn't — see `.claude/plans/grpc-security/PRD.md` Decision 6.
+func WithToken(token string) ConnectOption {
+	return func(o *connectOptions) { o.token = token }
 }
 
 // Connect dials Registry directly at registryAddr — the one address a
@@ -75,6 +84,9 @@ func Connect(registryAddr string, opts ...ConnectOption) (*Client, error) {
 
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	}
+	if cfg.token != "" {
+		dialOpts = append(dialOpts, perRPCTokenOption(cfg.token))
 	}
 
 	registryConn, err := grpc.NewClient(registryAddr, dialOpts...)

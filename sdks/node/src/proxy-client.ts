@@ -10,11 +10,11 @@ export interface ProxyHandle {
 export class ProxyClient {
   private readonly stub: ProxyServiceClient;
 
-  constructor(channel: grpc.Channel) {
+  constructor(channel: grpc.Channel, interceptors: grpc.Interceptor[] = []) {
     this.stub = new ProxyServiceClient(
       "passthrough:///djinn",
       grpc.credentials.createInsecure(),
-      { channelOverride: channel }
+      { channelOverride: channel, interceptors }
     );
   }
 

@@ -79,11 +79,11 @@ function toSpaceEvent(evt: ProtoSpaceEvent): SpaceEvent {
 export class SpaceClient {
   private readonly stub: GrpcSpaceClient;
 
-  constructor(channel: grpc.Channel) {
+  constructor(channel: grpc.Channel, interceptors: grpc.Interceptor[] = []) {
     this.stub = new GrpcSpaceClient(
       "passthrough:///djinn",
       grpc.credentials.createInsecure(),
-      { channelOverride: channel }
+      { channelOverride: channel, interceptors }
     );
   }
 

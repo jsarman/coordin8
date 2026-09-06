@@ -90,9 +90,15 @@ async fn split_proxy_forwards_through_remote_registry() {
     // interface so the Proxy's RemoteCapabilityResolver finds exactly it.
     let (_echo, echo_port) = spawn_echo_server().await;
 
-    let registry_client = RegistryServiceClient::connect(registry_addr.clone())
+    let channel = tonic::transport::Channel::from_shared(registry_addr.clone())
+        .expect("valid registry addr")
+        .connect()
         .await
         .expect("dial Registry from test");
+    let registry_client = RegistryServiceClient::new(coordin8_auth::wrap_channel(
+        channel,
+        &coordin8_auth::ClientAuthConfig::trust(),
+    ));
     let _handle = self_register(
         registry_client,
         "SplitProxyEcho",

@@ -9,6 +9,7 @@ cli/coordin8
 examples/*/bin/
 examples/double-entry/double-entry
 examples/market-watch/market-watch
+examples/auction-house/settlement-engine/settlement-engine
 
 # Go module cache artifacts
 vendor/
@@ -30,6 +31,7 @@ npm-debug.log*
 # Environment
 .env
 *.env.local
+.env.auth*
 
 # IDE
 .idea/
