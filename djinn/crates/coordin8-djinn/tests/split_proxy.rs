@@ -1,13 +1,15 @@
 //! Integration tests for split-mode Proxy.
 //!
-//! Boots Registry + LeaseMgr + Proxy as three separate services, stands up a
-//! dummy TCP echo server, self-registers the echo server into Registry, then
-//! opens a proxy through the split Proxy via gRPC and confirms bytes round
-//! trip from a TCP client through the proxy to the echo server.
+//! Boots Registry + Proxy as two separate services, stands up a dummy TCP
+//! echo server, self-registers the echo server into Registry, then opens a
+//! proxy through the split Proxy via gRPC and confirms bytes round trip from
+//! a TCP client through the proxy to the echo server.
 //!
 //! Split-mode Proxy resolves templates through `RemoteCapabilityResolver`,
 //! so every open and every forwarded TCP connection crosses a Registry
 //! `Lookup` RPC — nothing is shared in-process between Proxy and Registry.
+//! Proxy never grants leases itself, so it has no leasing wiring of its own;
+//! Registry embeds its own `LeaseManager` for its own entries.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -16,9 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
 use coordin8_bootstrap::self_register;
-use coordin8_djinn::services::{
-    run_lease_on_listener, run_proxy_on_listener, run_registry_on_listener,
-};
+use coordin8_djinn::services::{run_proxy_on_listener, run_registry_on_listener};
 use coordin8_proto::coordin8::{
     proxy_service_client::ProxyServiceClient, registry_service_client::RegistryServiceClient,
     OpenRequest,
@@ -30,47 +30,14 @@ async fn ephemeral_listener() -> (tokio::net::TcpListener, u16) {
     (l, port)
 }
 
-/// A stable LeaseMgr instance that exists only to satisfy Registry's own
-/// internal dependency (`run_registry_on_listener`'s `lease_addr` param).
-/// Kept separate from whatever LeaseMgr instance the test itself is
-/// exercising, and never killed — Registry can't recover if ITS OWN
-/// dependency dies without restarting at the same address (a known, accepted
-/// limitation; see `.claude/plans/registry-bootstrap/PRD.md`). Standalone
-/// (no `COORDIN8_REGISTRY`) so it doesn't also show up as a competing
-/// `interface=LeaseMgr` entry in the test's own lookups.
-async fn spawn_backbone_lease() -> String {
+async fn spawn_registry() -> (JoinHandle<()>, String) {
     let (listener, port) = ephemeral_listener().await;
     let addr = format!("http://127.0.0.1:{port}");
-    tokio::spawn(async move {
-        run_lease_on_listener(listener, None, "127.0.0.1", 30)
-            .await
-            .ok();
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    addr
-}
-
-async fn spawn_registry(lease_addr: &str) -> (JoinHandle<()>, String) {
-    let (listener, port) = ephemeral_listener().await;
-    let addr = format!("http://127.0.0.1:{port}");
-    let lease_addr = lease_addr.to_string();
     let handle = tokio::spawn(async move {
-        run_registry_on_listener(listener, &lease_addr).await.ok();
+        run_registry_on_listener(listener).await.ok();
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     (handle, addr)
-}
-
-async fn spawn_lease(registry_addr: &str, ttl: u64) -> JoinHandle<()> {
-    let (listener, _) = ephemeral_listener().await;
-    let registry_addr = registry_addr.to_string();
-    let handle = tokio::spawn(async move {
-        run_lease_on_listener(listener, Some(&registry_addr), "127.0.0.1", ttl)
-            .await
-            .ok();
-    });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    handle
 }
 
 async fn spawn_proxy(registry_addr: &str) -> (JoinHandle<()>, String) {
@@ -116,9 +83,7 @@ async fn spawn_echo_server() -> (JoinHandle<()>, u16) {
 ///                    └──gRPC Lookup─▶ split-mode Registry
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn split_proxy_forwards_through_remote_registry() {
-    let backbone_lease_addr = spawn_backbone_lease().await;
-    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
-    let _lease = spawn_lease(&registry_addr, 30).await;
+    let (_reg, registry_addr) = spawn_registry().await;
     let (_proxy, proxy_addr) = spawn_proxy(&registry_addr).await;
 
     // Stand up a TCP echo server and self-register it under a unique

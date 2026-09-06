@@ -1,17 +1,15 @@
 //! Integration tests for split-mode EventMgr.
 //!
-//! Boots Registry + LeaseMgr + EventMgr as three separate services (three
-//! tasks, three listeners). EventMgr runs against `RemoteLeasing`, so every
-//! subscribe/renew/cancel crosses a real gRPC hop to LeaseMgr.
+//! Boots Registry + EventMgr as two separate services. EventMgr embeds its
+//! own `LeaseManager` for subscription leases — no external LeaseMgr
+//! dependency at all; Registry is only used for (optional) self-registration.
 //!
 //! Covers:
 //!
-//! 1. **End-to-end subscribe → emit → receive** through split-mode EventMgr,
-//!    proving RemoteLeasing grant works and subscription wiring holds.
-//! 2. **Remote expiry propagation**: a short-TTL subscription whose lease
-//!    dies on LeaseMgr must drive `unsubscribe_by_lease` on EventMgr via the
-//!    `watch_expiry_prefix` task, so `receive` on the stale registration id
-//!    returns NotFound.
+//! 1. **End-to-end subscribe → emit → receive** through split-mode EventMgr.
+//! 2. **Expiry propagation**: a short-TTL subscription must be cleaned up by
+//!    EventMgr's own embedded reaper + cascade, so `receive` on the stale
+//!    registration id returns NotFound.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -19,9 +17,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
-use coordin8_djinn::services::{
-    run_event_on_listener, run_lease_on_listener, run_registry_on_listener,
-};
+use coordin8_djinn::services::{run_event_on_listener, run_registry_on_listener};
 use coordin8_proto::coordin8::{
     event_service_client::EventServiceClient, EmitRequest, ReceiveRequest, SubscribeRequest,
 };
@@ -34,47 +30,14 @@ async fn ephemeral_listener() -> (tokio::net::TcpListener, u16) {
     (l, port)
 }
 
-/// A stable LeaseMgr instance that exists only to satisfy Registry's own
-/// internal dependency (`run_registry_on_listener`'s `lease_addr` param).
-/// Kept separate from whatever LeaseMgr instance the test itself is
-/// exercising, and never killed — Registry can't recover if ITS OWN
-/// dependency dies without restarting at the same address (a known, accepted
-/// limitation; see `.claude/plans/registry-bootstrap/PRD.md`). Standalone
-/// (no `COORDIN8_REGISTRY`) so it doesn't also show up as a competing
-/// `interface=LeaseMgr` entry in the test's own lookups.
-async fn spawn_backbone_lease() -> String {
+async fn spawn_registry() -> (JoinHandle<()>, String) {
     let (listener, port) = ephemeral_listener().await;
     let addr = format!("http://127.0.0.1:{port}");
-    tokio::spawn(async move {
-        run_lease_on_listener(listener, None, "127.0.0.1", 30)
-            .await
-            .ok();
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    addr
-}
-
-async fn spawn_registry(lease_addr: &str) -> (JoinHandle<()>, String) {
-    let (listener, port) = ephemeral_listener().await;
-    let addr = format!("http://127.0.0.1:{port}");
-    let lease_addr = lease_addr.to_string();
     let handle = tokio::spawn(async move {
-        run_registry_on_listener(listener, &lease_addr).await.ok();
+        run_registry_on_listener(listener).await.ok();
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     (handle, addr)
-}
-
-async fn spawn_lease(registry_addr: &str, ttl: u64) -> JoinHandle<()> {
-    let (listener, _port) = ephemeral_listener().await;
-    let registry_addr = registry_addr.to_string();
-    let handle = tokio::spawn(async move {
-        run_lease_on_listener(listener, Some(&registry_addr), "127.0.0.1", ttl)
-            .await
-            .ok();
-    });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    handle
 }
 
 async fn spawn_event(registry_addr: &str) -> (JoinHandle<()>, String) {
@@ -86,23 +49,18 @@ async fn spawn_event(registry_addr: &str) -> (JoinHandle<()>, String) {
             .await
             .ok();
     });
-    // EventMgr's `connect` has to discover LeaseMgr through Registry, which
-    // takes noticeably longer than a bare service spin-up.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     (handle, addr)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-/// Full split-mode path: Registry + LeaseMgr + EventMgr, each in its own
-/// task. A gRPC client subscribes, emits, and receives through the
-/// split-mode EventMgr — every lease grant crosses the wire via
-/// `RemoteLeasing`.
+/// Full split-mode path: Registry + EventMgr, each in its own task. A gRPC
+/// client subscribes, emits, and receives through the split-mode EventMgr —
+/// every lease grant is handled by EventMgr's own embedded LeaseManager.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_event_subscribe_emit_receive_round_trip() {
-    let backbone_lease_addr = spawn_backbone_lease().await;
-    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
-    let _lease = spawn_lease(&registry_addr, 30).await;
+    let (_reg, registry_addr) = spawn_registry().await;
     let (_event, event_addr) = spawn_event(&registry_addr).await;
 
     let mut client = EventServiceClient::connect(event_addr)
@@ -118,11 +76,15 @@ async fn split_event_subscribe_emit_receive_round_trip() {
             handback: b"hb".to_vec(),
         })
         .await
-        .expect("subscribe (proves RemoteLeasing.grant worked)")
+        .expect("subscribe (proves the embedded LeaseManager grant worked)")
         .into_inner();
 
     assert!(!sub.registration_id.is_empty());
-    assert!(sub.lease.is_some(), "subscription should carry a lease");
+    let lease = sub.lease.expect("subscription should carry a lease");
+    assert!(
+        !lease.grantor_host.is_empty() && lease.grantor_port != 0,
+        "lease should carry a grantor address to renew against"
+    );
 
     // Open the receive stream BEFORE emitting so live-stream delivery covers us
     // even if the mailbox drain path has nothing by the time we call.
@@ -159,15 +121,13 @@ async fn split_event_subscribe_emit_receive_round_trip() {
     assert_eq!(msg.handback, b"hb");
 }
 
-/// A subscription with a short TTL must be cleaned up on EventMgr when the
-/// remote LeaseMgr expires its lease. This exercises the `watch_expiry_prefix`
-/// task wired in `run_event_on_listener` — without it, `unsubscribe_by_lease`
+/// A subscription with a short TTL must be cleaned up on EventMgr when its
+/// own embedded LeaseManager expires the lease. This exercises the cascade
+/// wired in `run_event_on_listener` — without it, `unsubscribe_by_lease`
 /// would never fire and the registration would leak.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn split_event_remote_expiry_cleans_subscription() {
-    let backbone_lease_addr = spawn_backbone_lease().await;
-    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
-    let _lease = spawn_lease(&registry_addr, 30).await;
+async fn split_event_expiry_cleans_subscription() {
+    let (_reg, registry_addr) = spawn_registry().await;
     let (_event, event_addr) = spawn_event(&registry_addr).await;
 
     let mut client = EventServiceClient::connect(event_addr)
@@ -179,16 +139,15 @@ async fn split_event_remote_expiry_cleans_subscription() {
             source: "split.expiry".into(),
             template: HashMap::new(),
             delivery: 0,
-            ttl_seconds: 2, // short TTL — lease will die on remote LeaseMgr
+            ttl_seconds: 2, // short TTL — lease will expire
             handback: vec![],
         })
         .await
         .expect("subscribe")
         .into_inner();
 
-    // Wait for: lease TTL (2s) + reaper tick (≤1s) + watch_expiry stream
-    // deliver + EventMgr unsubscribe_by_lease to run.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Wait for: lease TTL (2s) + reaper tick (≤1s) + cascade to run.
+    tokio::time::sleep(Duration::from_secs(4)).await;
 
     // A stale registration id should now be unknown to EventMgr.
     let err = client

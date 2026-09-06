@@ -117,9 +117,11 @@ impl ParticipantService for MockParticipant {
 
 fn make_manager() -> Arc<TxnManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
+    let (lease_expiry_tx, _) = tokio::sync::broadcast::channel(256);
     let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
         lease_store,
         coordin8_core::LeaseConfig::default(),
+        lease_expiry_tx,
     ));
     let txn_store = Arc::new(InMemoryTxnStore::new());
     Arc::new(TxnManager::new(txn_store, lease_manager))

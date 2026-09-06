@@ -2,34 +2,78 @@ package coordin8
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	pb "github.com/coordin8/sdk-go/gen/coordin8"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
-// LeaseClient wraps the generated LeaseService gRPC client.
+// LeaseClient wraps the generated LeaseService gRPC client. There is no
+// single "the" LeaseMgr to connect to — Registry, Space, and EventMgr each
+// grant their own leases and mount LeaseService on their own connection.
+// Build one with DialLease (given a grantor address, typically read off a
+// Lease's GrantorHost/GrantorPort) or NewLeaseClient (given an existing
+// connection to a service you already dialed, e.g. via Client.Registry()).
 type LeaseClient struct {
 	client pb.LeaseServiceClient
+	conn   *grpc.ClientConn // nil if built from an existing connection we don't own
 }
 
-// Leases returns a client for LeaseMgr operations.
-func (c *Client) Leases() *LeaseClient {
-	return &LeaseClient{client: pb.NewLeaseServiceClient(c.leaseConn)}
+// NewLeaseClient wraps an existing gRPC connection (e.g. one already held by
+// a Client) as a LeaseClient. Does not take ownership — the caller still
+// closes conn.
+func NewLeaseClient(conn *grpc.ClientConn) *LeaseClient {
+	return &LeaseClient{client: pb.NewLeaseServiceClient(conn)}
+}
+
+// DialLease connects directly to a lease grantor's address — typically
+// GrantorHost:GrantorPort read off a Lease you already hold. The returned
+// LeaseClient owns the connection; call Close when done.
+func DialLease(grantorAddr string) (*LeaseClient, error) {
+	conn, err := grpc.NewClient(grantorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("dial lease grantor %s: %w", grantorAddr, err)
+	}
+	return &LeaseClient{client: pb.NewLeaseServiceClient(conn), conn: conn}, nil
+}
+
+// Close releases the underlying connection if this LeaseClient owns one
+// (built via DialLease). A no-op for one built via NewLeaseClient.
+func (c *LeaseClient) Close() error {
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+	return nil
 }
 
 // LeaseRecord is a live lease returned from the Djinn.
 type LeaseRecord struct {
-	LeaseID    string
-	ResourceID string
-	GrantedAt  time.Time
-	ExpiresAt  time.Time
+	LeaseID     string
+	ResourceID  string
+	GrantedAt   time.Time
+	ExpiresAt   time.Time
+	TTLSeconds  uint64
+	GrantorHost string
+	GrantorPort uint32
+}
+
+// GrantorAddr returns "host:port" for renewing/cancelling this lease — pass
+// it to DialLease.
+func (r LeaseRecord) GrantorAddr() string {
+	return fmt.Sprintf("%s:%d", r.GrantorHost, r.GrantorPort)
 }
 
 func protoToRecord(l *pb.Lease) LeaseRecord {
 	r := LeaseRecord{
-		LeaseID:    l.LeaseId,
-		ResourceID: l.ResourceId,
+		LeaseID:     l.LeaseId,
+		ResourceID:  l.ResourceId,
+		TTLSeconds:  l.TtlSeconds,
+		GrantorHost: l.GrantorHost,
+		GrantorPort: l.GrantorPort,
 	}
 	if l.GrantedAt != nil {
 		r.GrantedAt = l.GrantedAt.AsTime()
@@ -72,19 +116,40 @@ func (c *LeaseClient) Cancel(ctx context.Context, leaseID string) error {
 
 // KeepAlive renews leaseID in the background at half the TTL interval.
 // Runs until ctx is cancelled or a renewal fails (lease gone or expired).
-func (c *LeaseClient) KeepAlive(ctx context.Context, leaseID string, ttl time.Duration) {
-	ticker := time.NewTicker(ttl / 2)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			if _, err := c.Renew(ctx, leaseID, ttl); err != nil {
+//
+// Failures are reported on the returned channel — a transient transport
+// error is retried on the next tick, while LeaseNotFound/LeaseExpired (the
+// resource is genuinely gone) stop the loop after reporting. The channel is
+// closed when KeepAlive returns; callers that don't care about failures can
+// ignore it.
+func (c *LeaseClient) KeepAlive(ctx context.Context, leaseID string, ttl time.Duration) <-chan error {
+	failures := make(chan error, 1)
+	go func() {
+		defer close(failures)
+		ticker := time.NewTicker(ttl / 2)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if _, err := c.Renew(ctx, leaseID, ttl); err != nil {
+					select {
+					case failures <- err:
+					default:
+					}
+					code := status.Code(err)
+					if code == codes.NotFound || code == codes.FailedPrecondition {
+						// The resource is genuinely gone (LeaseNotFound /
+						// LeaseExpired) — no point retrying.
+						return
+					}
+					// Transient failure — keep trying on the next tick.
+				}
+			case <-ctx.Done():
 				return
 			}
-		case <-ctx.Done():
-			return
 		}
-	}
+	}()
+	return failures
 }
 
 // ExpiryEvent is delivered when a watched lease expires.
@@ -92,6 +157,7 @@ type ExpiryEvent struct {
 	LeaseID    string
 	ResourceID string
 	ExpiredAt  time.Time
+	Cancelled  bool // false = expired naturally, true = holder called Cancel
 }
 
 // Watch streams expiry events for resourceID (empty = all expirations).
@@ -113,6 +179,7 @@ func (c *LeaseClient) Watch(ctx context.Context, resourceID string) (<-chan Expi
 			e := ExpiryEvent{
 				LeaseID:    evt.LeaseId,
 				ResourceID: evt.ResourceId,
+				Cancelled:  evt.Reason == pb.ReclaimReason_CANCELLED,
 			}
 			if evt.ExpiredAt != nil {
 				e.ExpiredAt = evt.ExpiredAt.AsTime()

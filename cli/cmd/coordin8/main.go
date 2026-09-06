@@ -36,29 +36,48 @@ func connect() (*coordin8.Client, error) {
 }
 
 // ── lease ─────────────────────────────────────────────────────────────────────
+//
+// There is no single "the" LeaseMgr anymore — Registry, Space, and EventMgr
+// each grant their own leases (see .claude/plans/distributed-leasing/PRD.md).
+// These commands dial the grantor directly via --grantor (its address is
+// printed by `registry register` / a Write / a Subscribe response as
+// grantor_host:grantor_port), rather than going through the shared Client.
 
 var leaseCmd = &cobra.Command{
 	Use:   "lease",
-	Short: "Manage leases",
+	Short: "Manage leases (dials the grantor directly — see --grantor)",
 }
 
 var (
 	leaseTTL        int64
 	leaseResourceID string
 	leaseID         string
+	leaseGrantor    string
 )
+
+// dialLeaseGrantor dials whichever service granted the lease being
+// renewed/cancelled/watched. Defaults to --registry (the most common case —
+// every self-registration's lease is Registry-granted); pass --grantor
+// explicitly for a Space- or EventMgr-granted lease.
+func dialLeaseGrantor() (*coordin8.LeaseClient, error) {
+	addr := leaseGrantor
+	if addr == "" {
+		addr = registryAddr
+	}
+	return coordin8.DialLease(addr)
+}
 
 var leaseGrantCmd = &cobra.Command{
 	Use:   "grant",
-	Short: "Grant a new lease",
+	Short: "Grant a new lease directly against --grantor",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := connect()
+		lc, err := dialLeaseGrantor()
 		if err != nil {
 			return err
 		}
-		defer c.Close()
+		defer lc.Close()
 
-		record, err := c.Leases().Grant(context.Background(), leaseResourceID, time.Duration(leaseTTL)*time.Second)
+		record, err := lc.Grant(context.Background(), leaseResourceID, time.Duration(leaseTTL)*time.Second)
 		if err != nil {
 			return err
 		}
@@ -71,15 +90,15 @@ var leaseGrantCmd = &cobra.Command{
 
 var leaseRenewCmd = &cobra.Command{
 	Use:   "renew",
-	Short: "Renew an existing lease",
+	Short: "Renew an existing lease against --grantor",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := connect()
+		lc, err := dialLeaseGrantor()
 		if err != nil {
 			return err
 		}
-		defer c.Close()
+		defer lc.Close()
 
-		record, err := c.Leases().Renew(context.Background(), leaseID, time.Duration(leaseTTL)*time.Second)
+		record, err := lc.Renew(context.Background(), leaseID, time.Duration(leaseTTL)*time.Second)
 		if err != nil {
 			return err
 		}
@@ -92,15 +111,15 @@ var leaseRenewCmd = &cobra.Command{
 
 var leaseCancelCmd = &cobra.Command{
 	Use:   "cancel",
-	Short: "Cancel a lease",
+	Short: "Cancel a lease against --grantor",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := connect()
+		lc, err := dialLeaseGrantor()
 		if err != nil {
 			return err
 		}
-		defer c.Close()
+		defer lc.Close()
 
-		if err := c.Leases().Cancel(context.Background(), leaseID); err != nil {
+		if err := lc.Cancel(context.Background(), leaseID); err != nil {
 			return err
 		}
 		fmt.Printf("cancelled: %s\n", leaseID)
@@ -110,18 +129,18 @@ var leaseCancelCmd = &cobra.Command{
 
 var leaseWatchCmd = &cobra.Command{
 	Use:   "watch",
-	Short: "Watch for lease expiry events (Ctrl+C to stop)",
+	Short: "Watch for lease expiry events on --grantor (Ctrl+C to stop)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := connect()
+		lc, err := dialLeaseGrantor()
 		if err != nil {
 			return err
 		}
-		defer c.Close()
+		defer lc.Close()
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		ch, err := c.Leases().Watch(ctx, leaseResourceID)
+		ch, err := lc.Watch(ctx, leaseResourceID)
 		if err != nil {
 			return err
 		}
@@ -133,14 +152,20 @@ var leaseWatchCmd = &cobra.Command{
 		fmt.Printf("watching expiry events for resource: %s\n\n", filter)
 
 		for evt := range ch {
-			fmt.Printf("[%s] expired  lease_id=%s  resource_id=%s\n",
-				evt.ExpiredAt.Format(time.RFC3339), evt.LeaseID, evt.ResourceID)
+			reason := "expired"
+			if evt.Cancelled {
+				reason = "cancelled"
+			}
+			fmt.Printf("[%s] %s  lease_id=%s  resource_id=%s\n",
+				evt.ExpiredAt.Format(time.RFC3339), reason, evt.LeaseID, evt.ResourceID)
 		}
 		return nil
 	},
 }
 
 func init() {
+	leaseCmd.PersistentFlags().StringVar(&leaseGrantor, "grantor", "", "Address (host:port) of the service that granted this lease — Registry, Space, or EventMgr (default: --registry, the common case)")
+
 	leaseGrantCmd.Flags().StringVar(&leaseResourceID, "resource", "", "Resource ID to lease (required)")
 	leaseGrantCmd.Flags().Int64Var(&leaseTTL, "ttl", 30, "TTL in seconds")
 	leaseGrantCmd.MarkFlagRequired("resource")

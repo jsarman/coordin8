@@ -4,18 +4,25 @@
 //! service crates. It owns the primitives every service needs when running
 //! outside the monolith:
 //!
-//! - **[`discover_lease_mgr`]** — find LeaseMgr in Registry, retry forever.
 //! - **[`self_register`]** — insert a Registry entry and keep it alive via
 //!   periodic re-registration, cancel on drop.
-//! - **[`watch_expiry_prefix`]** — stream `WatchExpiry` events for a given
-//!   resource-id prefix, reconnect automatically.
-//! - **[`RemoteLeasing`]** — a `coordin8_core::Leasing` impl that forwards
-//!   grant/renew/cancel over gRPC to a discovered LeaseMgr, transparently
-//!   re-discovering through Registry on transport failure.
 //! - **[`RemoteCapabilityResolver`]** — a `coordin8_core::CapabilityResolver`
 //!   impl that forwards template lookups to a Registry gRPC service and
 //!   reconnects on transport failure. Used by split-mode Proxy to resolve
 //!   templates without a shared in-process `RegistryStore`.
+//! - **[`discover_txn_mgr`]** / **[`RemoteTxnEnlister`]** — find TransactionMgr
+//!   in Registry and enlist as a 2PC participant, lazily and with transparent
+//!   reconnect.
+//! - **[`PendingCapabilityResolver`]** — lets Proxy start serving immediately
+//!   on `NotServing` health while it resolves its Registry dependency in the
+//!   background, rather than blocking its whole gRPC serve loop.
+//!
+//! Leasing is *not* here. Each service that grants leased resources
+//! (Registry, Space, EventMgr, TransactionMgr) embeds its own
+//! `coordin8_lease::LeaseManager` in-process — matching Jini/Apache River's
+//! `Landlord` pattern, where every grantor manages its own leases rather than
+//! depending on a shared external service. See
+//! `.claude/plans/distributed-leasing/PRD.md`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -29,14 +36,13 @@ use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
 use coordin8_core::{
-    CapabilityResolver, Error as CoreError, LeaseRecord, Leasing, RegistryEntry,
-    TransportConfig as CoreTransportConfig, TxnEnlister,
+    CapabilityResolver, Error as CoreError, RegistryEntry, TransportConfig as CoreTransportConfig,
+    TxnEnlister,
 };
 use coordin8_proto::coordin8::{
-    lease_service_client::LeaseServiceClient, registry_service_client::RegistryServiceClient,
-    transaction_service_client::TransactionServiceClient, CancelRequest, Capability, EnlistRequest,
-    ExpiryEvent, GrantRequest, Lease, LookupRequest, RegisterRequest, RenewRequest,
-    TransportDescriptor, WatchExpiryRequest,
+    registry_service_client::RegistryServiceClient,
+    transaction_service_client::TransactionServiceClient, Capability, EnlistRequest, LookupRequest,
+    RegisterRequest, TransportDescriptor,
 };
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -80,37 +86,6 @@ where
             }
         }
     }
-}
-
-// ── discover_lease_mgr ────────────────────────────────────────────────────────
-
-/// Connect to Registry and discover a live LeaseMgr instance.
-///
-/// Polls the Registry at `registry_addr` for an entry with
-/// `interface = "LeaseMgr"`. Retries with exponential backoff starting at
-/// 100 ms, capped at 5 s, forever. Returns a ready-to-use
-/// [`LeaseServiceClient`] connected to the discovered address.
-///
-/// # Example
-///
-/// ```no_run
-/// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let lease = coordin8_bootstrap::discover_lease_mgr("http://127.0.0.1:9002").await?;
-/// # Ok(()) }
-/// ```
-pub async fn discover_lease_mgr(registry_addr: &str) -> Result<LeaseServiceClient<Channel>, Error> {
-    let client = retry_forever("discover_lease_mgr", || async {
-        try_discover_lease_mgr(registry_addr).await
-    })
-    .await;
-    info!(registry = registry_addr, "discovered LeaseMgr");
-    Ok(client)
-}
-
-/// Single attempt to discover LeaseMgr via a Registry lookup.
-async fn try_discover_lease_mgr(registry_addr: &str) -> Result<LeaseServiceClient<Channel>, Error> {
-    let channel = discover_service_channel(registry_addr, "LeaseMgr").await?;
-    Ok(LeaseServiceClient::new(channel))
 }
 
 /// Look up a service in Registry by `interface` and dial it.
@@ -299,308 +274,6 @@ pub async fn self_register(
     })
 }
 
-// ── watch_expiry_prefix ───────────────────────────────────────────────────────
-
-/// Subscribe to lease expiry events for a resource-id prefix.
-///
-/// Opens a `WatchExpiry(resource_id = "")` stream to `lease_client`, filters
-/// events client-side to those whose `resource_id` starts with `prefix`, and
-/// calls `handler` for each match. If the stream drops (network error, server
-/// restart), the loop reconnects automatically with exponential backoff
-/// (100 ms → 5 s). On reconnect the LeaseMgr is re-discovered through
-/// Registry at `registry_addr`.
-///
-/// Client-side filtering is currently the only option — the `WatchExpiry`
-/// RPC's `resource_id` field is exact-match only. A server-side prefix filter
-/// is planned for Phase 1.
-///
-/// This function runs forever and is intended to be spawned as a `tokio::task`.
-/// The task exits only when the process exits.
-pub async fn watch_expiry_prefix(
-    lease_client: LeaseServiceClient<Channel>,
-    registry_addr: String,
-    prefix: String,
-    handler: impl Fn(ExpiryEvent) + Send + 'static,
-) {
-    let mut client = lease_client;
-
-    loop {
-        match run_watch_expiry_stream(&mut client, &prefix, &handler).await {
-            Ok(()) => {
-                debug!(prefix, "WatchExpiry stream ended, reconnecting");
-            }
-            Err(e) => {
-                warn!(
-                    prefix,
-                    "WatchExpiry stream error: {e}, rediscovering LeaseMgr"
-                );
-                client = retry_forever("watch_expiry_rediscover", || async {
-                    discover_lease_mgr(&registry_addr).await
-                })
-                .await;
-            }
-        }
-    }
-}
-
-/// Same as [`watch_expiry_prefix`], but for the one caller that cannot use
-/// Registry lookup to reconnect: split-mode Registry itself. On stream
-/// failure, reconnects by redialing `lease_addr` directly rather than doing a
-/// Registry `Lookup` (Registry cannot discover its own dependency through
-/// itself). See [`RemoteLeasing::connect_direct`] for why this direct-dial
-/// path exists at all.
-pub async fn watch_expiry_direct(
-    lease_client: LeaseServiceClient<Channel>,
-    lease_addr: String,
-    prefix: String,
-    handler: impl Fn(ExpiryEvent) + Send + 'static,
-) {
-    let mut client = lease_client;
-
-    loop {
-        match run_watch_expiry_stream(&mut client, &prefix, &handler).await {
-            Ok(()) => {
-                debug!(prefix, "WatchExpiry stream ended, reconnecting");
-            }
-            Err(e) => {
-                warn!(
-                    prefix,
-                    "WatchExpiry stream error: {e}, redialing LeaseMgr directly"
-                );
-                client = retry_forever("watch_expiry_redial_direct", || async {
-                    LeaseServiceClient::connect(lease_addr.clone())
-                        .await
-                        .map_err(Error::from)
-                })
-                .await;
-            }
-        }
-    }
-}
-
-/// Drive a single WatchExpiry stream until it ends or errors.
-async fn run_watch_expiry_stream(
-    client: &mut LeaseServiceClient<Channel>,
-    prefix: &str,
-    handler: &impl Fn(ExpiryEvent),
-) -> Result<(), tonic::Status> {
-    let mut stream = client
-        .watch_expiry(WatchExpiryRequest {
-            resource_id: String::new(),
-        })
-        .await?
-        .into_inner();
-
-    while let Some(evt) = stream.message().await? {
-        if evt.resource_id.starts_with(prefix) {
-            handler(evt);
-        }
-    }
-    Ok(())
-}
-
-// ── RemoteLeasing ─────────────────────────────────────────────────────────────
-
-/// A `coordin8_core::Leasing` implementation backed by a gRPC connection to a
-/// remote LeaseMgr. This is the Jini lease-as-interface pattern: downstream
-/// services hand a `LeaseManager` or a `RemoteLeasing` through the same trait
-/// and never know which one they got.
-///
-/// Failover is transparent: on any transport-like failure (`Unavailable`,
-/// `Cancelled`, `Unknown`), the current client is dropped and a fresh one is
-/// re-discovered through Registry at `registry_addr`. The in-flight operation
-/// is then retried exactly once on the new client. Per-call semantic errors
-/// (`NotFound`, `FailedPrecondition`) propagate as typed `coordin8_core::Error`
-/// values without a reconnect.
-/// How a [`RemoteLeasing`] finds LeaseMgr, both initially and on reconnect
-/// after a transport failure.
-enum LeaseSource {
-    /// Look LeaseMgr up through Registry's `Lookup` RPC. Used by every
-    /// service except Registry itself — they all sit above Registry in the
-    /// boot order and can use it as their one well-known point.
-    ViaRegistry(String),
-    /// Dial LeaseMgr's own address directly, no Registry involved. The one
-    /// caller that needs this is split-mode Registry: it cannot discover its
-    /// own LeaseMgr dependency through itself, so it's given LeaseMgr's fixed
-    /// address directly — mirroring how every other split-mode service is
-    /// given Registry's fixed address directly rather than looking *that*
-    /// up through something else. Correct as long as LeaseMgr's address is
-    /// stable across restarts, which it is under both Docker Compose and
-    /// Kubernetes (a container/pod dying and coming back keeps the same
-    /// service name / ClusterIP DNS).
-    Direct(String),
-}
-
-pub struct RemoteLeasing {
-    source: LeaseSource,
-    client: Mutex<LeaseServiceClient<Channel>>,
-}
-
-impl RemoteLeasing {
-    /// Build a `RemoteLeasing` by first discovering LeaseMgr through Registry.
-    ///
-    /// Blocks (with exponential backoff) until Registry and LeaseMgr are both
-    /// reachable — same retry semantics as [`discover_lease_mgr`].
-    pub async fn connect(registry_addr: &str) -> Result<Self, Error> {
-        let client = discover_lease_mgr(registry_addr).await?;
-        Ok(Self {
-            source: LeaseSource::ViaRegistry(registry_addr.to_string()),
-            client: Mutex::new(client),
-        })
-    }
-
-    /// Build a `RemoteLeasing` by dialing LeaseMgr's address directly, with
-    /// no Registry lookup at all.
-    ///
-    /// Split-mode Registry is the only caller that needs this: every other
-    /// split-mode service resolves LeaseMgr through Registry's `Lookup` RPC,
-    /// but Registry can't look itself up to bootstrap its own dependency on
-    /// LeaseMgr. See [`LeaseSource::Direct`].
-    ///
-    /// Blocks (with exponential backoff) until LeaseMgr is reachable at
-    /// `lease_addr`.
-    pub async fn connect_direct(lease_addr: &str) -> Result<Self, Error> {
-        let client = retry_forever("lease_dial_direct", || async {
-            LeaseServiceClient::connect(lease_addr.to_string())
-                .await
-                .map_err(Error::from)
-        })
-        .await;
-        Ok(Self {
-            source: LeaseSource::Direct(lease_addr.to_string()),
-            client: Mutex::new(client),
-        })
-    }
-
-    /// Re-resolve LeaseMgr (via Registry lookup or direct redial, matching
-    /// however this instance was originally connected) and swap in the new
-    /// client.
-    async fn rediscover(&self) -> Result<(), CoreError> {
-        let fresh = match &self.source {
-            LeaseSource::ViaRegistry(registry_addr) => discover_lease_mgr(registry_addr)
-                .await
-                .map_err(|e| CoreError::Internal(format!("rediscover failed: {e}")))?,
-            LeaseSource::Direct(lease_addr) => {
-                retry_forever("lease_redial_direct", || async {
-                    LeaseServiceClient::connect(lease_addr.clone())
-                        .await
-                        .map_err(Error::from)
-                })
-                .await
-            }
-        };
-        *self.client.lock().await = fresh;
-        warn!("RemoteLeasing reconnected to LeaseMgr");
-        Ok(())
-    }
-
-    /// Invoke `op` against the current client. On transport failure, rediscover
-    /// through Registry and retry the call exactly once against the fresh client.
-    /// Per-call semantic errors (`NotFound`, `FailedPrecondition`, ...) short-
-    /// circuit without a reconnect.
-    async fn call_with_retry<F, Fut, T>(&self, fallback_id: &str, op: F) -> Result<T, CoreError>
-    where
-        F: Fn(LeaseServiceClient<Channel>) -> Fut,
-        Fut: Future<Output = Result<tonic::Response<T>, tonic::Status>>,
-    {
-        let client = self.client.lock().await.clone();
-        match op(client).await {
-            Ok(resp) => Ok(resp.into_inner()),
-            Err(status) if is_transport_failure(&status) => {
-                self.rediscover().await?;
-                let client = self.client.lock().await.clone();
-                op(client)
-                    .await
-                    .map(tonic::Response::into_inner)
-                    .map_err(|s| status_to_core_error(s, fallback_id))
-            }
-            Err(status) => Err(status_to_core_error(status, fallback_id)),
-        }
-    }
-}
-
-/// Is this gRPC status a transport failure (LeaseMgr likely dead/moved)?
-///
-/// These codes mean "the RPC itself didn't reach a live server" — the right
-/// response is to re-discover and retry. Any other code means the server
-/// answered with a semantic result that the caller should see as-is.
-fn is_transport_failure(status: &tonic::Status) -> bool {
-    use tonic::Code;
-    matches!(
-        status.code(),
-        Code::Unavailable | Code::Cancelled | Code::Unknown | Code::DeadlineExceeded
-    )
-}
-
-fn status_to_core_error(status: tonic::Status, fallback_id: &str) -> CoreError {
-    use tonic::Code;
-    match status.code() {
-        Code::NotFound => CoreError::LeaseNotFound(fallback_id.to_string()),
-        Code::FailedPrecondition => CoreError::LeaseExpired(fallback_id.to_string()),
-        _ => CoreError::Internal(format!("{}: {}", status.code(), status.message())),
-    }
-}
-
-fn proto_to_lease_record(lease: Lease) -> Result<LeaseRecord, CoreError> {
-    fn ts_to_dt(
-        ts: Option<prost_types::Timestamp>,
-    ) -> Result<chrono::DateTime<chrono::Utc>, CoreError> {
-        let ts = ts.ok_or_else(|| CoreError::Internal("lease missing timestamp".to_string()))?;
-        chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
-            .ok_or_else(|| CoreError::Internal("lease timestamp out of range".to_string()))
-    }
-    Ok(LeaseRecord {
-        lease_id: lease.lease_id,
-        resource_id: lease.resource_id,
-        granted_at: ts_to_dt(lease.granted_at)?,
-        expires_at: ts_to_dt(lease.expires_at)?,
-        ttl_seconds: lease.ttl_seconds,
-    })
-}
-
-#[async_trait]
-impl Leasing for RemoteLeasing {
-    async fn grant(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, CoreError> {
-        let request = GrantRequest {
-            resource_id: resource_id.to_string(),
-            ttl_seconds: ttl_secs,
-        };
-        let lease = self
-            .call_with_retry(resource_id, |mut c| {
-                let req = request.clone();
-                async move { c.grant(req).await }
-            })
-            .await?;
-        proto_to_lease_record(lease)
-    }
-
-    async fn renew(&self, lease_id: &str, ttl_secs: u64) -> Result<LeaseRecord, CoreError> {
-        let request = RenewRequest {
-            lease_id: lease_id.to_string(),
-            ttl_seconds: ttl_secs,
-        };
-        let lease = self
-            .call_with_retry(lease_id, |mut c| {
-                let req = request.clone();
-                async move { c.renew(req).await }
-            })
-            .await?;
-        proto_to_lease_record(lease)
-    }
-
-    async fn cancel(&self, lease_id: &str) -> Result<(), CoreError> {
-        let request = CancelRequest {
-            lease_id: lease_id.to_string(),
-        };
-        self.call_with_retry(lease_id, |mut c| {
-            let req = request.clone();
-            async move { c.cancel(req).await }
-        })
-        .await
-        .map(|_| ())
-    }
-}
-
 // ── RemoteCapabilityResolver ─────────────────────────────────────────────────
 
 /// A `coordin8_core::CapabilityResolver` implementation backed by a Registry
@@ -643,14 +316,9 @@ impl RemoteCapabilityResolver {
         Ok(())
     }
 
-    /// Invoke `op` against the current Registry client. On transport failure,
-    /// reconnect and retry exactly once. Mirrors `RemoteLeasing::call_with_retry`
-    /// — the client is cloned out of the Mutex before the RPC, so the lock is
-    /// never held across `.await`.
-    /// Invoke Registry::Lookup against the current client. On transport failure,
-    /// reconnect and retry exactly once. Mirrors `RemoteLeasing::call_with_retry`
-    /// — the client is cloned out of the Mutex before the RPC, so the lock is
-    /// never held across `.await`.
+    /// Invoke Registry::Lookup against the current client. On transport
+    /// failure, reconnect and retry exactly once. The client is cloned out
+    /// of the Mutex before the RPC, so the lock is never held across `.await`.
     async fn lookup_with_retry(
         &self,
         request: LookupRequest,
@@ -703,6 +371,19 @@ impl CapabilityResolver for RemoteCapabilityResolver {
             ))),
         }
     }
+}
+
+/// Is this gRPC status a transport failure (peer likely dead/moved)?
+///
+/// These codes mean "the RPC itself didn't reach a live server" — the right
+/// response is to re-discover/reconnect and retry. Any other code means the
+/// server answered with a semantic result that the caller should see as-is.
+fn is_transport_failure(status: &tonic::Status) -> bool {
+    use tonic::Code;
+    matches!(
+        status.code(),
+        Code::Unavailable | Code::Cancelled | Code::Unknown | Code::DeadlineExceeded
+    )
 }
 
 // ── RemoteTxnEnlister ────────────────────────────────────────────────────────
@@ -782,72 +463,14 @@ impl TxnEnlister for RemoteTxnEnlister {
     }
 }
 
-// ── PendingLeasing / PendingCapabilityResolver ───────────────────────────────
+// ── PendingCapabilityResolver ─────────────────────────────────────────────────
 //
-// A service that depends on Registry/LeaseMgr shouldn't have to block its
-// entire gRPC serve loop behind discovery before it can start accepting
-// connections at all — that's the boot-order gap this pair closes. Each
-// wraps a not-yet-resolved dependency: constructible immediately, so the
-// manager built around it (and therefore the server) can start right away.
-// Every call fails fast with `Error::Unavailable` until `install()` is
-// called by a background discovery task, never hanging the caller.
-
-/// A [`Leasing`] impl that starts unresolved and becomes ready once a
-/// background task calls [`install`](Self::install) with a real
-/// [`RemoteLeasing`]. See the module note above.
-pub struct PendingLeasing {
-    inner: RwLock<Option<Arc<RemoteLeasing>>>,
-}
-
-impl Default for PendingLeasing {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PendingLeasing {
-    pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(None),
-        }
-    }
-
-    /// Install the resolved dependency. Called once, by the background
-    /// discovery task, after which every call delegates to it.
-    pub async fn install(&self, resolved: RemoteLeasing) {
-        *self.inner.write().await = Some(Arc::new(resolved));
-    }
-}
-
-#[async_trait]
-impl Leasing for PendingLeasing {
-    async fn grant(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, CoreError> {
-        match self.inner.read().await.as_ref() {
-            Some(leasing) => leasing.grant(resource_id, ttl_secs).await,
-            None => Err(CoreError::Unavailable(
-                "waiting on dependency: LeaseMgr".to_string(),
-            )),
-        }
-    }
-
-    async fn renew(&self, lease_id: &str, ttl_secs: u64) -> Result<LeaseRecord, CoreError> {
-        match self.inner.read().await.as_ref() {
-            Some(leasing) => leasing.renew(lease_id, ttl_secs).await,
-            None => Err(CoreError::Unavailable(
-                "waiting on dependency: LeaseMgr".to_string(),
-            )),
-        }
-    }
-
-    async fn cancel(&self, lease_id: &str) -> Result<(), CoreError> {
-        match self.inner.read().await.as_ref() {
-            Some(leasing) => leasing.cancel(lease_id).await,
-            None => Err(CoreError::Unavailable(
-                "waiting on dependency: LeaseMgr".to_string(),
-            )),
-        }
-    }
-}
+// Proxy shouldn't have to block its entire gRPC serve loop behind Registry
+// discovery before it can start accepting connections at all — that's the
+// boot-order gap this closes. Constructible immediately, so the manager
+// built around it (and therefore the server) can start right away. Every
+// call fails fast with `Error::Unavailable` until `install()` is called by a
+// background discovery task, never hanging the caller.
 
 /// A [`CapabilityResolver`] impl that starts unresolved and becomes ready
 /// once a background task calls [`install`](Self::install) with a real

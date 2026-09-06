@@ -12,9 +12,11 @@ use tokio::sync::broadcast;
 
 fn make_manager() -> Arc<EventManager> {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
+    let (lease_expiry_tx, _) = broadcast::channel(256);
     let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
         lease_store,
         coordin8_core::LeaseConfig::default(),
+        lease_expiry_tx,
     ));
     let event_store = Arc::new(InMemoryEventStore::new());
     let (event_tx, _) = broadcast::channel(256);
@@ -229,9 +231,11 @@ async fn cancel_removes_subscription() {
 #[tokio::test]
 async fn subscription_lease_expiry_cascade() {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
+    let (lease_expiry_tx, _) = broadcast::channel(256);
     let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
         lease_store,
         coordin8_core::LeaseConfig::default(),
+        lease_expiry_tx,
     ));
     let event_store = Arc::new(InMemoryEventStore::new());
     let (event_tx, _) = broadcast::channel(256);

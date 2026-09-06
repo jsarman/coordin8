@@ -47,11 +47,38 @@ fn event_record_to_proto(e: &coordin8_core::EventRecord, handback: &[u8]) -> Eve
 
 pub struct EventServiceImpl {
     manager: Arc<EventManager>,
+    /// Stamped onto every `Lease` returned from `Subscribe`/`RenewSubscription`
+    /// so a holder always knows where to renew — EventMgr grants its own
+    /// subscription leases in-process (see
+    /// `.claude/plans/distributed-leasing/PRD.md`), so this is simply
+    /// EventMgr's own listening address.
+    grantor_host: String,
+    grantor_port: u16,
 }
 
 impl EventServiceImpl {
-    pub fn new(manager: Arc<EventManager>) -> Self {
-        Self { manager }
+    pub fn new(
+        manager: Arc<EventManager>,
+        grantor_host: impl Into<String>,
+        grantor_port: u16,
+    ) -> Self {
+        Self {
+            manager,
+            grantor_host: grantor_host.into(),
+            grantor_port,
+        }
+    }
+
+    fn lease_to_proto(&self, lease: coordin8_core::LeaseRecord) -> Lease {
+        Lease {
+            lease_id: lease.lease_id,
+            resource_id: lease.resource_id,
+            granted_at: Some(to_timestamp(lease.granted_at)),
+            expires_at: Some(to_timestamp(lease.expires_at)),
+            ttl_seconds: lease.ttl_seconds,
+            grantor_host: self.grantor_host.clone(),
+            grantor_port: self.grantor_port as u32,
+        }
     }
 }
 
@@ -86,13 +113,7 @@ impl EventService for EventServiceImpl {
         Ok(Response::new(EventRegistration {
             registration_id,
             source: r.source,
-            lease: Some(Lease {
-                lease_id: lease.lease_id,
-                resource_id: lease.resource_id,
-                granted_at: Some(to_timestamp(lease.granted_at)),
-                expires_at: Some(to_timestamp(lease.expires_at)),
-                ttl_seconds: lease.ttl_seconds,
-            }),
+            lease: Some(self.lease_to_proto(lease)),
             seq_num,
         }))
     }
@@ -198,13 +219,7 @@ impl EventService for EventServiceImpl {
             .await
             .map_err(map_err)?;
 
-        Ok(Response::new(Lease {
-            lease_id: record.lease_id,
-            resource_id: record.resource_id,
-            granted_at: Some(to_timestamp(record.granted_at)),
-            expires_at: Some(to_timestamp(record.expires_at)),
-            ttl_seconds: record.ttl_seconds,
-        }))
+        Ok(Response::new(self.lease_to_proto(record)))
     }
 
     async fn cancel_subscription(

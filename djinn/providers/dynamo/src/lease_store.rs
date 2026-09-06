@@ -365,8 +365,11 @@ mod tests {
     async fn forever_lease_never_expires() {
         let (store, table_name, client) = setup().await;
 
-        let record = store.create("worker-forever", 0).await.unwrap();
-        assert_eq!(record.ttl_seconds, 0);
+        let record = store
+            .create("worker-forever", coordin8_core::LEASE_FOREVER)
+            .await
+            .unwrap();
+        assert_eq!(record.ttl_seconds, coordin8_core::LEASE_FOREVER);
         assert!(!record.is_expired());
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

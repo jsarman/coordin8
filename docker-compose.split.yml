@@ -2,14 +2,14 @@
 # image as the monolith (Dockerfile.djinn already has ENTRYPOINT ["djinn"],
 # so `command: ["registry"]` etc. just runs that subcommand).
 #
-# No `depends_on` on purpose. Roadmap item 1 (see
-# .claude/plans/hardening-roadmap/) made every split-mode service tolerate
-# starting in any order — it serves immediately and resolves its
-# dependency (Registry/LeaseMgr) in the background, reporting itself
-# NOT_SERVING on the standard gRPC health check until then. Omitting
-# depends_on here is deliberate: it's the real-world proof of that, not
-# just a unit test. `docker compose up` starts all six with no ordering
-# guarantee, and they still converge.
+# No `depends_on` on purpose. Every split-mode service serves immediately —
+# leasing is distributed (see .claude/plans/distributed-leasing/PRD.md):
+# Registry, Space, EventMgr, and TransactionMgr each embed their own
+# LeaseManager, so none of them has a blocking external dependency for their
+# own operation at all. Registry's address (COORDIN8_REGISTRY) is used only
+# for optional self-registration / service discovery, which already retries
+# in the background rather than gating startup. `docker compose up` starts
+# all five with no ordering guarantee, and they still converge.
 #
 # Uses COORDIN8_PROVIDER=local (in-memory) — each service's data is
 # private to its own container. DynamoDB backing for split mode is a
@@ -25,40 +25,15 @@ services:
     container_name: coordin8-registry
     command: ["registry"]
     environment:
-      RUST_LOG: "coordin8_registry=debug,coordin8_djinn=info"
+      RUST_LOG: "coordin8_registry=debug,coordin8_lease=debug,coordin8_djinn=info"
       COORDIN8_BIND_ADDR: "0.0.0.0:9002"
       COORDIN8_ADVERTISE_HOST: "registry"
-      # Registry can't discover LeaseMgr through itself, so it's the one
-      # split-mode service given a direct address instead of a Registry
-      # lookup — see .claude/plans/registry-bootstrap/PRD.md.
-      COORDIN8_LEASE: "http://lease:9001"
     ports:
       - "9002:9002"
     networks:
       - coordin8-split-net
     healthcheck:
       test: ["CMD", "djinn", "healthcheck", "--addr", "http://127.0.0.1:9002"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  lease:
-    build:
-      context: .
-      dockerfile: Dockerfile.djinn
-    container_name: coordin8-lease
-    command: ["lease"]
-    environment:
-      RUST_LOG: "coordin8_lease=debug,coordin8_djinn=info"
-      COORDIN8_BIND_ADDR: "0.0.0.0:9001"
-      COORDIN8_ADVERTISE_HOST: "lease"
-      COORDIN8_REGISTRY: "http://registry:9002"
-    ports:
-      - "9001:9001"
-    networks:
-      - coordin8-split-net
-    healthcheck:
-      test: ["CMD", "djinn", "healthcheck", "--addr", "http://127.0.0.1:9001"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -70,7 +45,7 @@ services:
     container_name: coordin8-event
     command: ["event"]
     environment:
-      RUST_LOG: "coordin8_event=debug,coordin8_djinn=info"
+      RUST_LOG: "coordin8_event=debug,coordin8_lease=debug,coordin8_djinn=info"
       COORDIN8_BIND_ADDR: "0.0.0.0:9005"
       COORDIN8_ADVERTISE_HOST: "event"
       COORDIN8_REGISTRY: "http://registry:9002"
@@ -91,7 +66,7 @@ services:
     container_name: coordin8-space
     command: ["space"]
     environment:
-      RUST_LOG: "coordin8_space=debug,coordin8_djinn=info"
+      RUST_LOG: "coordin8_space=debug,coordin8_lease=debug,coordin8_djinn=info"
       COORDIN8_BIND_ADDR: "0.0.0.0:9006"
       COORDIN8_ADVERTISE_HOST: "space"
       COORDIN8_REGISTRY: "http://registry:9002"
@@ -112,7 +87,7 @@ services:
     container_name: coordin8-txn
     command: ["txn"]
     environment:
-      RUST_LOG: "coordin8_txn=debug,coordin8_djinn=info"
+      RUST_LOG: "coordin8_txn=debug,coordin8_lease=debug,coordin8_djinn=info"
       COORDIN8_BIND_ADDR: "0.0.0.0:9004"
       COORDIN8_ADVERTISE_HOST: "txn"
       COORDIN8_REGISTRY: "http://registry:9002"

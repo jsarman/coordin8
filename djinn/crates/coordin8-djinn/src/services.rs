@@ -2,6 +2,13 @@
 //!
 //! Each function binds a gRPC server and blocks until the listener closes.
 //! Use `tokio::spawn` in tests to run multiple services concurrently.
+//!
+//! Leasing is distributed, not centralized: Registry, Space, EventMgr, and
+//! TransactionMgr each embed their own `LeaseManager` and mount `LeaseService`
+//! on their own port, matching Jini/Apache River's `Landlord` pattern — see
+//! `.claude/plans/distributed-leasing/PRD.md`. There is no standalone
+//! LeaseMgr process; a lease holder renews against whichever service granted
+//! it, using the `grantor_host`/`grantor_port` carried on the `Lease` itself.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,10 +18,10 @@ use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tracing::info;
 
-use coordin8_bootstrap::{
-    self_register, watch_expiry_prefix, RemoteCapabilityResolver, RemoteLeasing, RemoteTxnEnlister,
+use coordin8_bootstrap::{self_register, RemoteCapabilityResolver, RemoteTxnEnlister};
+use coordin8_core::{
+    EventStore, LeaseReclaimed, LeaseStore, Leasing, RegistryStore, SpaceStore, TxnStore,
 };
-use coordin8_core::{EventStore, LeaseStore, Leasing, RegistryStore, SpaceStore, TxnStore};
 use coordin8_event::{EventManager, EventServiceImpl};
 use coordin8_lease::{LeaseManager, LeaseServiceImpl};
 use coordin8_proto::coordin8::event_service_server::EventServiceServer;
@@ -58,8 +65,8 @@ pub fn advertise_host() -> String {
 /// "one host, fixed ports" and skip Registry entirely for the core services.
 /// That assumption is what the registry-bootstrap effort
 /// (`.claude/plans/registry-bootstrap/`) removes — clients should look up
-/// LeaseMgr/Space/EventMgr/Proxy/TransactionMgr through Registry the same way
-/// whether bundled or split. This makes that true for bundled mode too.
+/// Space/EventMgr/Proxy/TransactionMgr through Registry the same way whether
+/// bundled or split. This makes that true for bundled mode too.
 ///
 /// Retries the initial dial (Registry's own server task may not have started
 /// accepting yet) and then holds the registration alive for the process
@@ -114,17 +121,25 @@ fn provider_from_env() -> String {
     std::env::var("COORDIN8_PROVIDER").unwrap_or_else(|_| "local".into())
 }
 
-async fn lease_store_from_env() -> Result<Arc<dyn LeaseStore>> {
+/// `namespace` distinguishes each service's own lease store when using
+/// DynamoDB (e.g. `"space"` → table `coordin8_leases_space`), so Registry,
+/// Space, EventMgr, and TransactionMgr never share lease state even though
+/// they all use the same `LeaseStore` trait and, for the in-memory provider,
+/// the same concrete type.
+async fn lease_store_from_env(namespace: &str) -> Result<Arc<dyn LeaseStore>> {
     Ok(match provider_from_env().as_str() {
         "dynamo" => {
             let client = coordin8_provider_dynamo::make_dynamo_client().await;
-            let store = Arc::new(coordin8_provider_dynamo::DynamoLeaseStore::new(client));
+            let table_name = format!("coordin8_leases_{namespace}");
+            let store = Arc::new(coordin8_provider_dynamo::DynamoLeaseStore::with_table(
+                client, table_name,
+            ));
             store.init().await?;
-            info!("  ✓ Provider: dynamo (DynamoDB) — LeaseStore");
+            info!("  ✓ Provider: dynamo (DynamoDB) — LeaseStore ({namespace})");
             store
         }
         _ => {
-            info!("  ✓ Provider: local (in-memory) — LeaseStore");
+            info!("  ✓ Provider: local (in-memory) — LeaseStore ({namespace})");
             Arc::new(InMemoryLeaseStore::new())
         }
     })
@@ -194,173 +209,277 @@ async fn space_store_from_env() -> Result<Arc<dyn SpaceStore>> {
     })
 }
 
+// ── Embedded Landlord (pub(crate) — every leasing service builds one) ───────
+
+/// Build an embedded Landlord for a service that grants leased resources:
+/// its own `LeaseManager`, its own reaper task, and the `LeaseService` gRPC
+/// glue ready to mount on that service's own server. `grantor_host`/
+/// `grantor_port` are stamped onto every `Lease` this manager grants, so a
+/// holder always knows where to renew (see `Lease`'s proto doc comment).
+///
+/// Every service that grants leased resources — Registry, Space, EventMgr,
+/// TransactionMgr — calls this instead of dialing a shared external LeaseMgr.
+/// This is Jini's `Landlord` pattern: each grantor manages its own leases
+/// in-process. See `.claude/plans/distributed-leasing/PRD.md`.
+async fn embedded_landlord(
+    namespace: &str,
+    grantor_host: &str,
+    grantor_port: u16,
+) -> Result<(Arc<LeaseManager>, LeaseServiceServer<LeaseServiceImpl>)> {
+    let store = lease_store_from_env(namespace).await?;
+    let config = coordin8_core::LeaseConfig::from_env_for(Some(namespace));
+    info!(
+        "  Lease policy ({namespace}): max_ttl={}, preferred_ttl={}s",
+        config
+            .max_ttl
+            .map_or("FOREVER".to_string(), |v| format!("{}s", v)),
+        config.preferred_ttl
+    );
+
+    let (expiry_tx, _) = broadcast::channel::<LeaseReclaimed>(256);
+    let manager = Arc::new(LeaseManager::new(store, config, expiry_tx.clone()));
+
+    let reaper_manager = Arc::clone(&manager);
+    let reaper_tx = expiry_tx.clone();
+    tokio::spawn(async move {
+        coordin8_lease::reaper::run_reaper(reaper_manager, reaper_tx, Duration::from_secs(1)).await;
+    });
+
+    let svc = LeaseServiceServer::new(LeaseServiceImpl::new(
+        Arc::clone(&manager),
+        expiry_tx,
+        grantor_host,
+        grantor_port,
+    ));
+
+    Ok((manager, svc))
+}
+
+/// Subscribe to a `LeaseManager`'s own reclaim broadcast (expiry or explicit
+/// cancel — see `LeaseManager::cancel`) and dispatch each event to `handler`.
+///
+/// Explicitly handles `RecvError::Lagged` by logging and continuing.
+/// Treating it as a stream close (the old `while let Ok(..)` shape every
+/// cascade handler used to have) silently and permanently killed the cascade
+/// the first time a burst of reclaims outran the channel's buffer — e.g. a
+/// burst of same-TTL tuple writes on Space, previously the worst-hit case
+/// since every service shared one channel. Each service now has its own
+/// private channel with only its own traffic, which lowers the odds of a
+/// lag burst, but the fix matters regardless: a task that silently stops
+/// forever is a much worse failure mode than occasionally missing an
+/// individual cleanup during a burst.
+fn spawn_cascade(
+    label: &'static str,
+    mut rx: broadcast::Receiver<LeaseReclaimed>,
+    handler: impl Fn(LeaseReclaimed) + Send + 'static,
+) {
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => handler(event),
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        "{label}: cascade lagged, missed {n} reclaim event(s) — \
+                         some resources may not have been cleaned up promptly"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    tracing::warn!("{label}: cascade channel closed, stopping");
+                    break;
+                }
+            }
+        }
+    });
+}
+
 // ── Monolith boot ─────────────────────────────────────────────────────────────
 
 /// Boot every service in a single process on fixed ports (the original monolith).
-///
-/// This is `djinn` / `djinn all`. Zero behavioral changes from the original
-/// `main.rs`.
 pub async fn run_all() -> Result<()> {
     info!("Djinn starting...");
 
     // ── Layer 0: Provider ────────────────────────────────────────────────────
-    let lease_store = lease_store_from_env().await?;
     let registry_store = registry_store_from_env().await?;
     let event_store = event_store_from_env().await?;
     let txn_store = txn_store_from_env().await?;
     let space_store = space_store_from_env().await?;
 
-    // ── Layer 1: LeaseMgr ────────────────────────────────────────────────────
-    let (expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);
-    let lease_config = coordin8_core::LeaseConfig::from_env();
-    info!(
-        "  Lease policy: max_ttl={}, preferred_ttl={}s",
-        lease_config
-            .max_ttl
-            .map_or("FOREVER".to_string(), |v| format!("{}s", v)),
-        lease_config.preferred_ttl
-    );
-    let lease_manager = Arc::new(LeaseManager::new(lease_store, lease_config));
-    let leasing: Arc<dyn Leasing> = lease_manager.clone();
+    let host = advertise_host();
 
-    let reaper_manager = Arc::clone(&lease_manager);
-    let reaper_tx = expiry_tx.clone();
-    tokio::spawn(async move {
-        coordin8_lease::reaper::run_reaper(reaper_manager, reaper_tx, Duration::from_secs(1)).await;
-    });
-    info!("  ✓ LeaseMgr: ready");
-
-    // ── Layer 2a: Registry ───────────────────────────────────────────────────
+    // ── Registry ─────────────────────────────────────────────────────────────
+    let (registry_lease_manager, lease_svc_for_registry) =
+        embedded_landlord("registry", &host, 9002).await?;
     let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
     let registry_index = Arc::new(RegistryIndex::new(registry_store.clone()));
 
-    let registry_expiry_index = Arc::clone(&registry_index);
-    let registry_expiry_tx = registry_tx.clone();
-    let mut registry_expiry_rx = expiry_tx.subscribe();
-    tokio::spawn(async move {
-        while let Ok(lease) = registry_expiry_rx.recv().await {
-            if lease.resource_id.starts_with("registry:") {
-                if let Ok(Some(entry)) = registry_expiry_index
-                    .unregister_by_lease(&lease.lease_id)
-                    .await
-                {
-                    tracing::debug!(
-                        capability_id = %entry.capability_id,
-                        interface = %entry.interface,
-                        lease_id = %lease.lease_id,
-                        "registry entry expired"
-                    );
-                    let _ =
-                        registry_expiry_tx.send(coordin8_registry::service::RegistryChangedEvent {
+    {
+        let registry_expiry_index = Arc::clone(&registry_index);
+        let registry_expiry_tx = registry_tx.clone();
+        spawn_cascade(
+            "registry",
+            registry_lease_manager.expiry_tx().subscribe(),
+            move |LeaseReclaimed { record, .. }| {
+                let index = Arc::clone(&registry_expiry_index);
+                let tx = registry_expiry_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Some(entry)) = index.unregister_by_lease(&record.lease_id).await {
+                        tracing::debug!(
+                            capability_id = %entry.capability_id,
+                            interface = %entry.interface,
+                            lease_id = %record.lease_id,
+                            "registry entry reclaimed"
+                        );
+                        let _ = tx.send(coordin8_registry::service::RegistryChangedEvent {
                             event_type: 1,
                             entry,
                         });
-                }
-            }
-        }
-    });
+                    }
+                });
+            },
+        );
+    }
     info!("  ✓ Registry: ready");
 
-    // ── Layer 2b: EventMgr ───────────────────────────────────────────────────
+    // ── EventMgr ─────────────────────────────────────────────────────────────
+    let (event_lease_manager, lease_svc_for_event) =
+        embedded_landlord("event", &host, 9005).await?;
+    let event_leasing: Arc<dyn Leasing> = event_lease_manager.clone();
     let (event_tx, _) = broadcast::channel::<coordin8_core::EventRecord>(256);
-    let event_manager = Arc::new(EventManager::new(
-        event_store,
-        Arc::clone(&leasing),
-        event_tx,
-    ));
+    let event_manager = Arc::new(EventManager::new(event_store, event_leasing, event_tx));
 
-    let event_expiry_mgr = Arc::clone(&event_manager);
-    let mut event_expiry_rx = expiry_tx.subscribe();
-    tokio::spawn(async move {
-        while let Ok(lease) = event_expiry_rx.recv().await {
-            if lease.resource_id.starts_with("event:") {
-                let _ = event_expiry_mgr.unsubscribe_by_lease(&lease.lease_id).await;
-            }
-        }
-    });
+    {
+        let event_expiry_mgr = Arc::clone(&event_manager);
+        spawn_cascade(
+            "event",
+            event_lease_manager.expiry_tx().subscribe(),
+            move |LeaseReclaimed { record, .. }| {
+                let mgr = Arc::clone(&event_expiry_mgr);
+                tokio::spawn(async move {
+                    let _ = mgr.unsubscribe_by_lease(&record.lease_id).await;
+                });
+            },
+        );
+    }
     info!("  ✓ EventMgr: ready");
 
-    // ── Layer 3: Proxy ───────────────────────────────────────────────────────
+    // ── Proxy ────────────────────────────────────────────────────────────────
+    // Proxy never grants leases — it only resolves capability templates
+    // against Registry, unrelated to the leasing model.
     let proxy_config = ProxyConfig::from_env();
     let proxy_resolver = Arc::new(LocalCapabilityResolver::new(registry_store));
     let proxy_manager = Arc::new(ProxyManager::new(proxy_resolver, proxy_config));
     info!("  ✓ Proxy: ready");
 
-    // ── Layer 4: TransactionMgr ───────────────────────────────────────────────
-    let txn_manager = Arc::new(TxnManager::new(txn_store, Arc::clone(&leasing)));
+    // ── TransactionMgr ───────────────────────────────────────────────────────
+    let (txn_lease_manager, lease_svc_for_txn) = embedded_landlord("txn", &host, 9004).await?;
+    let txn_leasing: Arc<dyn Leasing> = txn_lease_manager.clone();
+    let txn_manager = Arc::new(TxnManager::new(txn_store, txn_leasing));
 
-    let txn_expiry_mgr = Arc::clone(&txn_manager);
-    let mut txn_expiry_rx = expiry_tx.subscribe();
-    tokio::spawn(async move {
-        while let Ok(lease) = txn_expiry_rx.recv().await {
-            if let Some(txn_id) = lease.resource_id.strip_prefix("txn:") {
-                let _ = txn_expiry_mgr.abort_expired(txn_id).await;
-            }
-        }
-    });
+    {
+        let txn_expiry_mgr = Arc::clone(&txn_manager);
+        spawn_cascade(
+            "txn",
+            txn_lease_manager.expiry_tx().subscribe(),
+            move |LeaseReclaimed { record, .. }| {
+                if let Some(txn_id) = record.resource_id.strip_prefix("txn:") {
+                    let mgr = Arc::clone(&txn_expiry_mgr);
+                    let txn_id = txn_id.to_string();
+                    tokio::spawn(async move {
+                        let _ = mgr.abort_expired(&txn_id).await;
+                    });
+                }
+            },
+        );
+    }
     info!("  ✓ TransactionMgr: ready");
 
-    // ── Layer 2c: Space ──────────────────────────────────────────────────────
+    // ── Space ────────────────────────────────────────────────────────────────
+    let (space_lease_manager, lease_svc_for_space) =
+        embedded_landlord("space", &host, 9006).await?;
+    let space_leasing: Arc<dyn Leasing> = space_lease_manager.clone();
     let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     // Bundled mode: auto-enlist goes straight into the local TxnManager so the
     // 2PC coordinator dials back into our own space participant on :9006.
     let space_enlister = Arc::new(LocalTxnEnlister::new(Arc::clone(&txn_manager)));
-    let space_participant_endpoint = format!("{}:9006", advertise_host());
+    let space_participant_endpoint = format!("{host}:9006");
     let space_manager = Arc::new(SpaceManager::with_enlister(
         space_store,
-        Arc::clone(&leasing),
+        space_leasing,
         space_tuple_tx,
         space_expiry_tx,
         space_enlister,
         space_participant_endpoint,
     ));
 
-    let space_expiry_mgr = Arc::clone(&space_manager);
-    let mut space_expiry_rx = expiry_tx.subscribe();
-    tokio::spawn(async move {
-        while let Ok(lease) = space_expiry_rx.recv().await {
-            if lease.resource_id.starts_with("space:") {
-                space_expiry_mgr.on_tuple_expired(&lease.lease_id).await;
-            } else if lease.resource_id.starts_with("space-watch:") {
-                space_expiry_mgr.on_watch_expired(&lease.lease_id).await;
-            }
-        }
-    });
+    {
+        let space_expiry_mgr = Arc::clone(&space_manager);
+        spawn_cascade(
+            "space",
+            space_lease_manager.expiry_tx().subscribe(),
+            move |LeaseReclaimed { record, .. }| {
+                let mgr = Arc::clone(&space_expiry_mgr);
+                tokio::spawn(async move {
+                    if record.resource_id.starts_with("space:") {
+                        mgr.on_tuple_expired(&record.lease_id).await;
+                    } else if record.resource_id.starts_with("space-watch:") {
+                        mgr.on_watch_expired(&record.lease_id).await;
+                    }
+                });
+            },
+        );
+    }
     info!("  ✓ Space: ready");
 
     // ── gRPC servers ─────────────────────────────────────────────────────────
-    let lease_addr = "0.0.0.0:9001".parse()?;
     let registry_addr = "0.0.0.0:9002".parse()?;
     let proxy_addr = "0.0.0.0:9003".parse()?;
     let txn_addr = "0.0.0.0:9004".parse()?;
     let event_addr = "0.0.0.0:9005".parse()?;
     let space_addr = "0.0.0.0:9006".parse()?;
 
-    let lease_svc =
-        LeaseServiceServer::new(LeaseServiceImpl::new(Arc::clone(&lease_manager), expiry_tx));
+    let registry_leasing: Arc<dyn Leasing> = registry_lease_manager;
     let registry_svc = RegistryServiceServer::new(RegistryServiceImpl::new(
         registry_index,
-        Arc::clone(&leasing),
+        registry_leasing,
         registry_tx,
+        &host,
+        9002,
     ));
     let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
-    let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(txn_manager));
-    let event_svc = EventServiceServer::new(EventServiceImpl::new(event_manager));
-    let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(Arc::clone(&space_manager)));
+    let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(txn_manager, &host, 9004));
+    let event_svc = EventServiceServer::new(EventServiceImpl::new(event_manager, &host, 9005));
+    let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(
+        Arc::clone(&space_manager),
+        &host,
+        9006,
+    ));
     let space_participant_svc =
         ParticipantServiceServer::new(SpaceParticipantService::new(space_manager));
 
-    info!("  ✓ LeaseMgr:      listening on {}", lease_addr);
-    info!("  ✓ Registry:      listening on {}", registry_addr);
-    info!("  ✓ Proxy:         listening on {}", proxy_addr);
-    info!("  ✓ TransactionMgr: listening on {}", txn_addr);
-    info!("  ✓ EventMgr:      listening on {}", event_addr);
-    info!("  ✓ Space:         listening on {}", space_addr);
+    info!(
+        "  ✓ Registry:       listening on {} (+ LeaseService)",
+        registry_addr
+    );
+    info!("  ✓ Proxy:          listening on {}", proxy_addr);
+    info!(
+        "  ✓ TransactionMgr: listening on {} (+ LeaseService)",
+        txn_addr
+    );
+    info!(
+        "  ✓ EventMgr:       listening on {} (+ LeaseService)",
+        event_addr
+    );
+    info!(
+        "  ✓ Space:          listening on {} (+ LeaseService)",
+        space_addr
+    );
 
     // Self-register every core service into the same process's Registry —
     // see spawn_bundled_self_register's doc comment for why this matters now.
-    spawn_bundled_self_register("LeaseMgr", 9001);
+    // No "LeaseMgr" entry — leasing is distributed, there's no single
+    // interface to look up; a holder renews via the grantor_host/port
+    // already carried on the Lease it holds.
     spawn_bundled_self_register("EventMgr", 9005);
     spawn_bundled_self_register("Proxy", 9003);
     spawn_bundled_self_register("TransactionMgr", 9004);
@@ -369,16 +488,23 @@ pub async fn run_all() -> Result<()> {
     info!("Djinn ready.");
 
     tokio::try_join!(
-        Server::builder().add_service(lease_svc).serve(lease_addr),
         Server::builder()
             .add_service(registry_svc)
+            .add_service(lease_svc_for_registry)
             .serve(registry_addr),
         Server::builder().add_service(proxy_svc).serve(proxy_addr),
-        Server::builder().add_service(txn_svc).serve(txn_addr),
-        Server::builder().add_service(event_svc).serve(event_addr),
+        Server::builder()
+            .add_service(txn_svc)
+            .add_service(lease_svc_for_txn)
+            .serve(txn_addr),
+        Server::builder()
+            .add_service(event_svc)
+            .add_service(lease_svc_for_event)
+            .serve(event_addr),
         Server::builder()
             .add_service(space_svc)
             .add_service(space_participant_svc)
+            .add_service(lease_svc_for_space)
             .serve(space_addr),
     )?;
 
@@ -389,11 +515,9 @@ pub async fn run_all() -> Result<()> {
 
 /// Boot Registry alone on the given bind address.
 ///
-/// Registry is the well-known anchor and does not self-register. It does,
-/// however, depend on the real LeaseMgr for its own entries' TTL bookkeeping
-/// — and since it can't discover that dependency through itself the way
-/// every other split-mode service discovers it through Registry, it's given
-/// LeaseMgr's address directly via `COORDIN8_LEASE`.
+/// Registry is the well-known anchor and does not self-register. It embeds
+/// its own `LeaseManager` for its own entries' TTL bookkeeping — no external
+/// dependency at all, so it's healthy and serving the moment it binds.
 ///
 /// Pass `bind` as `"0.0.0.0:0"` to let the OS assign a port. Use
 /// `serve_with_incoming` if you need the actual port before serving — see
@@ -403,276 +527,76 @@ pub async fn run_registry() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     let actual_addr = listener.local_addr()?;
     info!("Djinn registry starting on {actual_addr}...");
-    let lease_addr = std::env::var("COORDIN8_LEASE")
-        .map_err(|_| anyhow::anyhow!("COORDIN8_LEASE must be set for split-mode Registry"))?;
-    run_registry_on_listener(listener, &lease_addr).await
+    run_registry_on_listener(listener).await
 }
 
-/// Boot Registry on a pre-bound [`TcpListener`], wired to a directly-dialed
-/// LeaseMgr at `lease_addr`.
+/// Boot Registry on a pre-bound [`TcpListener`].
 ///
 /// This variant is test-friendly: bind port 0, read the actual address, then
-/// pass the listener here. The caller knows the exact address before the server
-/// starts accepting.
-///
-/// Serves immediately on `NotServing` health, exactly like every other
-/// split-mode service — `Register`/`ModifyAttrs` calls fail fast with
-/// `Unavailable` until the background task below resolves LeaseMgr and flips
-/// health to `Serving`. See [`coordin8_bootstrap::RemoteLeasing::connect_direct`]
-/// for why Registry dials LeaseMgr directly instead of through a Lookup, and
-/// `.claude/plans/registry-bootstrap/PRD.md` for the full bootstrap-cycle
-/// writeup this resolves.
-pub async fn run_registry_on_listener(
-    listener: tokio::net::TcpListener,
-    lease_addr: &str,
-) -> Result<()> {
+/// pass the listener here. The caller knows the exact address before the
+/// server starts accepting.
+pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Result<()> {
+    let actual_addr = listener.local_addr()?;
+    let host = advertise_host();
+
     let registry_store = registry_store_from_env().await?;
     let registry_index = Arc::new(RegistryIndex::new(registry_store));
 
-    // Construct immediately against a not-yet-resolved LeaseMgr — see
-    // PendingLeasing. Discovery happens in the background task below;
-    // requests made before it resolves fail fast with Unavailable instead
-    // of the server not being reachable at all.
-    let pending_leasing = Arc::new(coordin8_bootstrap::PendingLeasing::new());
-    let leasing: Arc<dyn Leasing> = Arc::clone(&pending_leasing) as Arc<dyn Leasing>;
-
+    let (lease_manager, lease_svc) =
+        embedded_landlord("registry", &host, actual_addr.port()).await?;
     let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
 
-    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
-    health_reporter
-        .set_service_status("", ServingStatus::NotServing)
-        .await;
-
-    // Resolve LeaseMgr in the background: install it once found, flip
-    // health to Serving, then start the WatchExpiry-driven cleanup for our
-    // own "registry:" prefixed entries — mirroring EventMgr/Space/TxnMgr,
-    // except reconnect redials `lease_addr` directly (no Registry lookup;
-    // see watch_expiry_direct).
     {
-        let pending_leasing = Arc::clone(&pending_leasing);
-        let lease_addr = lease_addr.to_string();
-        let mut health_reporter = health_reporter.clone();
         let registry_expiry_index = Arc::clone(&registry_index);
         let registry_expiry_tx = registry_tx.clone();
-        tokio::spawn(async move {
-            let resolved = coordin8_bootstrap::RemoteLeasing::connect_direct(&lease_addr)
-                .await
-                .expect("connect_direct retries forever, never returns Err");
-            pending_leasing.install(resolved).await;
-            health_reporter
-                .set_service_status("", ServingStatus::Serving)
-                .await;
-            info!("  ✓ Registry: LeaseMgr resolved, now Serving");
-
-            let lease_stream_client = loop {
-                match coordin8_proto::coordin8::lease_service_client::LeaseServiceClient::connect(
-                    lease_addr.clone(),
-                )
-                .await
-                {
-                    Ok(c) => break c,
-                    Err(e) => {
-                        tracing::warn!("lease dial failed: {e}, retrying in 500ms");
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+        spawn_cascade(
+            "registry",
+            lease_manager.expiry_tx().subscribe(),
+            move |LeaseReclaimed { record, .. }| {
+                let index = Arc::clone(&registry_expiry_index);
+                let tx = registry_expiry_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Some(entry)) = index.unregister_by_lease(&record.lease_id).await {
+                        tracing::debug!(
+                            capability_id = %entry.capability_id,
+                            interface = %entry.interface,
+                            lease_id = %record.lease_id,
+                            "registry entry reclaimed (split mode)"
+                        );
+                        let _ = tx.send(coordin8_registry::service::RegistryChangedEvent {
+                            event_type: 1,
+                            entry,
+                        });
                     }
-                }
-            };
-            coordin8_bootstrap::watch_expiry_direct(
-                lease_stream_client,
-                lease_addr,
-                "registry:".to_string(),
-                move |evt| {
-                    let index = Arc::clone(&registry_expiry_index);
-                    let tx = registry_expiry_tx.clone();
-                    let lease_id = evt.lease_id;
-                    tokio::spawn(async move {
-                        if let Ok(Some(entry)) = index.unregister_by_lease(&lease_id).await {
-                            tracing::debug!(
-                                capability_id = %entry.capability_id,
-                                interface = %entry.interface,
-                                lease_id = %lease_id,
-                                "registry entry expired (split mode)"
-                            );
-                            let _ = tx.send(coordin8_registry::service::RegistryChangedEvent {
-                                event_type: 1,
-                                entry,
-                            });
-                        }
-                    });
-                },
-            )
-            .await;
-        });
+                });
+            },
+        );
     }
 
+    let leasing: Arc<dyn Leasing> = lease_manager;
     let registry_svc = RegistryServiceServer::new(RegistryServiceImpl::new(
         registry_index,
-        Arc::clone(&leasing),
+        leasing,
         registry_tx,
+        &host,
+        actual_addr.port(),
     ));
 
-    info!(
-        "  ✓ Registry (split): listening on {}",
-        listener.local_addr()?
-    );
-
-    Server::builder()
-        .add_service(health_service)
-        .add_service(registry_svc)
-        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-        .await?;
-
-    Ok(())
-}
-
-// ── LeaseMgr alone ───────────────────────────────────────────────────────────
-
-/// Boot LeaseMgr alone. Reads `COORDIN8_BIND_ADDR` and `COORDIN8_REGISTRY`.
-///
-/// If `COORDIN8_REGISTRY` is set, self-registers under `interface=LeaseMgr`
-/// with a 30-second self-lease. Otherwise warns and runs standalone.
-pub async fn run_lease() -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(&bind_addr()).await?;
-    let host = advertise_host();
-    let registry_addr = std::env::var("COORDIN8_REGISTRY").ok();
-    run_lease_on_listener(listener, registry_addr.as_deref(), &host, 30).await
-}
-
-/// Boot LeaseMgr on a pre-bound [`TcpListener`].
-///
-/// `registry_addr` — if `Some`, self-registers with this Registry endpoint.
-/// `advertise_host` — host peers should use to dial this LeaseMgr. The port
-/// is taken from the listener (so `bind_addr = 0.0.0.0:0` still registers the
-/// OS-assigned port correctly).
-/// `self_lease_ttl` — TTL in seconds for the self-registration lease.
-pub async fn run_lease_on_listener(
-    listener: tokio::net::TcpListener,
-    registry_addr: Option<&str>,
-    advertise_host: &str,
-    self_lease_ttl: u64,
-) -> Result<()> {
-    run_lease_on_listener_with_shutdown(
-        listener,
-        registry_addr,
-        advertise_host,
-        self_lease_ttl,
-        std::future::pending::<()>(),
-    )
-    .await
-}
-
-/// Same as [`run_lease_on_listener`] but exits cleanly when `shutdown`
-/// resolves. Chaos tests use this to initiate a real graceful shutdown that
-/// actually tears down in-flight HTTP/2 connections — a plain
-/// `JoinHandle::abort()` only cancels the outer task and leaves tonic's
-/// detached per-connection workers serving their existing streams.
-pub async fn run_lease_on_listener_with_shutdown(
-    listener: tokio::net::TcpListener,
-    registry_addr: Option<&str>,
-    advertise_host: &str,
-    self_lease_ttl: u64,
-    shutdown: impl std::future::Future<Output = ()>,
-) -> Result<()> {
-    let actual_addr = listener.local_addr()?;
-    let advertise_port = actual_addr.port();
-
-    let lease_store = lease_store_from_env().await?;
-    let lease_config = coordin8_core::LeaseConfig::from_env();
-    let lease_manager = Arc::new(LeaseManager::new(lease_store, lease_config));
-
-    let (expiry_tx, _) = broadcast::channel::<coordin8_core::LeaseRecord>(256);
-    let reaper_manager = Arc::clone(&lease_manager);
-    let reaper_tx = expiry_tx.clone();
-    tokio::spawn(async move {
-        coordin8_lease::reaper::run_reaper(reaper_manager, reaper_tx, Duration::from_secs(1)).await;
-    });
-
-    let lease_svc =
-        LeaseServiceServer::new(LeaseServiceImpl::new(Arc::clone(&lease_manager), expiry_tx));
-
-    info!(
-        "  ✓ LeaseMgr (split): listening on {actual_addr}, advertising {advertise_host}:{advertise_port}"
-    );
-
-    let registry_url = registry_addr.map(str::to_string);
-    let advertise_host_owned = advertise_host.to_string();
-
-    // Self-registration runs concurrently with the server via select!. The
-    // handle is held as a local in `register_fut`, so when the server exits
-    // OR the outer task is aborted, the future drops → handle drops → the
-    // renewal task stops and the Registry entry expires on its own TTL.
-    let register_fut = async move {
-        let Some(registry_url) = registry_url else {
-            tracing::warn!(
-                "COORDIN8_REGISTRY not set — LeaseMgr running standalone (no self-registration)"
-            );
-            std::future::pending::<()>().await;
-            return;
-        };
-
-        let registry_client = loop {
-            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
-                registry_url.clone(),
-            )
-            .await
-            {
-                Ok(c) => break c,
-                Err(e) => {
-                    tracing::warn!("registry dial failed: {e}, retrying in 500ms");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-        };
-
-        match self_register(
-            registry_client,
-            "LeaseMgr",
-            std::collections::HashMap::new(),
-            &advertise_host_owned,
-            advertise_port,
-            self_lease_ttl,
-        )
-        .await
-        {
-            Ok(handle) => {
-                info!(
-                    "  ✓ LeaseMgr: self-registered (capability: {}, lease: {})",
-                    handle.capability_id(),
-                    handle.lease_id()
-                );
-                // Hold the handle for the lifetime of this future so the
-                // renewal task stays alive only while we are.
-                std::future::pending::<()>().await;
-            }
-            Err(e) => {
-                tracing::error!("self_register failed: {e}");
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-
-    // LeaseMgr has no blocking external dependency — Registry is only needed
-    // for optional self-registration, which already retries concurrently
-    // below rather than gating startup. Healthy the moment it's about to serve.
+    // No blocking external dependency (leasing is embedded, not remote) —
+    // healthy the moment it's about to serve.
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_service_status("", ServingStatus::Serving)
         .await;
 
-    let server_fut = Server::builder()
+    info!("  ✓ Registry (split): listening on {actual_addr} (+ LeaseService)");
+
+    Server::builder()
         .add_service(health_service)
+        .add_service(registry_svc)
         .add_service(lease_svc)
-        .serve_with_incoming_shutdown(
-            tokio_stream::wrappers::TcpListenerStream::new(listener),
-            shutdown,
-        );
-
-    info!("Djinn lease ready.");
-
-    tokio::select! {
-        res = server_fut => res?,
-        _ = register_fut => unreachable!("register_fut awaits pending() forever"),
-    }
+        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+        .await?;
 
     Ok(())
 }
@@ -681,8 +605,8 @@ pub async fn run_lease_on_listener_with_shutdown(
 
 /// Boot EventMgr alone. Reads `COORDIN8_BIND_ADDR` and `COORDIN8_REGISTRY`.
 ///
-/// Requires `COORDIN8_REGISTRY` to be set — EventMgr needs a Registry to
-/// discover LeaseMgr through and to self-register into.
+/// Requires `COORDIN8_REGISTRY` to be set — EventMgr self-registers into it
+/// (unrelated to leasing, which is now embedded).
 pub async fn run_event() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_addr()).await?;
     let host = advertise_host();
@@ -691,17 +615,14 @@ pub async fn run_event() -> Result<()> {
     run_event_on_listener(listener, &registry_addr, &host, 30).await
 }
 
-/// Boot EventMgr on a pre-bound [`TcpListener`], wiring it to a remote
-/// LeaseMgr discovered through Registry.
+/// Boot EventMgr on a pre-bound [`TcpListener`], with its own embedded
+/// `LeaseManager` for subscription leases.
 ///
-/// - `registry_addr` — Registry endpoint used for LeaseMgr discovery and
-///   self-registration under `interface=EventMgr`.
+/// - `registry_addr` — used only for self-registration under
+///   `interface=EventMgr`; EventMgr no longer has any leasing dependency on
+///   Registry or anything else.
 /// - `advertise_host` — host peers should use to dial this EventMgr.
 /// - `self_lease_ttl` — TTL in seconds for the self-registration lease.
-///
-/// Uses [`RemoteLeasing`] for grant/renew/cancel and
-/// [`watch_expiry_prefix`] to drive subscription cleanup when leases expire
-/// on the remote LeaseMgr.
 pub async fn run_event_on_listener(
     listener: tokio::net::TcpListener,
     registry_addr: &str,
@@ -711,71 +632,42 @@ pub async fn run_event_on_listener(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
 
-    // Construct immediately against a not-yet-resolved LeaseMgr — see
-    // PendingLeasing. Discovery happens in the background task below;
-    // requests made before it resolves fail fast with Unavailable instead
-    // of the server not being reachable at all.
-    let pending_leasing = Arc::new(coordin8_bootstrap::PendingLeasing::new());
-    let leasing: Arc<dyn Leasing> = Arc::clone(&pending_leasing) as Arc<dyn Leasing>;
+    let (lease_manager, lease_svc) =
+        embedded_landlord("event", advertise_host, advertise_port).await?;
+    let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
-    // Local in-memory event store — events live in the EventMgr process.
     let event_store = event_store_from_env().await?;
     let (event_tx, _) = broadcast::channel::<coordin8_core::EventRecord>(256);
-    let event_manager = Arc::new(EventManager::new(
-        event_store,
-        Arc::clone(&leasing),
-        event_tx,
-    ));
+    let event_manager = Arc::new(EventManager::new(event_store, leasing, event_tx));
 
-    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
-    health_reporter
-        .set_service_status("", ServingStatus::NotServing)
-        .await;
-
-    // Resolve LeaseMgr in the background: install it once found, flip
-    // health to Serving, then start the expiry-cleanup watcher (it needs a
-    // real LeaseServiceClient, so it waits for the same discovery).
     {
-        let pending_leasing = Arc::clone(&pending_leasing);
-        let registry_addr = registry_addr.to_string();
-        let mut health_reporter = health_reporter.clone();
-        let expiry_event_manager = Arc::clone(&event_manager);
-        tokio::spawn(async move {
-            let resolved = RemoteLeasing::connect(&registry_addr)
-                .await
-                .expect("RemoteLeasing::connect retries forever, never returns Err");
-            pending_leasing.install(resolved).await;
-            health_reporter
-                .set_service_status("", ServingStatus::Serving)
-                .await;
-            info!("  ✓ EventMgr: LeaseMgr resolved, now Serving");
-
-            // Drive subscription cleanup off remote LeaseMgr expiry events.
-            // Needs its own LeaseServiceClient for the streaming WatchExpiry
-            // RPC — the stream reconnects itself via Registry on failure.
-            let lease_stream_client = coordin8_bootstrap::discover_lease_mgr(&registry_addr)
-                .await
-                .expect("discover_lease_mgr retries forever, never returns Err");
-            watch_expiry_prefix(
-                lease_stream_client,
-                registry_addr,
-                "event:".to_string(),
-                move |evt| {
-                    let mgr = Arc::clone(&expiry_event_manager);
-                    let lease_id = evt.lease_id;
-                    tokio::spawn(async move {
-                        let _ = mgr.unsubscribe_by_lease(&lease_id).await;
-                    });
-                },
-            )
-            .await;
-        });
+        let event_expiry_mgr = Arc::clone(&event_manager);
+        spawn_cascade(
+            "event",
+            lease_manager.expiry_tx().subscribe(),
+            move |LeaseReclaimed { record, .. }| {
+                let mgr = Arc::clone(&event_expiry_mgr);
+                tokio::spawn(async move {
+                    let _ = mgr.unsubscribe_by_lease(&record.lease_id).await;
+                });
+            },
+        );
     }
 
-    let event_svc = EventServiceServer::new(EventServiceImpl::new(Arc::clone(&event_manager)));
+    let event_svc = EventServiceServer::new(EventServiceImpl::new(
+        Arc::clone(&event_manager),
+        advertise_host,
+        advertise_port,
+    ));
+
+    // No blocking external dependency — healthy the moment it's about to serve.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
 
     info!(
-        "  ✓ EventMgr (split): listening on {actual_addr}, advertising {advertise_host}:{advertise_port}"
+        "  ✓ EventMgr (split): listening on {actual_addr} (+ LeaseService), advertising {advertise_host}:{advertise_port}"
     );
 
     let registry_url = registry_addr.to_string();
@@ -824,6 +716,7 @@ pub async fn run_event_on_listener(
     let server_fut = Server::builder()
         .add_service(health_service)
         .add_service(event_svc)
+        .add_service(lease_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
     info!("Djinn event ready.");
@@ -840,8 +733,9 @@ pub async fn run_event_on_listener(
 
 /// Boot Space alone. Reads `COORDIN8_BIND_ADDR` and `COORDIN8_REGISTRY`.
 ///
-/// Requires `COORDIN8_REGISTRY` — Space needs a Registry to discover
-/// LeaseMgr through and to self-register into.
+/// Requires `COORDIN8_REGISTRY` — Space self-registers into it and discovers
+/// TxnMgr through it lazily for auto-enlist (unrelated to leasing, which is
+/// now embedded).
 pub async fn run_space() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_addr()).await?;
     let host = advertise_host();
@@ -850,12 +744,15 @@ pub async fn run_space() -> Result<()> {
     run_space_on_listener(listener, &registry_addr, &host, 30).await
 }
 
-/// Boot Space on a pre-bound [`TcpListener`], wired to a remote LeaseMgr.
+/// Boot Space on a pre-bound [`TcpListener`], with its own embedded
+/// `LeaseManager` for tuple and watch leases.
 ///
-/// Mounts both `SpaceServiceImpl` and `SpaceParticipantService` on the same
-/// server, matching the monolith layout. Uses `watch_expiry_prefix` twice —
-/// once for `space:` (tuple leases) and once for `space-watch:` (watch
-/// leases) — to keep tuple and watch cleanup driven by the remote LeaseMgr.
+/// Mounts `SpaceServiceImpl`, `SpaceParticipantService`, and `LeaseService`
+/// all on the same server. Distinguishes tuple (`space:`) vs. watch
+/// (`space-watch:`) expiry via the resource_id prefix `SpaceManager` already
+/// uses internally — that convention is now purely Space's own private
+/// concern (its `LeaseManager` never holds any other service's leases), not
+/// a cross-service namespace scheme.
 pub async fn run_space_on_listener(
     listener: tokio::net::TcpListener,
     registry_addr: &str,
@@ -865,105 +762,63 @@ pub async fn run_space_on_listener(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
 
-    // Construct immediately against a not-yet-resolved LeaseMgr — see
-    // PendingLeasing. Discovery happens in the background task below;
-    // requests made before it resolves fail fast with Unavailable instead
-    // of the server not being reachable at all.
-    let pending_leasing = Arc::new(coordin8_bootstrap::PendingLeasing::new());
-    let leasing: Arc<dyn Leasing> = Arc::clone(&pending_leasing) as Arc<dyn Leasing>;
+    let (lease_manager, lease_svc) =
+        embedded_landlord("space", advertise_host, advertise_port).await?;
+    let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     // Split mode: auto-enlist dials TxnMgr over Registry lazily — no I/O
     // happens at boot, so Space can come up with no TxnMgr in sight and still
     // serve non-transactional traffic. The first transactional write/take
     // drives discovery on demand.
     let space_enlister = Arc::new(RemoteTxnEnlister::new(registry_addr));
-    let space_participant_endpoint = format!("{}:{}", advertise_host, advertise_port);
+    let space_participant_endpoint = format!("{advertise_host}:{advertise_port}");
 
     let space_store = space_store_from_env().await?;
     let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let space_manager = Arc::new(SpaceManager::with_enlister(
         space_store,
-        Arc::clone(&leasing),
+        leasing,
         space_tuple_tx,
         space_expiry_tx,
         space_enlister,
         space_participant_endpoint,
     ));
 
-    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
-    health_reporter
-        .set_service_status("", ServingStatus::NotServing)
-        .await;
-
-    // Resolve LeaseMgr in the background: install it once found, flip
-    // health to Serving, then start the two WatchExpiry-driven cleanup
-    // streams (each needs its own LeaseServiceClient, so both wait for the
-    // same discovery before spawning).
     {
-        let pending_leasing = Arc::clone(&pending_leasing);
-        let registry_addr = registry_addr.to_string();
-        let mut health_reporter = health_reporter.clone();
-        let space_manager = Arc::clone(&space_manager);
-        tokio::spawn(async move {
-            let resolved = RemoteLeasing::connect(&registry_addr)
-                .await
-                .expect("RemoteLeasing::connect retries forever, never returns Err");
-            pending_leasing.install(resolved).await;
-            health_reporter
-                .set_service_status("", ServingStatus::Serving)
-                .await;
-            info!("  ✓ Space: LeaseMgr resolved, now Serving");
-
-            let tuple_stream_client = coordin8_bootstrap::discover_lease_mgr(&registry_addr)
-                .await
-                .expect("discover_lease_mgr retries forever, never returns Err");
-            let tuple_mgr = Arc::clone(&space_manager);
-            let tuple_registry = registry_addr.clone();
-            tokio::spawn(async move {
-                watch_expiry_prefix(
-                    tuple_stream_client,
-                    tuple_registry,
-                    "space:".to_string(),
-                    move |evt| {
-                        let mgr = Arc::clone(&tuple_mgr);
-                        let lease_id = evt.lease_id;
-                        tokio::spawn(async move {
-                            mgr.on_tuple_expired(&lease_id).await;
-                        });
-                    },
-                )
-                .await;
-            });
-
-            let watch_stream_client = coordin8_bootstrap::discover_lease_mgr(&registry_addr)
-                .await
-                .expect("discover_lease_mgr retries forever, never returns Err");
-            let watch_mgr = Arc::clone(&space_manager);
-            tokio::spawn(async move {
-                watch_expiry_prefix(
-                    watch_stream_client,
-                    registry_addr,
-                    "space-watch:".to_string(),
-                    move |evt| {
-                        let mgr = Arc::clone(&watch_mgr);
-                        let lease_id = evt.lease_id;
-                        tokio::spawn(async move {
-                            mgr.on_watch_expired(&lease_id).await;
-                        });
-                    },
-                )
-                .await;
-            });
-        });
+        let space_expiry_mgr = Arc::clone(&space_manager);
+        spawn_cascade(
+            "space",
+            lease_manager.expiry_tx().subscribe(),
+            move |LeaseReclaimed { record, .. }| {
+                let mgr = Arc::clone(&space_expiry_mgr);
+                tokio::spawn(async move {
+                    if record.resource_id.starts_with("space:") {
+                        mgr.on_tuple_expired(&record.lease_id).await;
+                    } else if record.resource_id.starts_with("space-watch:") {
+                        mgr.on_watch_expired(&record.lease_id).await;
+                    }
+                });
+            },
+        );
     }
 
-    let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(Arc::clone(&space_manager)));
+    let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(
+        Arc::clone(&space_manager),
+        advertise_host,
+        advertise_port,
+    ));
     let space_participant_svc =
         ParticipantServiceServer::new(SpaceParticipantService::new(space_manager));
 
+    // No blocking external dependency — healthy the moment it's about to serve.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
+
     info!(
-        "  ✓ Space (split): listening on {actual_addr}, advertising {advertise_host}:{advertise_port}"
+        "  ✓ Space (split): listening on {actual_addr} (+ LeaseService), advertising {advertise_host}:{advertise_port}"
     );
 
     let registry_url = registry_addr.to_string();
@@ -1013,6 +868,7 @@ pub async fn run_space_on_listener(
         .add_service(health_service)
         .add_service(space_svc)
         .add_service(space_participant_svc)
+        .add_service(lease_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
     info!("Djinn space ready.");
@@ -1029,8 +885,8 @@ pub async fn run_space_on_listener(
 
 /// Boot TransactionMgr alone. Reads `COORDIN8_BIND_ADDR` and `COORDIN8_REGISTRY`.
 ///
-/// Requires `COORDIN8_REGISTRY` — TxnMgr needs a Registry to discover
-/// LeaseMgr and to self-register into.
+/// Requires `COORDIN8_REGISTRY` — TxnMgr self-registers into it (unrelated to
+/// leasing, which is now embedded).
 pub async fn run_txn() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_addr()).await?;
     let host = advertise_host();
@@ -1040,13 +896,12 @@ pub async fn run_txn() -> Result<()> {
     run_txn_on_listener(listener, &registry_addr, &host, 30).await
 }
 
-/// Boot TransactionMgr on a pre-bound [`TcpListener`], wired to a remote
-/// LeaseMgr.
+/// Boot TransactionMgr on a pre-bound [`TcpListener`], with its own embedded
+/// `LeaseManager` for transaction leases.
 ///
-/// Uses `watch_expiry_prefix("txn:")` to drive `abort_expired(txn_id)` on
-/// the local TxnManager when the remote LeaseMgr expires a transaction
-/// lease — the txn id is carried in the `ExpiryEvent.resource_id` as the
-/// suffix after the `txn:` prefix, matching the monolith's convention.
+/// The txn id is recovered from the `txn:` prefix `TxnManager` already uses
+/// internally when granting — that convention is now purely TxnMgr's own
+/// private concern, not a cross-service namespace scheme.
 pub async fn run_txn_on_listener(
     listener: tokio::net::TcpListener,
     registry_addr: &str,
@@ -1056,64 +911,44 @@ pub async fn run_txn_on_listener(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
 
-    // Construct immediately against a not-yet-resolved LeaseMgr — see
-    // PendingLeasing. Discovery happens in the background task below;
-    // requests made before it resolves fail fast with Unavailable instead
-    // of the server not being reachable at all.
-    let pending_leasing = Arc::new(coordin8_bootstrap::PendingLeasing::new());
-    let leasing: Arc<dyn Leasing> = Arc::clone(&pending_leasing) as Arc<dyn Leasing>;
+    let (lease_manager, lease_svc) =
+        embedded_landlord("txn", advertise_host, advertise_port).await?;
+    let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     let txn_store = txn_store_from_env().await?;
-    let txn_manager = Arc::new(TxnManager::new(txn_store, Arc::clone(&leasing)));
+    let txn_manager = Arc::new(TxnManager::new(txn_store, leasing));
 
-    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
-    health_reporter
-        .set_service_status("", ServingStatus::NotServing)
-        .await;
-
-    // Resolve LeaseMgr in the background: install it once found, flip
-    // health to Serving, then start the expiry-cleanup watcher (it needs a
-    // real LeaseServiceClient, so it waits for the same discovery).
     {
-        let pending_leasing = Arc::clone(&pending_leasing);
-        let registry_addr = registry_addr.to_string();
-        let mut health_reporter = health_reporter.clone();
         let expiry_txn_mgr = Arc::clone(&txn_manager);
-        tokio::spawn(async move {
-            let resolved = RemoteLeasing::connect(&registry_addr)
-                .await
-                .expect("RemoteLeasing::connect retries forever, never returns Err");
-            pending_leasing.install(resolved).await;
-            health_reporter
-                .set_service_status("", ServingStatus::Serving)
-                .await;
-            info!("  ✓ TransactionMgr: LeaseMgr resolved, now Serving");
-
-            let lease_stream_client = coordin8_bootstrap::discover_lease_mgr(&registry_addr)
-                .await
-                .expect("discover_lease_mgr retries forever, never returns Err");
-            watch_expiry_prefix(
-                lease_stream_client,
-                registry_addr,
-                "txn:".to_string(),
-                move |evt| {
-                    if let Some(txn_id) = evt.resource_id.strip_prefix("txn:") {
-                        let mgr = Arc::clone(&expiry_txn_mgr);
-                        let txn_id = txn_id.to_string();
-                        tokio::spawn(async move {
-                            let _ = mgr.abort_expired(&txn_id).await;
-                        });
-                    }
-                },
-            )
-            .await;
-        });
+        spawn_cascade(
+            "txn",
+            lease_manager.expiry_tx().subscribe(),
+            move |LeaseReclaimed { record, .. }| {
+                if let Some(txn_id) = record.resource_id.strip_prefix("txn:") {
+                    let mgr = Arc::clone(&expiry_txn_mgr);
+                    let txn_id = txn_id.to_string();
+                    tokio::spawn(async move {
+                        let _ = mgr.abort_expired(&txn_id).await;
+                    });
+                }
+            },
+        );
     }
 
-    let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(txn_manager));
+    let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(
+        txn_manager,
+        advertise_host,
+        advertise_port,
+    ));
+
+    // No blocking external dependency — healthy the moment it's about to serve.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
 
     info!(
-        "  ✓ TransactionMgr (split): listening on {actual_addr}, advertising {advertise_host}:{advertise_port}"
+        "  ✓ TransactionMgr (split): listening on {actual_addr} (+ LeaseService), advertising {advertise_host}:{advertise_port}"
     );
 
     let registry_url = registry_addr.to_string();
@@ -1162,6 +997,7 @@ pub async fn run_txn_on_listener(
     let server_fut = Server::builder()
         .add_service(health_service)
         .add_service(txn_svc)
+        .add_service(lease_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
     info!("Djinn txn ready.");
@@ -1179,7 +1015,10 @@ pub async fn run_txn_on_listener(
 /// Boot Proxy alone. Reads `COORDIN8_BIND_ADDR` and `COORDIN8_REGISTRY`.
 ///
 /// Requires `COORDIN8_REGISTRY` — Proxy resolves capability templates by
-/// calling the Registry's `Lookup` RPC via `RemoteCapabilityResolver`.
+/// calling the Registry's `Lookup` RPC via `RemoteCapabilityResolver`. Proxy
+/// never grants leases, so it has no leasing wiring of its own — this
+/// dependency on Registry is unrelated to (and unaffected by) distributed
+/// leasing.
 pub async fn run_proxy() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_addr()).await?;
     let host = advertise_host();

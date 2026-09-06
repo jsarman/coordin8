@@ -5,21 +5,23 @@
 
 ---
 
-## LeaseMgr
+## Leasing (distributed — no more "LeaseMgr")
 
-The bedrock. TTL-based liveness contracts.
+> **Architecture change landed 2026-09-06:** `.claude/plans/distributed-leasing/PRD.md`. There is no more centralized LeaseMgr service. Registry, EventMgr, Space, and TransactionMgr each embed their own `LeaseManager` and mount `LeaseService` on their own port — Jini/Apache River's `Landlord` pattern. A lease is self-describing (`grantor_host`/`grantor_port` on the `Lease` message), so a holder always knows where to renew.
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Proto: Grant, Renew, Cancel, WatchExpiry | Done | `proto/coordin8/lease.proto` |
-| Rust: LeaseManager + reaper | Done | `coordin8-lease` crate, 1s reaper interval |
-| Duration negotiation + `FOREVER` / `ANY` constants | Done | `MAX_LEASE_TTL` / `PREFERRED_LEASE_TTL` env vars |
-| Go SDK: grant, renew, cancel, keepAlive, watch | Done | Full parity |
-| Java SDK: grant, renew, cancel | Done | |
+| Proto: Grant, Renew, RenewAll, Cancel, WatchExpiry | Done | `proto/coordin8/lease.proto`; `RenewAll` added for batch renewal |
+| `grantor_host`/`grantor_port` on `Lease`; `reason` (EXPIRED/CANCELLED) on `ExpiryEvent` | Done | Self-describing leases; cancel now drives the same cascade as expiry |
+| `FOREVER`/`ANY` sentinel swap | Done | `LEASE_ANY=0`, `LEASE_FOREVER=u64::MAX` — the accidental proto3 default (`0`) now means the safe outcome |
+| Rust: per-service embedded `LeaseManager` + reaper | Done | `coordin8-lease` crate (library, not a service) — Registry/EventMgr/Space/TxnMgr each construct their own |
+| Per-namespace `LeaseConfig` | Done | `LeaseConfig::from_env_for(namespace)`, `<NAMESPACE>_MAX_LEASE_TTL` / `<NAMESPACE>_PREFERRED_LEASE_TTL` |
+| Go SDK: grant, renew, cancel, keepAlive, watch | Done | `DialLease`/`NewLeaseClient` (any grantor) + `Client.RegistryLeases()` (common case); `KeepAlive` now surfaces failures via a channel instead of swallowing them |
+| Java SDK: grant, renew, cancel | Done | Still targets the old centralized model — needs revisiting under distributed leasing (registry-bootstrap Phase 3, paused) |
 | Java SDK: keepAlive (background renewal) | **Gap** | Go has it, Java doesn't |
 | Java SDK: watch (expiry stream) | **Gap** | Go has it, Java doesn't |
-| Node SDK: grant, renew, cancel, keepAlive, watch | Done | |
-| CLI: grant, renew, cancel, watch | Done | |
+| Node SDK: grant, renew, cancel, keepAlive, watch | Done | Still targets the old centralized model — needs revisiting under distributed leasing (registry-bootstrap Phase 4, paused) |
+| CLI: grant, renew, cancel, watch | Done | `--grantor` flag (defaults to `--registry`) replaces the old single-LeaseMgr assumption |
 
 ---
 
@@ -311,7 +313,8 @@ Not in core — built on Space/EventMgr primitives. **Unblocked** — Space v1 a
 1. **Space CLI** — `spaces read/out/take/watch` commands in the Go CLI (Go Space SDK now done)
 2. **SDK parity gaps** — Java LeaseClient missing `keepAlive` + `watch`; Space/EventMgr/TxnMgr hand-written clients missing in Java + Node
 3. **Hardening roadmap** (`.claude/plans/hardening-roadmap/PRD.md`, items 1/2/4 done 2026-09-05/06) — remaining: cross-platform fixes, JWT auth
-3b. **Registry-only bootstrap** (`.claude/plans/registry-bootstrap/PRD.md`, started 2026-09-06) — SDKs (Go/Java/Node) need only Registry's address, look up LeaseMgr/Space/EventMgr/Proxy through it instead of hardcoding a fixed multi-port host; found while running auction-house against split mode. Bundled `run_all()` needs to self-register its own services first (currently doesn't at all).
+3b. **Registry-only bootstrap** (`.claude/plans/registry-bootstrap/PRD.md`, Phases 1/1b/2 done 2026-09-06, PR #25) — SDKs (Go/Java/Node) need only Registry's address, look up Space/EventMgr/Proxy through it instead of hardcoding a fixed multi-port host. Phases 3 (Java SDK) / 4 (Node SDK) **still paused** — see 3c.
+3c. **Distributed leasing** (`.claude/plans/distributed-leasing/PRD.md`, Rust core + proto + Go SDK + CLI done and live-verified 2026-09-06) — removed LeaseMgr as a centralized network service; Registry/Space/EventMgr/TxnMgr each embed their own `LeaseManager` (Jini/Apache River's `Landlord` pattern), fixing the registry-bootstrap Phase 1b bootstrap-cycle root cause plus a second research pass's punch list (self-describing leases, cancel-bypasses-cascade, cascade-lag, sentinel swap, batch renewal, per-namespace policy, `KeepAlive` silent-failure fix). Remaining: live-validate auction-house/market-watch/double-entry against the rebuilt split-mode stack, then resume registry-bootstrap Phases 3/4 (Java/Node SDKs) against this corrected model.
 4. **Djinn split follow-ups** — docker-compose chaos, Registry redundancy (DynamoDB/MiniStack provider-swap test moved into hardening roadmap above, exact gap now scoped)
 5. **AWS Provider** — DynamoDB/SQS/EventBridge for production (bundled-mode DynamoDB already done, see Providers table)
 6. **Higher-order patterns** — Lens, Reflex, Sentry (unblocked by Space + EventMgr)
