@@ -1,6 +1,6 @@
 # Hardening Roadmap — PRD
 
-> **Status: In progress.** Items 1, 2, 3, 4, and 5 are COMPLETE and merged to `main` (2026-09-05/06, via #20, #21, #22, a corrective consolidation PR #23, #30 for item 5, and a follow-up for item 3 — #21/#22 were stacked on non-`main` branches, so merging them didn't land on `main` until #23; see `feedback_stacked_pr_base_branches` lesson). Item 6 (gRPC security) is the one item left, not yet started — a real planning pass is needed before any implementation (see that section for why). See `session-1-complete.md` for the full implementation writeup. Started right after `.claude/plans/space-race-txn-failsafe/` (merged 2026-09-05). Docker-centric and near-term — a precursor to, not a duplicate of, `.claude/plans/phase3-cloud-topology/` (which is the full AWS-serverless endgame). Where they overlap, this PRD cross-references rather than repeats.
+> **Status: In progress.** Items 1, 2, 3, 4, and 5 are COMPLETE and merged to `main` (2026-09-05/06, via #20, #21, #22, a corrective consolidation PR #23, #30 for item 5, and a follow-up for item 3 — #21/#22 were stacked on non-`main` branches, so merging them didn't land on `main` until #23; see `feedback_stacked_pr_base_branches` lesson). Item 6 (gRPC security) has a full plan now (`.claude/plans/grpc-security/PRD.md`, written 2026-09-06) but no implementation yet. See `session-1-complete.md` for the full implementation writeup. Started right after `.claude/plans/space-race-txn-failsafe/` (merged 2026-09-05). Docker-centric and near-term — a precursor to, not a duplicate of, `.claude/plans/phase3-cloud-topology/` (which is the full AWS-serverless endgame). Where they overlap, this PRD cross-references rather than repeats.
 
 ## Goal
 
@@ -55,9 +55,9 @@ Not really a new roadmap item so much as a known consequence of item 4/broadcast
 
 The longer-term, systemic fix (externalizing the broadcast entirely, per `phase3-cloud-topology/resilience-plan.md`'s "Broadcast Problem" section, which lists `space_expiry_tx` as one of five channels needing this) is still open — today's fix closes the concrete, demonstrated gap in this one example, not the general case for every Space consumer. See [issue #17](https://github.com/jsarman/coordin8/issues/17) (worth closing or re-scoping to the broadcast-externalization work specifically) and `.claude/plans/space-race-txn-failsafe/session-1-complete.md` for the full trace.
 
-### 6. gRPC security via JWT
+### 6. gRPC security via JWT — planning DONE (2026-09-06), implementation not started
 
-Add JWT auth to the gRPC surface, plus a broader platform security discussion — not covered anywhere in existing plans. Open questions: token issuance/rotation, which services validate tokens (every service vs. gateway/proxy only), service-to-service vs. client-to-service auth, mTLS vs. JWT-over-TLS, interaction with Registry self-registration (does a service need a valid identity before it's allowed to register?).
+Full plan now written: `.claude/plans/grpc-security/PRD.md`. All of this item's original open questions are resolved there as decisions: signing (HS256 shared-secret for v1, not RS256/JWKS), token issuance (static, CLI-minted, no live issuance service — deliberately avoids the leasing-style bootstrap cycle, since a service reads its own token from config the same way it already reads `COORDIN8_REGISTRY`), which services validate (every service independently, via a shared `coordin8-auth` interceptor crate — Coordin8 has no gateway/ingress choke point to centralize this at), scope (authentication only for v1, no RBAC yet), and mTLS/TLS (explicitly deferred, separate future work, not blocking JWT auth from shipping). See that PRD for the full plan phases (Rust core, then Go/Java/Node SDKs, then re-validate every example).
 
 ## Non-Goals
 
