@@ -62,6 +62,14 @@ run = "docker compose up --build"
 description = "Stop Docker stack"
 run = "docker compose down"
 
+[tasks.up-split]
+description = "Start split-mode stack in Docker (registry/event/space/txn/proxy, one container each)"
+run = "docker compose -f docker-compose.split.yml up --build"
+
+[tasks.down-split]
+description = "Stop split-mode Docker stack"
+run = "docker compose -f docker-compose.split.yml down"
+
 [tasks.demo-events]
 description = "Run market-watch EventMgr demo (requires live Djinn on :9005)"
 run = "cd examples/market-watch && go run ."
@@ -69,3 +77,23 @@ run = "cd examples/market-watch && go run ."
 [tasks.demo-txn]
 description = "Run double-entry TransactionMgr demo (requires live Djinn on :9004)"
 run = "cd examples/double-entry && go run ."
+
+[tasks.demo-auction]
+description = "Run the Auction House polyglot demo (Java + Go + Node, own Docker stack — see examples/auction-house/README.md)"
+run = "cd examples/auction-house && docker compose up --build"
+
+[tasks.demo-auction-down]
+description = "Stop the Auction House demo stack"
+run = "cd examples/auction-house && docker compose down"
+
+[tasks.demo-greeter-go]
+description = "Run the Go hello-coordin8 greeter client (requires `mise r up` or `mise r djinn` running)"
+run = "cd examples/hello-coordin8/go && go run ./greeter_client"
+
+[tasks.demo-greeter-java]
+description = "Run the Java hello-coordin8 greeter client (requires `mise r up` or `mise r djinn` running)"
+run = "cd examples/hello-coordin8/java && ./gradlew run --args=\"Coordin8 (Java)\""
+
+[tasks.demo-greeter-node]
+description = "Run the Node hello-coordin8 greeter client (requires `mise r up` or `mise r djinn` running)"
+run = "cd examples/hello-coordin8/node && npm install && npx ts-node src/greeter-client.ts"
