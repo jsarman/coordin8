@@ -51,6 +51,61 @@ pub fn advertise_host() -> String {
     std::env::var("COORDIN8_ADVERTISE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
+/// Self-register a bundled-mode service into the same process's Registry.
+///
+/// Split mode already self-registers every service (see the `run_*_on_listener`
+/// functions); bundled mode never did, since a client could always assume
+/// "one host, fixed ports" and skip Registry entirely for the core services.
+/// That assumption is what the registry-bootstrap effort
+/// (`.claude/plans/registry-bootstrap/`) removes — clients should look up
+/// LeaseMgr/Space/EventMgr/Proxy/TransactionMgr through Registry the same way
+/// whether bundled or split. This makes that true for bundled mode too.
+///
+/// Retries the initial dial (Registry's own server task may not have started
+/// accepting yet) and then holds the registration alive for the process
+/// lifetime — matching the split-mode self-registration futures' pattern.
+fn spawn_bundled_self_register(interface: &'static str, port: u16) {
+    let advertise = advertise_host();
+    tokio::spawn(async move {
+        let registry_client = loop {
+            match coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::connect(
+                "http://localhost:9002".to_string(),
+            )
+            .await
+            {
+                Ok(c) => break c,
+                Err(e) => {
+                    tracing::warn!("{interface}: registry dial failed: {e}, retrying in 200ms");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        };
+
+        match self_register(
+            registry_client,
+            interface,
+            std::collections::HashMap::new(),
+            &advertise,
+            port,
+            30,
+        )
+        .await
+        {
+            Ok(handle) => {
+                info!(
+                    "  ✓ {interface}: self-registered (capability: {}, lease: {})",
+                    handle.capability_id(),
+                    handle.lease_id()
+                );
+                std::future::pending::<()>().await;
+            }
+            Err(e) => {
+                tracing::error!("{interface}: self_register failed: {e}");
+            }
+        }
+    });
+}
+
 // ── Provider selection (pub(crate) — shared by run_all() and every split-mode
 //    function, so COORDIN8_PROVIDER=dynamo works the same in both) ───────────
 
@@ -302,6 +357,15 @@ pub async fn run_all() -> Result<()> {
     info!("  ✓ TransactionMgr: listening on {}", txn_addr);
     info!("  ✓ EventMgr:      listening on {}", event_addr);
     info!("  ✓ Space:         listening on {}", space_addr);
+
+    // Self-register every core service into the same process's Registry —
+    // see spawn_bundled_self_register's doc comment for why this matters now.
+    spawn_bundled_self_register("LeaseMgr", 9001);
+    spawn_bundled_self_register("EventMgr", 9005);
+    spawn_bundled_self_register("Proxy", 9003);
+    spawn_bundled_self_register("TransactionMgr", 9004);
+    spawn_bundled_self_register("Space", 9006);
+
     info!("Djinn ready.");
 
     tokio::try_join!(
