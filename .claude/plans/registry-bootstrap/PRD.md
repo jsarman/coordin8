@@ -12,19 +12,41 @@ Jini's own bootstrap needed a single well-known thing: port 4160 multicast disco
 
 The gap was invisible until split mode existed. In bundled/monolith mode, "one host, fixed ports" and "the truth" happen to coincide, so nobody noticed the SDKs were bypassing Registry for the core services. Split mode broke that coincidence.
 
-## Discovered Prerequisite (blocks everything else)
+## Discovered Prerequisites (both block correct split-mode operation)
 
-`run_all()` (`djinn/crates/coordin8-djinn/src/services.rs`) — bundled mode — **does not self-register any of its own services into Registry.** No `self_register()` calls anywhere in it, unlike every split-mode function which already does this. So today, `Registry.Lookup({interface: "LeaseMgr"})` returns nothing when running the monolith. Switching the SDKs to a Registry-lookup bootstrap would break bundled mode entirely unless this is fixed first.
+### 1. Bundled mode didn't self-register anything — FIXED (Phase 1, below)
+
+`run_all()` (`djinn/crates/coordin8-djinn/src/services.rs`) — bundled mode — **did not self-register any of its own services into Registry.** No `self_register()` calls anywhere in it, unlike every split-mode function which already does this. So `Registry.Lookup({interface: "LeaseMgr"})` returned nothing when running the monolith. Fixed: bundled mode now self-registers LeaseMgr/EventMgr/Proxy/TransactionMgr/Space the same way split mode does, via a loopback `self_register()` call. Verified live.
+
+### 2. Split-mode Registry's own leases are disconnected from the real LeaseMgr — NOT YET FIXED, found during live testing
+
+`run_registry_on_listener` (split mode's standalone `djinn registry`) builds its own **private, local `LeaseManager`** (own store, own reaper) purely to track its own registrations' TTLs — completely separate from the actual standalone LeaseMgr service (the `lease` container, port 9001) that any client is expected to renew leases against.
+
+**Consequence:** every `lease_id` Registry hands back from `Register()` is only meaningful to Registry's own private tracker. A real client following the documented pattern (`Registry().Register()` → background `Leases().KeepAlive(leaseID, ttl)`) will always get `NotFound: lease not found` from the real LeaseMgr on the very first renewal attempt, because that LeaseMgr never issued the lease in the first place. Confirmed live: registered a Greeter via a container on the split network, watched the entry vanish at the 30s TTL mark, then confirmed directly (`coordin8 lease renew --id <id>`) that the real LeaseMgr had never heard of that lease ID.
+
+**Why this was invisible until now:** no SDK client could previously address split mode's Registry and LeaseMgr correctly at the same time — the old `Connect(host)` assumed one host for every service, which never worked against split mode's multiple hostnames at all. This session's Registry-only bootstrap (Phase 2) was the first thing to actually complete a real Register-then-renew cycle against a running split-mode stack, which is what surfaced it.
+
+**Why the fix is bigger than it looks:** the correct fix is for split-mode Registry to use `RemoteLeasing` (self-referential — Registry can resolve its own `interface: LeaseMgr` lookup once the real LeaseMgr has self-registered) instead of a private local `LeaseManager`, exactly mirroring how EventMgr/Space/TxnMgr already depend on the real LeaseMgr. But that means Registry gains a genuine (if indirect, via itself) dependency on the standalone LeaseMgr container having already self-registered — which means Registry needs the *same* serve-immediately + `PendingLeasing` + health `NotServing`→`Serving` treatment that hardening-roadmap item 1 already gave EventMgr/Space/TxnMgr/Proxy, or boot-order independence (the whole point of that item) regresses for Registry specifically. Not a quick patch — comparable in shape to redoing a slice of item 1, scoped to Registry.
 
 ## Plan
 
-### Phase 1 — Rust: self-register bundled mode's services
+### Phase 1 — Rust: self-register bundled mode's services — ✅ DONE
 
-In `run_all()`, after each of LeaseMgr/EventMgr/Proxy/TransactionMgr/Space starts serving, self-register it into the same process's Registry — reusing the existing `self_register()` helper from `coordin8-bootstrap` (split mode already uses this; bundled mode just needs to call it against its own loopback Registry, e.g. `http://localhost:9002`, with a short retry loop for the brief window before Registry's server is actually accepting). No new self-registration mechanism needed — just applying the one that already exists.
+In `run_all()`, after each of LeaseMgr/EventMgr/Proxy/TransactionMgr/Space starts serving, self-register it into the same process's Registry — reusing the existing `self_register()` helper from `coordin8-bootstrap` (split mode already uses this; bundled mode just needs to call it against its own loopback Registry, e.g. `http://localhost:9002`, with a short retry loop for the brief window before Registry's server is actually accepting). No new self-registration mechanism needed — just applying the one that already exists. Verified live: all five self-register immediately; `Registry.Lookup()` now works for every core service in bundled mode. `cargo test --all`/`fmt`/`clippy` all clean.
 
-### Phase 2 — Go SDK
+### Phase 1b — Rust: fix split-mode Registry's disconnected leases — NOT STARTED (see Prerequisite 2 above)
 
-`sdks/go/coordin8/client.go`: change `Connect(host string, ...)` to `Connect(registryAddr string, ...)`. Dial Registry directly at `registryAddr`; look up LeaseMgr/Proxy/Space/EventMgr via `RegistryServiceClient.Lookup({interface: "X"})` and dial whatever address comes back. Keep the existing `WithLeaseAddr`/`WithRegistryAddr`/etc. `ConnectOption`s as explicit escape hatches — if given, skip the lookup for that one service and use the pinned address instead (useful for tests, or genuinely split-network scenarios where the lookup path isn't reachable).
+Give split-mode Registry a `PendingLeasing` (self-referential — looks itself up once the real LeaseMgr self-registers) instead of its private local `LeaseManager`, plus the same serve-immediately/health-flip treatment items 1's other services already have. Blocks Phase 5 (split-mode example validation) for anything that registers-then-renews, which is the normal pattern (`hello-coordin8`, `auction-house`'s settlement/auction services all do this).
+
+### Phase 2 — Go SDK — ✅ DONE (Connect() itself; blocked end-to-end by Phase 1b)
+
+`sdks/go/coordin8/client.go`: changed `Connect(host string, ...)` to `Connect(registryAddr string, ...)`. Dials Registry directly at `registryAddr`; looks up LeaseMgr/Proxy/Space/EventMgr via `RegistryServiceClient.Lookup({interface: "X"})` and dials whatever address comes back. Dropped `WithRegistryAddr` (Registry's address is now the primary parameter, nothing to override) but kept `WithLeaseAddr`/`WithProxyAddr`/`WithSpaceAddr`/`WithEventAddr` as explicit escape hatches — if given, skip the lookup for that one service. No dual code path, no deprecated overload — old `Connect(host)` semantics removed outright (SDKs are pre-1.0, no other users yet, per explicit direction).
+
+Also fixed a real bug found in the same pass: `ServiceDiscovery.Get()` (`discovery.go`) hardcoded `"localhost:%d"` for a Proxy-forwarded port, which only worked when Proxy and the consumer shared a network namespace. Now derives the host from the actual address Proxy was dialed at (`sd.client.proxyConn.Target()`), so it's correct whether Proxy is a container, a different host, or genuinely `localhost`.
+
+Updated call sites: `cli/cmd/coordin8/main.go` (`--host` flag renamed to `--registry`), `examples/hello-coordin8/go/greeter_service` and `greeter_client` (`DJINN_HOST` → `COORDIN8_REGISTRY`, matching the naming convention split-mode Rust services already use), `examples/auction-house/settlement-engine` (same rename). `market-watch` and `double-entry` are unaffected — they bypass the shared SDK `Client` entirely and dial one raw gRPC service directly.
+
+Live-verified against split mode inside the actual Docker network (cross-compiled Linux binaries run as throwaway containers on `coordin8_coordin8-split-net`, matching how a real deployed consumer would run) up through Register() and the initial Registry lookup working correctly — surfaced Prerequisite 2 (above) at the lease-renewal step, which is Phase 1b, not a Phase 2 bug.
 
 ### Phase 3 — Java SDK
 

@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var djinnHost string
+var registryAddr string
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
@@ -25,14 +25,14 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&djinnHost, "host", "localhost", "Djinn host")
+	rootCmd.PersistentFlags().StringVar(&registryAddr, "registry", "localhost:9002", "Registry address (host:port) — every other Djinn service is looked up through it")
 	rootCmd.AddCommand(leaseCmd)
 	rootCmd.AddCommand(registryCmd)
 	rootCmd.AddCommand(spaceCmd)
 }
 
 func connect() (*coordin8.Client, error) {
-	return coordin8.Connect(djinnHost)
+	return coordin8.Connect(registryAddr)
 }
 
 // ── lease ─────────────────────────────────────────────────────────────────────

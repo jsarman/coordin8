@@ -30,12 +30,12 @@ func envOr(key, def string) string {
 }
 
 func main() {
-	djinnHost := envOr("DJINN_HOST", "localhost")
+	registryAddr := envOr("COORDIN8_REGISTRY", "localhost:9002")
 
 	fmt.Println("Settlement Engine starting...")
-	fmt.Printf("  djinn: %s\n", djinnHost)
+	fmt.Printf("  registry: %s\n", registryAddr)
 
-	djinn, err := coordin8.Connect(djinnHost)
+	djinn, err := coordin8.Connect(registryAddr)
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}
