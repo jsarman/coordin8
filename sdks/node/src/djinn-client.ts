@@ -5,53 +5,134 @@ import { ProxyClient } from "./proxy-client";
 import { SpaceClient } from "./space-client";
 import { EventClient } from "./event-client";
 
-const LEASE_PORT    = 9001;
-const REGISTRY_PORT = 9002;
-const PROXY_PORT    = 9003;
-const EVENT_PORT    = 9005;
-const SPACE_PORT    = 9006;
+/**
+ * Options for DjinnClient.connect(). Use these to pin a specific service's
+ * address instead of looking it up through Registry.
+ */
+export interface ConnectOptions {
+  /** Pin Proxy's address instead of looking it up through Registry. */
+  proxyAddr?: string;
+  /** Pin Space's address instead of looking it up through Registry. */
+  spaceAddr?: string;
+  /** Pin EventMgr's address instead of looking it up through Registry. */
+  eventAddr?: string;
+}
 
+/**
+ * DjinnClient is the entry point for all Djinn interactions.
+ *
+ * There is no single "LeaseMgr" to connect to — leasing is distributed.
+ * Registry, Space, and EventMgr each grant their own leases and mount
+ * LeaseService on their own connection; renew/cancel a lease by dialing
+ * whichever one granted it (its address is carried on the Lease itself, in
+ * `grantorHost`/`grantorPort`) via `dialLease()`. See
+ * .claude/plans/distributed-leasing/PRD.md.
+ */
 export class DjinnClient {
-  private readonly leaseChannel:    grpc.Channel;
   private readonly registryChannel: grpc.Channel;
-  private readonly proxyChannel:    grpc.Channel;
-  private readonly spaceChannel:    grpc.Channel;
-  private readonly eventChannel:    grpc.Channel;
-  private readonly _lease:    LeaseClient;
+  private readonly proxyChannel: grpc.Channel;
+  private readonly spaceChannel: grpc.Channel;
+  private readonly eventChannel: grpc.Channel;
   private readonly _registry: RegistryClient;
-  private readonly _proxy:    ProxyClient;
-  private readonly _space:    SpaceClient;
-  private readonly _event:    EventClient;
+  private readonly _proxy: ProxyClient;
+  private readonly _space: SpaceClient;
+  private readonly _event: EventClient;
 
-  private constructor(host: string) {
+  private constructor(
+    registryChannel: grpc.Channel,
+    proxyChannel: grpc.Channel,
+    spaceChannel: grpc.Channel,
+    eventChannel: grpc.Channel
+  ) {
+    this.registryChannel = registryChannel;
+    this.proxyChannel = proxyChannel;
+    this.spaceChannel = spaceChannel;
+    this.eventChannel = eventChannel;
+    this._registry = new RegistryClient(registryChannel);
+    this._proxy = new ProxyClient(proxyChannel);
+    this._space = new SpaceClient(spaceChannel);
+    this._event = new EventClient(eventChannel);
+  }
+
+  /**
+   * Dials Registry directly at registryAddr — the one address a caller
+   * needs to know in advance — then looks up Proxy, Space, and EventMgr
+   * through it, the same way any application service is discovered via
+   * ServiceDiscovery. Works identically against a bundled monolith or a
+   * fully split, multi-host deployment: Registry just returns whatever
+   * address each service actually registered.
+   *
+   * Use opts.proxyAddr / opts.spaceAddr / opts.eventAddr to pin a specific
+   * service's address instead of looking it up.
+   */
+  static async connect(registryAddr: string, opts: ConnectOptions = {}): Promise<DjinnClient> {
     const creds = grpc.credentials.createInsecure();
-    this.leaseChannel    = new grpc.Channel(`${host}:${LEASE_PORT}`,    creds, {});
-    this.registryChannel = new grpc.Channel(`${host}:${REGISTRY_PORT}`, creds, {});
-    this.proxyChannel    = new grpc.Channel(`${host}:${PROXY_PORT}`,    creds, {});
-    this.spaceChannel    = new grpc.Channel(`${host}:${SPACE_PORT}`,    creds, {});
-    this.eventChannel    = new grpc.Channel(`${host}:${EVENT_PORT}`,    creds, {});
-    this._lease    = new LeaseClient(this.leaseChannel);
-    this._registry = new RegistryClient(this.registryChannel);
-    this._proxy    = new ProxyClient(this.proxyChannel);
-    this._space    = new SpaceClient(this.spaceChannel);
-    this._event    = new EventClient(this.eventChannel);
+    const registryChannel = new grpc.Channel(registryAddr, creds, {});
+    const registry = new RegistryClient(registryChannel);
+
+    let proxyAddr: string;
+    let spaceAddr: string;
+    let eventAddr: string;
+    try {
+      [proxyAddr, spaceAddr, eventAddr] = await Promise.all([
+        resolveAddr(registry, opts.proxyAddr, "Proxy"),
+        resolveAddr(registry, opts.spaceAddr, "Space"),
+        resolveAddr(registry, opts.eventAddr, "EventMgr"),
+      ]);
+    } catch (err) {
+      registryChannel.close();
+      throw err;
+    }
+
+    const proxyChannel = new grpc.Channel(proxyAddr, creds, {});
+    const spaceChannel = new grpc.Channel(spaceAddr, creds, {});
+    const eventChannel = new grpc.Channel(eventAddr, creds, {});
+
+    return new DjinnClient(registryChannel, proxyChannel, spaceChannel, eventChannel);
   }
 
-  static connect(host: string = "localhost"): DjinnClient {
-    return new DjinnClient(host);
-  }
-
-  lease():    LeaseClient    { return this._lease; }
   registry(): RegistryClient { return this._registry; }
   proxy():    ProxyClient    { return this._proxy; }
   space():    SpaceClient    { return this._space; }
   events():   EventClient    { return this._event; }
 
+  /**
+   * Returns a LeaseClient for renewing/cancelling leases that Registry
+   * itself granted — every register() call returns one. LeaseService is
+   * mounted on Registry's own connection (no separate dial needed),
+   * matching how Registry embeds its own LeaseManager.
+   */
+  registryLeases(): LeaseClient {
+    return LeaseClient.fromChannel(this.registryChannel);
+  }
+
   close(): void {
-    this.leaseChannel.close();
     this.registryChannel.close();
     this.proxyChannel.close();
     this.spaceChannel.close();
     this.eventChannel.close();
   }
+}
+
+/**
+ * Looks up interfaceName in Registry and returns its "host:port" transport
+ * address, unless pinned overrides the lookup.
+ */
+async function resolveAddr(
+  registry: RegistryClient,
+  pinned: string | undefined,
+  interfaceName: string
+): Promise<string> {
+  if (pinned) return pinned;
+
+  const record = await registry.lookup({ interface: interfaceName });
+  if (!record) {
+    throw new Error(`look up ${interfaceName}: not found in registry`);
+  }
+  const host = record.transport?.config?.host;
+  const port = record.transport?.config?.port;
+  if (!host || !port) {
+    throw new Error(`look up ${interfaceName}: missing host/port in transport config`);
+  }
+  return `${host}:${port}`;
 }
