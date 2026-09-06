@@ -68,9 +68,9 @@ coordin8 space contents --match type=sale
 
 ```bash
 docker compose stop settlement-engine
-# Create an auction, let it expire...
+# Create an auction, place a bid, let it expire while settlement-engine is down...
 docker compose start settlement-engine
-# Settlement happens on restart — expiry events are durable
+# Settlement happens on restart — see "Durability" below for how.
 ```
 
 ## How It Works
@@ -101,3 +101,29 @@ Auction Service                  Djinn Space                Settlement Engine
 - **No service mesh** — services discover the Djinn, not each other
 - **Auction Board watches Space directly** — SSE pushes are driven by tuple appearance/expiry events
 - **Settlement is reactive** — it doesn't poll, it watches. When a lease expires, it reacts.
+
+## Durability
+
+`Space.Notify()` is deliberately JavaSpaces-faithful — a live, at-most-once
+subscription, not a durable queue. If the Settlement Engine isn't connected
+the instant an auction's lease expires, that notification is gone, and so is
+the auction's tuple (Space removes it from the store the moment it's
+reaped) — there's nothing left to watch for or read back.
+
+To make settlement correct across a restart anyway, Auction Service writes
+a second, **permanent** (`TTL=FOREVER`) tuple per auction — `type=auction-meta`
+(item, reserve price, `expires_at`) — alongside the already-permanent `type=bid`
+audit trail it was writing regardless. Neither of these depends on the
+ephemeral auction tuple surviving.
+
+On startup, the Settlement Engine runs a one-time `reconcile()` pass before
+it starts watching live: it scans for `auction-meta` tuples whose
+`expires_at` has already passed and settles them immediately, reconstructing
+the winning bid from the durable `bid` tuples rather than from whatever the
+(possibly-missed) live notification would have carried. The live watch path
+and the reconciliation path both call the same settlement logic, so there's
+exactly one way an auction gets settled — an idempotency check (has a `sale`
+tuple already been written for this auction?) covers the case where both
+paths reach the same auction. `auction-meta` is cleaned up once an auction
+settles, so the reconciliation scan only ever looks at auctions still
+pending.

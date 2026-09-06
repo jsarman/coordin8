@@ -60,6 +60,20 @@ public class AuctionService {
                 ),
                 null, durationSeconds, "auction-service", null, null);
 
+        // Durable (TTL=FOREVER) shadow of the auction's metadata — the "auction" tuple
+        // above is destroyed the instant its lease expires, which is fine for the live
+        // watch path but leaves nothing for the Settlement Engine to reconcile against
+        // if it was down when that happened. Combined with the already-permanent "bid"
+        // tuples (below), this lets settlement be reconstructed durably instead of
+        // depending on catching the live expiry notification.
+        space.write(Map.of(
+                "type", "auction-meta",
+                "auction_id", auctionId,
+                "item", item,
+                "reserve_price", String.format("%.2f", reservePrice),
+                "expires_at", String.valueOf(endEpoch)
+        ), 0);
+
         System.out.printf("  + Created auction: %s (%s, %ds)%n", item, auctionId, durationSeconds);
         return Map.of("auction_id", auctionId, "tuple_id", tuple.tupleId(), "ttl", durationSeconds);
     }
