@@ -147,12 +147,15 @@ public class AuctionService {
 
     public static void main(String[] args) throws Exception {
         String registryAddr = System.getenv().getOrDefault("COORDIN8_REGISTRY", "localhost:9002");
+        String token = System.getenv("COORDIN8_TOKEN");
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
 
         System.out.println("Auction Service starting...");
         System.out.printf("  registry: %s%n", registryAddr);
 
-        DjinnClient djinn = DjinnClient.connect(registryAddr);
+        DjinnClient djinn = (token == null || token.isEmpty())
+                ? DjinnClient.connect(registryAddr)
+                : DjinnClient.connect(registryAddr, token);
         AuctionService service = new AuctionService(djinn);
 
         // Register with Djinn

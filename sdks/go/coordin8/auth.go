@@ -34,3 +34,11 @@ func (c bearerTokenCredentials) RequireTransportSecurity() bool {
 func perRPCTokenOption(token string) grpc.DialOption {
 	return grpc.WithPerRPCCredentials(bearerTokenCredentials{token: token})
 }
+
+// PerRPCToken returns a grpc.DialOption attaching token to every call —
+// exported for callers dialing a Djinn service directly with grpc.NewClient
+// instead of going through Connect/DialLease (e.g. an example talking
+// straight to EventMgr or TransactionMgr).
+func PerRPCToken(token string) grpc.DialOption {
+	return perRPCTokenOption(token)
+}

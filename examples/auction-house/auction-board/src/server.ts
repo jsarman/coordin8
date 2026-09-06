@@ -4,6 +4,7 @@ import { DjinnClient } from "@coordin8/sdk";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const COORDIN8_REGISTRY = process.env.COORDIN8_REGISTRY || "localhost:9002";
+const COORDIN8_TOKEN = process.env.COORDIN8_TOKEN;
 const AUCTION_SERVICE = process.env.AUCTION_SERVICE || "http://localhost:8080";
 
 const app = express();
@@ -74,7 +75,7 @@ async function watchLoop(
 }
 
 async function startWatchers() {
-  const djinn = await DjinnClient.connect(COORDIN8_REGISTRY);
+  const djinn = await DjinnClient.connect(COORDIN8_REGISTRY, COORDIN8_TOKEN ? { token: COORDIN8_TOKEN } : {});
 
   console.log("  watching auctions (appearance + expiry), bids, sales...");
 

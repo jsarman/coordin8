@@ -1,0 +1,19 @@
+# JWT auth overlay for docker-compose.yml (bundled mode). Off by default —
+# apply on top of the base file to turn it on:
+#
+#   scripts/gen-auth-env.sh .env.auth-bundled greeter
+#   docker compose -f docker-compose.yml -f docker-compose.auth.yml --env-file .env.auth-bundled up --build
+#
+# or just: mise r up-auth
+#
+# See .claude/plans/grpc-security/PRD.md. Djinn itself needs no minted
+# token — once COORDIN8_JWT_SECRET is set it self-mints tokens for its own
+# internal calls (Decision 8); only external clients (greeter) need one.
+services:
+  djinn:
+    environment:
+      COORDIN8_JWT_SECRET: "${COORDIN8_JWT_SECRET}"
+
+  greeter:
+    environment:
+      COORDIN8_TOKEN: "${COORDIN8_TOKEN_GREETER}"

@@ -18,8 +18,11 @@ public class GreeterClient {
         if (registryAddr == null || registryAddr.isEmpty()) {
             registryAddr = "localhost:9002";
         }
+        String token = System.getenv("COORDIN8_TOKEN");
 
-        try (DjinnClient djinn = DjinnClient.connect(registryAddr);
+        try (DjinnClient djinn = (token == null || token.isEmpty())
+                    ? DjinnClient.connect(registryAddr)
+                    : DjinnClient.connect(registryAddr, token);
              ServiceDiscovery discovery = ServiceDiscovery.watch(djinn)) {
 
             var greeter = discovery.get(

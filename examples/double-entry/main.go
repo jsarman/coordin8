@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/coordin8/sdk-go/coordin8"
 	pb "github.com/coordin8/sdk-go/gen/coordin8"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -34,7 +35,7 @@ import (
 type ledger struct {
 	pb.UnimplementedParticipantServiceServer
 	name      string
-	veto      bool       // if true, Prepare returns VOTE_ABORTED
+	veto      bool // if true, Prepare returns VOTE_ABORTED
 	committed atomic.Bool
 	aborted   atomic.Bool
 }
@@ -109,7 +110,12 @@ func main() {
 		djinnAddr = os.Args[1]
 	}
 
-	conn, err := grpc.NewClient(djinnAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if token := os.Getenv("COORDIN8_TOKEN"); token != "" {
+		dialOpts = append(dialOpts, coordin8.PerRPCToken(token))
+	}
+
+	conn, err := grpc.NewClient(djinnAddr, dialOpts...)
 	if err != nil {
 		log.Fatalf("connect %s: %v", djinnAddr, err)
 	}

@@ -1,0 +1,33 @@
+# JWT auth overlay for docker-compose.split.yml. Off by default — apply on
+# top of the base file to turn it on:
+#
+#   scripts/gen-auth-env.sh .env.auth-split
+#   docker compose -f docker-compose.split.yml -f docker-compose.split.auth.yml --env-file .env.auth-split up --build
+#
+# or just: mise r up-split-auth
+#
+# See .claude/plans/grpc-security/PRD.md. No externally-minted tokens
+# needed here — every split-mode service self-mints its own tokens for its
+# internal Djinn-to-Djinn calls once COORDIN8_JWT_SECRET is set
+# (Decision 8: self-registration, RemoteCapabilityResolver lookups, and
+# TxnMgr's participant voting all go through this).
+services:
+  registry:
+    environment:
+      COORDIN8_JWT_SECRET: "${COORDIN8_JWT_SECRET}"
+
+  event:
+    environment:
+      COORDIN8_JWT_SECRET: "${COORDIN8_JWT_SECRET}"
+
+  space:
+    environment:
+      COORDIN8_JWT_SECRET: "${COORDIN8_JWT_SECRET}"
+
+  txn:
+    environment:
+      COORDIN8_JWT_SECRET: "${COORDIN8_JWT_SECRET}"
+
+  proxy:
+    environment:
+      COORDIN8_JWT_SECRET: "${COORDIN8_JWT_SECRET}"
