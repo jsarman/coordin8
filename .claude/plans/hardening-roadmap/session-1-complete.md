@@ -1,6 +1,6 @@
 # Hardening Roadmap — Session 1 Completion Notes
 
-**Status:** Items 1, 2, and 4 complete, 2026-09-05. Item 1 on branch `worktree-boot-order-analysis` (PR [#20](https://github.com/jsarman/coordin8/pull/20)). Item 2 on branch `feat/per-service-docker` (PR [#21](https://github.com/jsarman/coordin8/pull/21), stacked on #20). Item 4 on branch `feat/split-mode-dynamo`, stacked on #21, not yet PR'd. None merged yet.
+**Status:** Items 1, 2, and 4 complete and merged to `main`, 2026-09-05/06 — via #20 (item 1), #21 (item 2), #22 (item 4), and a corrective consolidation PR #23. #21 and #22 were opened as PRs stacked on non-`main` branches (`worktree-boot-order-analysis`, `feat/per-service-docker`); merging them landed the content on those branches, not `main` — #23 (base: `main`, head: `feat/split-mode-dynamo`) brought everything over in one clean PR once the mismatch was caught. Lesson captured in memory as `feedback_stacked_pr_base_branches`. All four stacked branches deleted post-merge.
 
 ## Item 1 — Flexible boot order + health checks
 
