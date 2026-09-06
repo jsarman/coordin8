@@ -276,8 +276,8 @@ Each service can boot as its own process, discoverable through Registry. Monolit
 
 | Item | Status | Notes |
 |------|--------|-------|
-| gRPC auth (JWT) | Not started | `.claude/plans/hardening-roadmap/PRD.md` item 6 — token issuance/rotation, which services validate, service-to-service vs client-to-service, mTLS vs JWT-over-TLS, interaction with Registry self-registration all open questions |
-| mTLS | Not started | |
+| gRPC auth (JWT) | **Planned, not started** | `.claude/plans/grpc-security/PRD.md` — full plan now written (hardening-roadmap item 6). Decisions made: HS256 shared-secret (not RS256/JWKS) for v1, static CLI-minted tokens (not a live issuance service — avoids the leasing-style bootstrap cycle entirely), every service validates independently via a shared `coordin8-auth` interceptor crate (no gateway), authentication-only (no RBAC yet). TLS and mTLS explicitly out of scope for this phase, tracked as separate future work. |
+| mTLS | Not started | Deferred non-goal of `.claude/plans/grpc-security/PRD.md` — plausible later upgrade for a specific deployment target (e.g. once on a service mesh), not a parallel track to JWT |
 
 ---
 
