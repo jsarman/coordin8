@@ -7,19 +7,22 @@
 
 ## LeaseMgr
 
-The bedrock. TTL-based liveness contracts.
+> **Architecture change in progress:** `.claude/plans/distributed-leasing/PRD.md` (approved, not started 2026-09-06) replaces LeaseMgr-as-centralized-network-service with a per-service embedded Landlord pattern, matching Jini/Apache River's actual design. Everything below describes the *current* (soon to change) centralized model — treat this table as legacy once that PRD lands, not as the target state.
+
+The bedrock (for now). TTL-based liveness contracts.
 
 | Item | Status | Notes |
 |------|--------|-------|
 | Proto: Grant, Renew, Cancel, WatchExpiry | Done | `proto/coordin8/lease.proto` |
 | Rust: LeaseManager + reaper | Done | `coordin8-lease` crate, 1s reaper interval |
-| Duration negotiation + `FOREVER` / `ANY` constants | Done | `MAX_LEASE_TTL` / `PREFERRED_LEASE_TTL` env vars |
-| Go SDK: grant, renew, cancel, keepAlive, watch | Done | Full parity |
+| Duration negotiation + `FOREVER` / `ANY` constants | Done | `MAX_LEASE_TTL` / `PREFERRED_LEASE_TTL` env vars; sentinel values slated to swap under distributed-leasing (current `0`=FOREVER collides with proto3's default-unset value) |
+| Go SDK: grant, renew, cancel, keepAlive, watch | Done | Full parity; `Leases()` global accessor and `KeepAlive`'s silent failure-swallowing both slated for rework under distributed-leasing |
 | Java SDK: grant, renew, cancel | Done | |
-| Java SDK: keepAlive (background renewal) | **Gap** | Go has it, Java doesn't |
-| Java SDK: watch (expiry stream) | **Gap** | Go has it, Java doesn't |
+| Java SDK: keepAlive (background renewal) | **Gap** | Go has it, Java doesn't — paused pending distributed-leasing landing first |
+| Java SDK: watch (expiry stream) | **Gap** | Go has it, Java doesn't — paused pending distributed-leasing landing first |
 | Node SDK: grant, renew, cancel, keepAlive, watch | Done | |
-| CLI: grant, renew, cancel, watch | Done | |
+| CLI: grant, renew, cancel, watch | Done | verb shape to be redesigned under distributed-leasing (no single global LeaseMgr address to assume) |
+| Split-mode Registry/Space/EventMgr/TxnMgr each grant their own leases in-process (no shared LeaseMgr) | Not started | `.claude/plans/distributed-leasing/PRD.md` |
 
 ---
 
@@ -310,7 +313,9 @@ Not in core — built on Space/EventMgr primitives. **Unblocked** — Space v1 a
 
 1. **Space CLI** — `spaces read/out/take/watch` commands in the Go CLI (Go Space SDK now done)
 2. **SDK parity gaps** — Java LeaseClient missing `keepAlive` + `watch`; Space/EventMgr/TxnMgr hand-written clients missing in Java + Node
-3. **Hardening roadmap** (`.claude/plans/hardening-roadmap/PRD.md`, next up as of 2026-09-05) — DynamoDB split-mode wiring, per-service Docker containers, flexible inter-service boot order + graceful degraded health, cross-platform fixes, JWT auth
+3. **Hardening roadmap** (`.claude/plans/hardening-roadmap/PRD.md`, items 1/2/4 done 2026-09-05/06) — remaining: cross-platform fixes, JWT auth
+3b. **Registry-only bootstrap** (`.claude/plans/registry-bootstrap/PRD.md`, Phases 1/1b/2 done 2026-09-06, PR #25) — SDKs (Go/Java/Node) need only Registry's address, look up LeaseMgr/Space/EventMgr/Proxy through it instead of hardcoding a fixed multi-port host. Phases 3 (Java SDK) / 4 (Node SDK) **deliberately paused** — see 3c below.
+3c. **Distributed leasing** (`.claude/plans/distributed-leasing/PRD.md`, approved 2026-09-06, not started) — **blocks 3b's remaining phases.** Remove LeaseMgr as a centralized network service; each service (Registry/Space/EventMgr/TxnMgr) becomes its own Landlord, granting/tracking/persisting its own leases in-process, matching Jini/Apache River's actual design. Found to be the root cause of the registry-bootstrap Phase 1b bootstrap-cycle pain. Also folds in a second research pass's punch list: self-describing leases (`grantor_endpoint`), cancel-bypasses-cascade bug, cascade-lag bug, `FOREVER`/`ANY` sentinel swap, batch renewal, per-namespace lease policy, `KeepAlive` silent-failure fix.
 4. **Djinn split follow-ups** — docker-compose chaos, Registry redundancy (DynamoDB/MiniStack provider-swap test moved into hardening roadmap above, exact gap now scoped)
 5. **AWS Provider** — DynamoDB/SQS/EventBridge for production (bundled-mode DynamoDB already done, see Providers table)
 6. **Higher-order patterns** — Lens, Reflex, Sentry (unblocked by Space + EventMgr)
