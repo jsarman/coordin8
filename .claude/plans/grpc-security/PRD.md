@@ -1,6 +1,6 @@
 # gRPC Security via JWT — PRD
 
-> **Status: In progress — all 5 phases implemented, not yet merged to main.** This is hardening-roadmap item 6, the one item left in `.claude/plans/hardening-roadmap/PRD.md` (items 1-5 all done). Implementation lives on branch `worktree-grpc-security-phase1` (worktree `.claude/worktrees/grpc-security-phase1`): Rust core + CLI mint-token (Phase 1), Go/Java/Node SDK token support (Phases 2-4), and an opt-in auth overlay for every example compose stack (Phase 5) are all done and live-verified end-to-end. No PR opened yet — update this line to COMPLETE with the PR link once merged.
+> **Status: COMPLETE (merged to main, 2026-09-06).** [PR #34](https://github.com/jsarman/coordin8/pull/34). This was hardening-roadmap item 6, the last item on that roadmap — all 6 items are now done, closing out `.claude/plans/hardening-roadmap/PRD.md` entirely. All 5 phases shipped: Rust core + CLI mint-token, Go/Java/Node SDK token support, and an opt-in auth overlay for every example compose stack — all live-verified end-to-end (cross-language token interop, reject/accept against a real auth-enabled Djinn, zero regression in the default no-auth path).
 
 ## Goal
 
