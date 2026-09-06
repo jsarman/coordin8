@@ -130,9 +130,12 @@ mise r lint              # clippy + fmt + go vet
 mise r proto             # regenerate all proto stubs
 mise r clean             # remove all build artifacts
 mise r djinn             # start Djinn locally (dev)
-mise r up / down         # Docker stack
+mise r up / down         # bundled Docker stack (Djinn + greeter)
+mise r up-split / down-split  # split-mode Docker stack (registry/event/space/txn/proxy, one container each)
 mise r demo-events       # market-watch vs live Djinn on :9005
 mise r demo-txn          # double-entry vs live Djinn on :9004
+mise r demo-auction / demo-auction-down  # Auction House polyglot demo (own Docker stack)
+mise r demo-greeter-go / demo-greeter-java / demo-greeter-node  # hello-coordin8 clients (requires `up` or `djinn` running)
 
 # Rust (from djinn/)
 cargo build
