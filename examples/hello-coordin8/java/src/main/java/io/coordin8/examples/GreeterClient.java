@@ -14,7 +14,12 @@ public class GreeterClient {
     public static void main(String[] args) throws Exception {
         String name = args.length > 0 ? args[0] : "Coordin8 (Java)";
 
-        try (DjinnClient djinn = DjinnClient.connect("localhost");
+        String registryAddr = System.getenv("COORDIN8_REGISTRY");
+        if (registryAddr == null || registryAddr.isEmpty()) {
+            registryAddr = "localhost:9002";
+        }
+
+        try (DjinnClient djinn = DjinnClient.connect(registryAddr);
              ServiceDiscovery discovery = ServiceDiscovery.watch(djinn)) {
 
             var greeter = discovery.get(

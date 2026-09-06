@@ -133,6 +133,8 @@ export class EventClient {
             grantedAt: res.grantedAt ?? undefined,
             expiresAt: res.expiresAt ?? undefined,
             ttlSeconds: res.ttlSeconds,
+            grantorHost: res.grantorHost,
+            grantorPort: res.grantorPort,
           });
         }
       );

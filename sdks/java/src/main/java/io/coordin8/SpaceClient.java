@@ -211,12 +211,7 @@ public class SpaceClient {
                         .setTupleId(tupleId)
                         .setTtlSeconds(ttlSeconds)
                         .build());
-        return new LeaseClient.LeaseRecord(
-                lease.getLeaseId(),
-                lease.getResourceId(),
-                lease.hasGrantedAt() ? Instant.ofEpochSecond(lease.getGrantedAt().getSeconds()) : null,
-                lease.hasExpiresAt() ? Instant.ofEpochSecond(lease.getExpiresAt().getSeconds()) : null,
-                lease.getTtlSeconds());
+        return LeaseClient.toRecord(lease);
     }
 
     /**

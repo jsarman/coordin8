@@ -26,7 +26,6 @@ npm-debug.log*
 **/build/
 **/bin/
 **/.gradle/
-**/gradle/wrapper/gradle-wrapper.jar
 
 # Environment
 .env

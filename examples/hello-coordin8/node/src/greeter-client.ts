@@ -5,7 +5,7 @@ import { GreeterServiceClient } from "../gen/greeter";
 async function main() {
   const name = process.argv[2] ?? "Coordin8 (Node)";
 
-  const djinn = DjinnClient.connect("localhost");
+  const djinn = await DjinnClient.connect(process.env.COORDIN8_REGISTRY ?? "localhost:9002");
   const discovery = ServiceDiscovery.watch(djinn);
 
   try {

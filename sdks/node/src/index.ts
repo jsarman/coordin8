@@ -1,5 +1,6 @@
 export { DjinnClient } from "./djinn-client";
-export { LeaseClient } from "./lease-client";
+export type { ConnectOptions } from "./djinn-client";
+export { LeaseClient, dialLease, grantorAddr } from "./lease-client";
 export type { Lease } from "./lease-client";
 export { RegistryClient } from "./registry-client";
 export type { CapabilityRecord, TransportDescriptor, Template, RegisterResult, RegistryEventRecord } from "./registry-client";

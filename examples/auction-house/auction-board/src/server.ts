@@ -3,7 +3,7 @@ import path from "path";
 import { DjinnClient } from "@coordin8/sdk";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
-const DJINN_HOST = process.env.DJINN_HOST || "localhost";
+const COORDIN8_REGISTRY = process.env.COORDIN8_REGISTRY || "localhost:9002";
 const AUCTION_SERVICE = process.env.AUCTION_SERVICE || "http://localhost:8080";
 
 const app = express();
@@ -73,8 +73,8 @@ async function watchLoop(
   }
 }
 
-function startWatchers() {
-  const djinn = DjinnClient.connect(DJINN_HOST);
+async function startWatchers() {
+  const djinn = await DjinnClient.connect(COORDIN8_REGISTRY);
 
   console.log("  watching auctions (appearance + expiry), bids, sales...");
 
@@ -99,5 +99,7 @@ function startWatchers() {
 
 app.listen(PORT, () => {
   console.log(`Auction Board listening on http://localhost:${PORT}`);
-  startWatchers();
+  startWatchers().catch((err) => {
+    console.error("failed to start watchers:", err);
+  });
 });
