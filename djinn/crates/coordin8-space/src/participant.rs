@@ -9,6 +9,16 @@ use coordin8_proto::coordin8::{
 
 use crate::manager::SpaceManager;
 
+/// Map a core error to a gRPC status. `Unavailable` gets its own code (the
+/// dependency isn't ready yet, safe to retry) rather than falling into the
+/// generic `internal` bucket.
+fn map_err(e: coordin8_core::Error) -> Status {
+    match e {
+        coordin8_core::Error::Unavailable(_) => Status::unavailable(e.to_string()),
+        _ => Status::internal(e.to_string()),
+    }
+}
+
 /// ParticipantService implementation for the Space.
 ///
 /// When the Space is enlisted in a transaction (via write/take with txn_id),
@@ -38,11 +48,7 @@ impl ParticipantService for SpaceParticipantService {
 
         // If we have uncommitted state, vote PREPARED.
         // If no state (read-only), vote NOTCHANGED.
-        let has_state = self
-            .manager
-            .has_txn(&txn_id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let has_state = self.manager.has_txn(&txn_id).await.map_err(map_err)?;
 
         let vote = if has_state {
             debug!(txn_id, "space participant: PREPARED");
@@ -61,7 +67,7 @@ impl ParticipantService for SpaceParticipantService {
         self.manager
             .commit_space_txn(&txn_id)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         debug!(txn_id, "space participant: committed");
         Ok(Response::new(()))
@@ -73,7 +79,7 @@ impl ParticipantService for SpaceParticipantService {
         self.manager
             .abort_space_txn(&txn_id)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         debug!(txn_id, "space participant: aborted");
         Ok(Response::new(()))
@@ -85,17 +91,13 @@ impl ParticipantService for SpaceParticipantService {
     ) -> Result<Response<PrepareResponse>, Status> {
         let txn_id = req.into_inner().txn_id;
 
-        let has_state = self
-            .manager
-            .has_txn(&txn_id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let has_state = self.manager.has_txn(&txn_id).await.map_err(map_err)?;
 
         if has_state {
             self.manager
                 .commit_space_txn(&txn_id)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(map_err)?;
 
             debug!(txn_id, "space participant: prepare-and-commit (PREPARED)");
             Ok(Response::new(PrepareResponse { vote: 0 }))

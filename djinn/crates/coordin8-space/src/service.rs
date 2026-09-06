@@ -17,6 +17,16 @@ use coordin8_registry::matcher::{matches, parse_template};
 
 use crate::manager::SpaceManager;
 
+/// Map a core error to a gRPC status. `Unavailable` gets its own code (the
+/// dependency isn't ready yet, safe to retry) rather than falling into the
+/// generic `internal` bucket.
+fn map_err(e: coordin8_core::Error) -> Status {
+    match e {
+        coordin8_core::Error::Unavailable(_) => Status::unavailable(e.to_string()),
+        _ => Status::internal(e.to_string()),
+    }
+}
+
 fn to_timestamp(dt: chrono::DateTime<chrono::Utc>) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: dt.timestamp(),
@@ -81,7 +91,7 @@ impl SpaceService for SpaceServiceImpl {
                 txn_id,
             )
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         debug!(tuple_id = %record.tuple_id, "write rpc");
 
@@ -106,7 +116,7 @@ impl SpaceService for SpaceServiceImpl {
             .manager
             .read(r.template, r.wait, r.timeout_ms, txn_id)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         Ok(Response::new(ReadResponse {
             tuple: result.map(|rec| tuple_record_to_proto(&rec, None)),
@@ -121,7 +131,7 @@ impl SpaceService for SpaceServiceImpl {
             .manager
             .take(r.template, r.wait, r.timeout_ms, txn_id)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         Ok(Response::new(TakeResponse {
             tuple: result.map(|rec| tuple_record_to_proto(&rec, None)),
@@ -149,7 +159,7 @@ impl SpaceService for SpaceServiceImpl {
                 r.handback.clone(),
             )
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         // Subscribe to the right broadcast BEFORE returning the stream.
         let broadcast_rx = match on {
@@ -209,7 +219,7 @@ impl SpaceService for SpaceServiceImpl {
             .manager
             .contents(r.template, txn_id)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         let (tx, rx) = mpsc::channel::<Result<Tuple, Status>>(64);
 
@@ -231,7 +241,7 @@ impl SpaceService for SpaceServiceImpl {
             .manager
             .renew(&r.tuple_id, r.ttl_seconds)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         Ok(Response::new(Lease {
             lease_id: record.lease_id,
@@ -244,10 +254,7 @@ impl SpaceService for SpaceServiceImpl {
 
     async fn cancel(&self, req: Request<CancelTupleRequest>) -> Result<Response<()>, Status> {
         let tuple_id = req.into_inner().tuple_id;
-        self.manager
-            .cancel(&tuple_id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.manager.cancel(&tuple_id).await.map_err(map_err)?;
 
         Ok(Response::new(()))
     }

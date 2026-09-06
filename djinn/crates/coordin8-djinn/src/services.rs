@@ -33,6 +33,7 @@ use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
 use coordin8_space::{SpaceManager, SpaceParticipantService, SpaceServiceImpl};
 use coordin8_txn::{LocalTxnEnlister, TxnManager, TxnServiceImpl};
+use tonic_health::ServingStatus;
 
 // ── Env var helpers (pub for tests) ──────────────────────────────────────────
 
@@ -368,7 +369,16 @@ pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Resu
         listener.local_addr()?
     );
 
+    // Registry has no blocking external dependency (its entry-TTL bookkeeping
+    // is a private in-process LeaseManager), so it's healthy the moment it's
+    // about to serve.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
+
     Server::builder()
+        .add_service(health_service)
         .add_service(registry_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
         .await?;
@@ -502,7 +512,16 @@ pub async fn run_lease_on_listener_with_shutdown(
         }
     };
 
+    // LeaseMgr has no blocking external dependency — Registry is only needed
+    // for optional self-registration, which already retries concurrently
+    // below rather than gating startup. Healthy the moment it's about to serve.
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
+
     let server_fut = Server::builder()
+        .add_service(health_service)
         .add_service(lease_svc)
         .serve_with_incoming_shutdown(
             tokio_stream::wrappers::TcpListenerStream::new(listener),
@@ -553,10 +572,12 @@ pub async fn run_event_on_listener(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
 
-    // Discover LeaseMgr through Registry. This blocks until Registry and
-    // LeaseMgr are both reachable.
-    let remote_leasing = RemoteLeasing::connect(registry_addr).await?;
-    let leasing: Arc<dyn Leasing> = Arc::new(remote_leasing);
+    // Construct immediately against a not-yet-resolved LeaseMgr — see
+    // PendingLeasing. Discovery happens in the background task below;
+    // requests made before it resolves fail fast with Unavailable instead
+    // of the server not being reachable at all.
+    let pending_leasing = Arc::new(coordin8_bootstrap::PendingLeasing::new());
+    let leasing: Arc<dyn Leasing> = Arc::clone(&pending_leasing) as Arc<dyn Leasing>;
 
     // Local in-memory event store — events live in the EventMgr process.
     let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
@@ -567,27 +588,50 @@ pub async fn run_event_on_listener(
         event_tx,
     ));
 
-    // Drive subscription cleanup off remote LeaseMgr expiry events. Needs
-    // its own LeaseServiceClient for the streaming WatchExpiry RPC — the
-    // stream reconnects itself via Registry on failure.
-    let lease_stream_client = coordin8_bootstrap::discover_lease_mgr(registry_addr).await?;
-    let expiry_event_manager = Arc::clone(&event_manager);
-    let expiry_registry = registry_addr.to_string();
-    tokio::spawn(async move {
-        watch_expiry_prefix(
-            lease_stream_client,
-            expiry_registry,
-            "event:".to_string(),
-            move |evt| {
-                let mgr = Arc::clone(&expiry_event_manager);
-                let lease_id = evt.lease_id;
-                tokio::spawn(async move {
-                    let _ = mgr.unsubscribe_by_lease(&lease_id).await;
-                });
-            },
-        )
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::NotServing)
         .await;
-    });
+
+    // Resolve LeaseMgr in the background: install it once found, flip
+    // health to Serving, then start the expiry-cleanup watcher (it needs a
+    // real LeaseServiceClient, so it waits for the same discovery).
+    {
+        let pending_leasing = Arc::clone(&pending_leasing);
+        let registry_addr = registry_addr.to_string();
+        let mut health_reporter = health_reporter.clone();
+        let expiry_event_manager = Arc::clone(&event_manager);
+        tokio::spawn(async move {
+            let resolved = RemoteLeasing::connect(&registry_addr)
+                .await
+                .expect("RemoteLeasing::connect retries forever, never returns Err");
+            pending_leasing.install(resolved).await;
+            health_reporter
+                .set_service_status("", ServingStatus::Serving)
+                .await;
+            info!("  ✓ EventMgr: LeaseMgr resolved, now Serving");
+
+            // Drive subscription cleanup off remote LeaseMgr expiry events.
+            // Needs its own LeaseServiceClient for the streaming WatchExpiry
+            // RPC — the stream reconnects itself via Registry on failure.
+            let lease_stream_client = coordin8_bootstrap::discover_lease_mgr(&registry_addr)
+                .await
+                .expect("discover_lease_mgr retries forever, never returns Err");
+            watch_expiry_prefix(
+                lease_stream_client,
+                registry_addr,
+                "event:".to_string(),
+                move |evt| {
+                    let mgr = Arc::clone(&expiry_event_manager);
+                    let lease_id = evt.lease_id;
+                    tokio::spawn(async move {
+                        let _ = mgr.unsubscribe_by_lease(&lease_id).await;
+                    });
+                },
+            )
+            .await;
+        });
+    }
 
     let event_svc = EventServiceServer::new(EventServiceImpl::new(Arc::clone(&event_manager)));
 
@@ -639,6 +683,7 @@ pub async fn run_event_on_listener(
     };
 
     let server_fut = Server::builder()
+        .add_service(health_service)
         .add_service(event_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
@@ -681,8 +726,12 @@ pub async fn run_space_on_listener(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
 
-    let remote_leasing = RemoteLeasing::connect(registry_addr).await?;
-    let leasing: Arc<dyn Leasing> = Arc::new(remote_leasing);
+    // Construct immediately against a not-yet-resolved LeaseMgr — see
+    // PendingLeasing. Discovery happens in the background task below;
+    // requests made before it resolves fail fast with Unavailable instead
+    // of the server not being reachable at all.
+    let pending_leasing = Arc::new(coordin8_bootstrap::PendingLeasing::new());
+    let leasing: Arc<dyn Leasing> = Arc::clone(&pending_leasing) as Arc<dyn Leasing>;
 
     // Split mode: auto-enlist dials TxnMgr over Registry lazily — no I/O
     // happens at boot, so Space can come up with no TxnMgr in sight and still
@@ -703,46 +752,72 @@ pub async fn run_space_on_listener(
         space_participant_endpoint,
     ));
 
-    // Remote LeaseMgr drives tuple + watch cleanup via two WatchExpiry
-    // streams. Each needs its own LeaseServiceClient because the underlying
-    // gRPC stream is owned by one consumer.
-    let tuple_stream_client = coordin8_bootstrap::discover_lease_mgr(registry_addr).await?;
-    let tuple_mgr = Arc::clone(&space_manager);
-    let tuple_registry = registry_addr.to_string();
-    tokio::spawn(async move {
-        watch_expiry_prefix(
-            tuple_stream_client,
-            tuple_registry,
-            "space:".to_string(),
-            move |evt| {
-                let mgr = Arc::clone(&tuple_mgr);
-                let lease_id = evt.lease_id;
-                tokio::spawn(async move {
-                    mgr.on_tuple_expired(&lease_id).await;
-                });
-            },
-        )
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::NotServing)
         .await;
-    });
 
-    let watch_stream_client = coordin8_bootstrap::discover_lease_mgr(registry_addr).await?;
-    let watch_mgr = Arc::clone(&space_manager);
-    let watch_registry = registry_addr.to_string();
-    tokio::spawn(async move {
-        watch_expiry_prefix(
-            watch_stream_client,
-            watch_registry,
-            "space-watch:".to_string(),
-            move |evt| {
-                let mgr = Arc::clone(&watch_mgr);
-                let lease_id = evt.lease_id;
-                tokio::spawn(async move {
-                    mgr.on_watch_expired(&lease_id).await;
-                });
-            },
-        )
-        .await;
-    });
+    // Resolve LeaseMgr in the background: install it once found, flip
+    // health to Serving, then start the two WatchExpiry-driven cleanup
+    // streams (each needs its own LeaseServiceClient, so both wait for the
+    // same discovery before spawning).
+    {
+        let pending_leasing = Arc::clone(&pending_leasing);
+        let registry_addr = registry_addr.to_string();
+        let mut health_reporter = health_reporter.clone();
+        let space_manager = Arc::clone(&space_manager);
+        tokio::spawn(async move {
+            let resolved = RemoteLeasing::connect(&registry_addr)
+                .await
+                .expect("RemoteLeasing::connect retries forever, never returns Err");
+            pending_leasing.install(resolved).await;
+            health_reporter
+                .set_service_status("", ServingStatus::Serving)
+                .await;
+            info!("  ✓ Space: LeaseMgr resolved, now Serving");
+
+            let tuple_stream_client = coordin8_bootstrap::discover_lease_mgr(&registry_addr)
+                .await
+                .expect("discover_lease_mgr retries forever, never returns Err");
+            let tuple_mgr = Arc::clone(&space_manager);
+            let tuple_registry = registry_addr.clone();
+            tokio::spawn(async move {
+                watch_expiry_prefix(
+                    tuple_stream_client,
+                    tuple_registry,
+                    "space:".to_string(),
+                    move |evt| {
+                        let mgr = Arc::clone(&tuple_mgr);
+                        let lease_id = evt.lease_id;
+                        tokio::spawn(async move {
+                            mgr.on_tuple_expired(&lease_id).await;
+                        });
+                    },
+                )
+                .await;
+            });
+
+            let watch_stream_client = coordin8_bootstrap::discover_lease_mgr(&registry_addr)
+                .await
+                .expect("discover_lease_mgr retries forever, never returns Err");
+            let watch_mgr = Arc::clone(&space_manager);
+            tokio::spawn(async move {
+                watch_expiry_prefix(
+                    watch_stream_client,
+                    registry_addr,
+                    "space-watch:".to_string(),
+                    move |evt| {
+                        let mgr = Arc::clone(&watch_mgr);
+                        let lease_id = evt.lease_id;
+                        tokio::spawn(async move {
+                            mgr.on_watch_expired(&lease_id).await;
+                        });
+                    },
+                )
+                .await;
+            });
+        });
+    }
 
     let space_svc = SpaceServiceServer::new(SpaceServiceImpl::new(Arc::clone(&space_manager)));
     let space_participant_svc =
@@ -796,6 +871,7 @@ pub async fn run_space_on_listener(
     };
 
     let server_fut = Server::builder()
+        .add_service(health_service)
         .add_service(space_svc)
         .add_service(space_participant_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
@@ -841,32 +917,59 @@ pub async fn run_txn_on_listener(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
 
-    let remote_leasing = RemoteLeasing::connect(registry_addr).await?;
-    let leasing: Arc<dyn Leasing> = Arc::new(remote_leasing);
+    // Construct immediately against a not-yet-resolved LeaseMgr — see
+    // PendingLeasing. Discovery happens in the background task below;
+    // requests made before it resolves fail fast with Unavailable instead
+    // of the server not being reachable at all.
+    let pending_leasing = Arc::new(coordin8_bootstrap::PendingLeasing::new());
+    let leasing: Arc<dyn Leasing> = Arc::clone(&pending_leasing) as Arc<dyn Leasing>;
 
     let txn_store: Arc<dyn TxnStore> = Arc::new(InMemoryTxnStore::new());
     let txn_manager = Arc::new(TxnManager::new(txn_store, Arc::clone(&leasing)));
 
-    let lease_stream_client = coordin8_bootstrap::discover_lease_mgr(registry_addr).await?;
-    let expiry_txn_mgr = Arc::clone(&txn_manager);
-    let expiry_registry = registry_addr.to_string();
-    tokio::spawn(async move {
-        watch_expiry_prefix(
-            lease_stream_client,
-            expiry_registry,
-            "txn:".to_string(),
-            move |evt| {
-                if let Some(txn_id) = evt.resource_id.strip_prefix("txn:") {
-                    let mgr = Arc::clone(&expiry_txn_mgr);
-                    let txn_id = txn_id.to_string();
-                    tokio::spawn(async move {
-                        let _ = mgr.abort_expired(&txn_id).await;
-                    });
-                }
-            },
-        )
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::NotServing)
         .await;
-    });
+
+    // Resolve LeaseMgr in the background: install it once found, flip
+    // health to Serving, then start the expiry-cleanup watcher (it needs a
+    // real LeaseServiceClient, so it waits for the same discovery).
+    {
+        let pending_leasing = Arc::clone(&pending_leasing);
+        let registry_addr = registry_addr.to_string();
+        let mut health_reporter = health_reporter.clone();
+        let expiry_txn_mgr = Arc::clone(&txn_manager);
+        tokio::spawn(async move {
+            let resolved = RemoteLeasing::connect(&registry_addr)
+                .await
+                .expect("RemoteLeasing::connect retries forever, never returns Err");
+            pending_leasing.install(resolved).await;
+            health_reporter
+                .set_service_status("", ServingStatus::Serving)
+                .await;
+            info!("  ✓ TransactionMgr: LeaseMgr resolved, now Serving");
+
+            let lease_stream_client = coordin8_bootstrap::discover_lease_mgr(&registry_addr)
+                .await
+                .expect("discover_lease_mgr retries forever, never returns Err");
+            watch_expiry_prefix(
+                lease_stream_client,
+                registry_addr,
+                "txn:".to_string(),
+                move |evt| {
+                    if let Some(txn_id) = evt.resource_id.strip_prefix("txn:") {
+                        let mgr = Arc::clone(&expiry_txn_mgr);
+                        let txn_id = txn_id.to_string();
+                        tokio::spawn(async move {
+                            let _ = mgr.abort_expired(&txn_id).await;
+                        });
+                    }
+                },
+            )
+            .await;
+        });
+    }
 
     let txn_svc = TransactionServiceServer::new(TxnServiceImpl::new(txn_manager));
 
@@ -918,6 +1021,7 @@ pub async fn run_txn_on_listener(
     };
 
     let server_fut = Server::builder()
+        .add_service(health_service)
         .add_service(txn_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
@@ -961,9 +1065,37 @@ pub async fn run_proxy_on_listener(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
 
-    let resolver = Arc::new(RemoteCapabilityResolver::connect(registry_addr).await?);
+    // Construct immediately against a not-yet-resolved Registry — see
+    // PendingCapabilityResolver. Discovery happens in the background task
+    // below; requests made before it resolves fail fast with Unavailable
+    // instead of the server not being reachable at all.
+    let pending_resolver = Arc::new(coordin8_bootstrap::PendingCapabilityResolver::new());
+    let resolver: Arc<dyn coordin8_core::CapabilityResolver> =
+        Arc::clone(&pending_resolver) as Arc<dyn coordin8_core::CapabilityResolver>;
     let proxy_config = ProxyConfig::from_env();
     let proxy_manager = Arc::new(ProxyManager::new(resolver, proxy_config));
+
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", ServingStatus::NotServing)
+        .await;
+
+    // Resolve Registry in the background; flip health to Serving once found.
+    {
+        let pending_resolver = Arc::clone(&pending_resolver);
+        let registry_addr = registry_addr.to_string();
+        let mut health_reporter = health_reporter.clone();
+        tokio::spawn(async move {
+            let resolved = RemoteCapabilityResolver::connect(&registry_addr)
+                .await
+                .expect("RemoteCapabilityResolver::connect retries forever, never returns Err");
+            pending_resolver.install(resolved).await;
+            health_reporter
+                .set_service_status("", ServingStatus::Serving)
+                .await;
+            info!("  ✓ Proxy: Registry resolved, now Serving");
+        });
+    }
 
     let proxy_svc = ProxyServiceServer::new(ProxyServiceImpl::new(proxy_manager));
 
@@ -1015,6 +1147,7 @@ pub async fn run_proxy_on_listener(
     };
 
     let server_fut = Server::builder()
+        .add_service(health_service)
         .add_service(proxy_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 

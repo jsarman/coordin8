@@ -15,6 +15,16 @@ use coordin8_proto::coordin8::{
 
 use crate::manager::EventManager;
 
+/// Map a core error to a gRPC status. `Unavailable` gets its own code (the
+/// dependency isn't ready yet, safe to retry) rather than falling into the
+/// generic `internal` bucket.
+fn map_err(e: coordin8_core::Error) -> Status {
+    match e {
+        coordin8_core::Error::Unavailable(_) => Status::unavailable(e.to_string()),
+        _ => Status::internal(e.to_string()),
+    }
+}
+
 fn to_timestamp(dt: chrono::DateTime<chrono::Utc>) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: dt.timestamp(),
@@ -69,7 +79,7 @@ impl EventService for EventServiceImpl {
                 r.handback,
             )
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         debug!(registration_id, source = %r.source, "subscribe rpc");
 
@@ -99,7 +109,7 @@ impl EventService for EventServiceImpl {
             .manager
             .get_subscription(&registration_id)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(map_err)?
             .ok_or_else(|| Status::not_found("subscription not found"))?;
 
         let handback = sub.handback.clone();
@@ -172,7 +182,7 @@ impl EventService for EventServiceImpl {
         self.manager
             .emit(r.source, r.event_type, r.attrs, r.payload)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         Ok(Response::new(()))
     }
@@ -186,7 +196,7 @@ impl EventService for EventServiceImpl {
             .manager
             .renew_subscription(&r.registration_id, r.ttl_seconds)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         Ok(Response::new(Lease {
             lease_id: record.lease_id,
@@ -205,7 +215,7 @@ impl EventService for EventServiceImpl {
         self.manager
             .cancel_subscription(&registration_id)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_err)?;
 
         Ok(Response::new(()))
     }

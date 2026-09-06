@@ -1,6 +1,6 @@
 # Hardening Roadmap — PRD
 
-> **Status: Not started.** Planned as the next initiative after `.claude/plans/space-race-txn-failsafe/` (merged 2026-09-05). Docker-centric and near-term — a precursor to, not a duplicate of, `.claude/plans/phase3-cloud-topology/` (which is the full AWS-serverless endgame). Where they overlap, this PRD cross-references rather than repeats.
+> **Status: In progress.** Item 1 is COMPLETE (implemented + verified live 2026-09-05, on branch `worktree-boot-order-analysis`, not yet PR'd/merged). Started right after `.claude/plans/space-race-txn-failsafe/` (merged 2026-09-05). Docker-centric and near-term — a precursor to, not a duplicate of, `.claude/plans/phase3-cloud-topology/` (which is the full AWS-serverless endgame). Where they overlap, this PRD cross-references rather than repeats.
 
 ## Goal
 
@@ -12,11 +12,16 @@ CLAUDE.md currently documents boot order as "strict and load-bearing... non-nego
 
 ## Items
 
-### 1. Flexible boot order / graceful degraded health
+### 1. Flexible boot order / graceful degraded health — ✅ DONE
 
-Any service should be able to start in any order. A service missing a dependency (Registry or LeaseMgr down) should still report itself healthy to the container host/orchestrator — "alive, waiting on dependency X" — not get restart-looped. Today's health check is a bare TCP probe on `:9001` (CLAUDE.md), which can't express that distinction.
+Full design + implementation in `boot-order-health-design.md` and `decisions.md` (this folder). Summary:
 
-`phase3-cloud-topology/resilience-plan.md:134` already notes "the *inter-service* boot order relaxes because they're independent processes" as a consequence of that plan's DynamoDB+SNS topology — this item is the same relaxation, but for Docker-Compose-level deployment, ahead of any AWS work.
+- Confirmed (code + live test) that boot-order independence in the "won't crash" sense already existed — `retry_forever` backs all cross-service discovery. The real gap was that four of six split-mode services blocked their entire gRPC serve loop behind that discovery, and there was no real health signal (a bare TCP probe reports "up" the whole time regardless).
+- Added the standard gRPC Health Checking Protocol (`tonic-health`) to all six split-mode services.
+- Restructured EventMgr/Space/TxnMgr/Proxy to construct immediately against a `PendingLeasing`/`PendingCapabilityResolver` (new types in `coordin8-bootstrap`) and serve right away; a background task resolves the real dependency, installs it, and flips health `NotServing` → `Serving`. New `Error::Unavailable` (`coordin8-core`) surfaces as `Status::unavailable` at every affected RPC boundary instead of the generic `internal` bucket.
+- Verified live end-to-end: server up immediately with dependency missing, health `NOT_SERVING`, a real RPC fails in ~0.02s with a clear "waiting on dependency: X" message (not a hang), then flips to `SERVING` and succeeds the instant Registry/LeaseMgr come up — no restart needed anywhere.
+
+`phase3-cloud-topology/resilience-plan.md:134`'s note that "the *inter-service* boot order relaxes because they're independent processes" (in that plan's DynamoDB+SNS context) is the same relaxation achieved here, but for Docker-Compose-level deployment, ahead of any AWS work.
 
 ### 2. Docker: one container per service
 
