@@ -34,11 +34,32 @@ async fn ephemeral_listener() -> (tokio::net::TcpListener, u16) {
     (l, port)
 }
 
-async fn spawn_registry() -> (JoinHandle<()>, String) {
+/// A stable LeaseMgr instance that exists only to satisfy Registry's own
+/// internal dependency (`run_registry_on_listener`'s `lease_addr` param).
+/// Kept separate from whatever LeaseMgr instance the test itself is
+/// exercising, and never killed — Registry can't recover if ITS OWN
+/// dependency dies without restarting at the same address (a known, accepted
+/// limitation; see `.claude/plans/registry-bootstrap/PRD.md`). Standalone
+/// (no `COORDIN8_REGISTRY`) so it doesn't also show up as a competing
+/// `interface=LeaseMgr` entry in the test's own lookups.
+async fn spawn_backbone_lease() -> String {
     let (listener, port) = ephemeral_listener().await;
     let addr = format!("http://127.0.0.1:{port}");
+    tokio::spawn(async move {
+        run_lease_on_listener(listener, None, "127.0.0.1", 30)
+            .await
+            .ok();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    addr
+}
+
+async fn spawn_registry(lease_addr: &str) -> (JoinHandle<()>, String) {
+    let (listener, port) = ephemeral_listener().await;
+    let addr = format!("http://127.0.0.1:{port}");
+    let lease_addr = lease_addr.to_string();
     let handle = tokio::spawn(async move {
-        run_registry_on_listener(listener).await.ok();
+        run_registry_on_listener(listener, &lease_addr).await.ok();
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     (handle, addr)
@@ -79,7 +100,8 @@ async fn spawn_event(registry_addr: &str) -> (JoinHandle<()>, String) {
 /// `RemoteLeasing`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_event_subscribe_emit_receive_round_trip() {
-    let (_reg, registry_addr) = spawn_registry().await;
+    let backbone_lease_addr = spawn_backbone_lease().await;
+    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
     let _lease = spawn_lease(&registry_addr, 30).await;
     let (_event, event_addr) = spawn_event(&registry_addr).await;
 
@@ -143,7 +165,8 @@ async fn split_event_subscribe_emit_receive_round_trip() {
 /// would never fire and the registration would leak.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_event_remote_expiry_cleans_subscription() {
-    let (_reg, registry_addr) = spawn_registry().await;
+    let backbone_lease_addr = spawn_backbone_lease().await;
+    let (_reg, registry_addr) = spawn_registry(&backbone_lease_addr).await;
     let _lease = spawn_lease(&registry_addr, 30).await;
     let (_event, event_addr) = spawn_event(&registry_addr).await;
 
