@@ -1,6 +1,6 @@
 # Hardening Roadmap — PRD
 
-> **Status: In progress.** Items 1, 2, and 4 are COMPLETE (implemented + verified live 2026-09-05). Item 1 is on branch `worktree-boot-order-analysis`, PR'd as #20. Item 2 is on branch `feat/per-service-docker`, PR'd as #21 (stacked on #20). Item 4 is on branch `feat/split-mode-dynamo` (stacked on #21), not yet PR'd. None merged yet. See `session-1-complete.md` for the full implementation writeup. Started right after `.claude/plans/space-race-txn-failsafe/` (merged 2026-09-05). Docker-centric and near-term — a precursor to, not a duplicate of, `.claude/plans/phase3-cloud-topology/` (which is the full AWS-serverless endgame). Where they overlap, this PRD cross-references rather than repeats.
+> **Status: In progress.** Items 1, 2, and 4 are COMPLETE and merged to `main` (2026-09-05/06, via #20, #21, #22, and a corrective consolidation PR #23 — #21/#22 were stacked on non-`main` branches, so merging them didn't land on `main` until #23; see `feedback_stacked_pr_base_branches` lesson). See `session-1-complete.md` for the full implementation writeup. Started right after `.claude/plans/space-race-txn-failsafe/` (merged 2026-09-05). Docker-centric and near-term — a precursor to, not a duplicate of, `.claude/plans/phase3-cloud-topology/` (which is the full AWS-serverless endgame). Where they overlap, this PRD cross-references rather than repeats.
 
 ## Goal
 
