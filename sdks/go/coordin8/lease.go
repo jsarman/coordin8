@@ -30,11 +30,34 @@ func NewLeaseClient(conn *grpc.ClientConn) *LeaseClient {
 	return &LeaseClient{client: pb.NewLeaseServiceClient(conn)}
 }
 
+// LeaseDialOption configures DialLease.
+type LeaseDialOption func(*leaseDialOptions)
+
+type leaseDialOptions struct {
+	token string
+}
+
+// WithLeaseToken attaches a bearer token to every call on this lease
+// connection — needed against a grantor with COORDIN8_JWT_SECRET set.
+func WithLeaseToken(token string) LeaseDialOption {
+	return func(o *leaseDialOptions) { o.token = token }
+}
+
 // DialLease connects directly to a lease grantor's address — typically
 // GrantorHost:GrantorPort read off a Lease you already hold. The returned
 // LeaseClient owns the connection; call Close when done.
-func DialLease(grantorAddr string) (*LeaseClient, error) {
-	conn, err := grpc.NewClient(grantorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func DialLease(grantorAddr string, opts ...LeaseDialOption) (*LeaseClient, error) {
+	cfg := &leaseDialOptions{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if cfg.token != "" {
+		dialOpts = append(dialOpts, perRPCTokenOption(cfg.token))
+	}
+
+	conn, err := grpc.NewClient(grantorAddr, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("dial lease grantor %s: %w", grantorAddr, err)
 	}
