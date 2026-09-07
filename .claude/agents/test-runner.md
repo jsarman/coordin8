@@ -23,7 +23,7 @@ curl -sf http://localhost:4566/_ministack/health && echo "UP" || echo "DOWN"
 
 **Docker stack (Djinn + services):**
 ```bash
-nc -z localhost 9001 && echo "UP" || echo "DOWN"
+nc -z localhost 9002 && echo "UP" || echo "DOWN"
 ```
 
 If infrastructure is down, start it in the `coordin8` tmux session:
@@ -47,7 +47,7 @@ Poll for readiness before running tests:
 for i in $(seq 1 20); do curl -sf http://localhost:4566/_ministack/health && break || sleep 3; done
 
 # Djinn
-for i in $(seq 1 20); do nc -z localhost 9001 && break || sleep 3; done
+for i in $(seq 1 20); do nc -z localhost 9002 && break || sleep 3; done
 ```
 
 ## Running Tests

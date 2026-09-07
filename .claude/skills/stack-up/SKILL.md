@@ -61,9 +61,9 @@ tmux send-keys -t coordin8:djinn 'cd djinn && cargo run 2>&1' Enter
 
 After launching, poll health checks. Don't flood — check every 3 seconds, max 20 attempts:
 
-**Docker/Djinn health (LeaseMgr on 9001):**
+**Docker/Djinn health (Registry on 9002):**
 ```bash
-for i in $(seq 1 20); do nc -z localhost 9001 && echo "ready" && break || sleep 3; done
+for i in $(seq 1 20); do nc -z localhost 9002 && echo "ready" && break || sleep 3; done
 ```
 
 **MiniStack:**
@@ -76,11 +76,11 @@ for i in $(seq 1 20); do curl -sf http://localhost:4566/_ministack/health && ech
 Once ready (or timed out), report:
 - Which services are up and on which ports
 - Any that failed to start — peek at their pane output for errors
-- Keep it brief: "Stack is up. Djinn on :9001, MiniStack on :4566." or "Djinn failed to start — build error in coordin8-lease crate."
+- Keep it brief: "Stack is up. Djinn on :9002, MiniStack on :4566." or "Djinn failed to start — build error in coordin8-lease crate."
 
 ## Important
 
 - **Boot order matters:** MiniStack/Docker first, then Djinn, then application services
 - Read `docker-compose.yml` if needed to confirm service names and ports
-- Don't run `docker compose up` and `cargo run` Djinn simultaneously unless the user is testing against Docker — they'll port-conflict on 9001
+- Don't run `docker compose up` and `cargo run` Djinn simultaneously unless the user is testing against Docker — they'll port-conflict on 9002
 - If something fails, peek at the pane output and surface the error — don't retry blindly

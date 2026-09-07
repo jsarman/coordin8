@@ -66,7 +66,7 @@ tmux kill-window -t coordin8:djinn
 
 Quick port check to confirm nothing is lingering:
 ```bash
-nc -z localhost 9001 2>/dev/null && echo "9001 still open" || echo "9001 clear"
+nc -z localhost 9002 2>/dev/null && echo "9002 still open" || echo "9002 clear"
 nc -z localhost 4566 2>/dev/null && echo "4566 still open" || echo "4566 clear"
 ```
 
