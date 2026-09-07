@@ -1,6 +1,6 @@
 # Review Follow-ups (2026-09-07) — PRD
 
-> **Status: In progress.** Addresses the actionable findings from an independent code review at commit `145d87a` (`coordin8-review-2026-09-07.md`, supplied by the user), following the review's own suggested order. TLS and coordinator recovery are explicitly deferred to their own future topic folder(s) — both are larger, cross-cutting efforts the review itself says don't belong bolted onto this pass.
+> **Status: In progress — all 6 findings from the review's suggested order are implemented, not yet merged to main.** Addresses the actionable findings from an independent code review at commit `145d87a` (`coordin8-review-2026-09-07.md`, supplied by the user). TLS and coordinator recovery (the review's own item 7) are explicitly deferred to their own future topic folder(s) — both are larger, cross-cutting efforts the review itself says don't belong bolted onto this pass. One extra fix beyond the review's own findings, surfaced while chasing down Finding 2: `infra/dynamodb-tables.cfn.yml` still provisioned a single `coordin8_leases` table that the distributed-leasing runtime hasn't looked for since it landed — split into the four namespaced tables the runtime actually requests, live-verified against real DynamoDB (MiniStack).
 
 ## Goal
 
@@ -23,6 +23,19 @@ An external review of the post-observability-merge codebase (`145d87a`) found re
 5. **Multi-replica grantor pinning: document as a constraint, not a code change.** Stamping a service-level (VIP/DNS) address instead of the granting replica's own address would be a real architecture change (every replica would need to agree on/discover that shared address, and the self-describing-lease design — `grantor_host`/`grantor_port` carried on the `Lease` itself — would need a second, different addressing mode for the shared-store case). That's more than this pass should take on. Documented instead, in the DynamoDB provider's own docs and `distributed-leasing/PRD.md`, as an explicit constraint: single-replica-per-namespace when using a shared backing store, until/unless a real multi-replica deployment need justifies the bigger fix.
 
 6. **Two small operational fixes**: `RenewAll` rejects (rather than silently accepting) a batch above a fixed cap, and the `/metrics` HTTP handler returns 404 for any path other than `/metrics` and 405 for any method other than `GET`, instead of dumping the full metrics body for every request regardless of path/verb.
+
+## Implementation — all done, live-verified, not yet merged
+
+| # | What | Commit |
+|---|------|--------|
+| 1 | Self-registration recovers from `NotFound`; `self_register_retrying()` closes the initial-registration retry gap too | `07fe670` |
+| 2 | Docs corrected (README.md, djinn/README.md, coordin8-djinn/README.md, coordin8-lease/README.md, sdks/go/README.md, auction-house compose) + the CFN/DynamoDB table-naming bug found along the way | `566200d` |
+| 3 | `verify_signature=false` startup warning + new `coordin8-auth/README.md` | `fc173c2` |
+| 4 | `gen-auth-env.sh` — secret via env not argv, `chmod 600`, TTL/revocation trade-off documented | `1a48d09` |
+| 5 | Multi-replica grantor pinning documented as a constraint | `444f135` |
+| 6 | `RenewAll` batch cap + `/metrics` 404/405 routing | `5c87f46` |
+
+Every commit was live-verified against real running services (not just unit tests) — see each commit message for the specific verification performed.
 
 ## Non-Goals (for this pass — the review's own item 7, and beyond)
 
