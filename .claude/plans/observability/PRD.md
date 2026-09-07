@@ -1,6 +1,6 @@
 # Production-Grade Observability — PRD
 
-> **Status: In progress — all 3 scoped phases implemented, not yet merged to main.** New initiative, not part of the (now fully closed) `.claude/plans/hardening-roadmap/`. Implementation lives on branch `worktree-observability-phase1` (worktree `.claude/worktrees/observability-phase1`): structured JSON logging (Phase 1), OpenTelemetry tracing (Phase 2), and Prometheus metrics (Phase 3) are all done and live-verified end-to-end against a real running Djinn. Phase 4 (SDK-side trace propagation) remains unscheduled future work, not blocking. No PR opened yet — update this line to COMPLETE with the PR link once merged.
+> **Status: COMPLETE (merged to main, 2026-09-07).** [PR #36](https://github.com/jsarman/coordin8/pull/36). All 3 scoped phases shipped: structured JSON logging (Phase 1), OpenTelemetry tracing (Phase 2), and Prometheus metrics (Phase 3) — all live-verified end-to-end against a real running Djinn. Phase 4 (SDK-side trace propagation) remains unscheduled future work, not blocking.
 
 ## Goal
 

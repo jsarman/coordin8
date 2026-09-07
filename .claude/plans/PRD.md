@@ -285,8 +285,8 @@ Each service can boot as its own process, discoverable through Registry. Monolit
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Structured logging (tracing crate) | Done | Env-controlled log levels (plaintext only — see below for JSON) |
-| Structured JSON logging, OTel tracing, Prometheus metrics | **Planned, not started** | `.claude/plans/observability/PRD.md` — full plan written 2026-09-06. Decisions made: JSON log lines to stdout (`COORDIN8_LOG_FORMAT`, no vendor-specific push), W3C `traceparent` propagation across every internal call (mirrors `coordin8-auth`'s interceptor split), trace-context plumbing runs unconditionally while OTLP export is opt-in (`COORDIN8_OTEL_ENDPOINT`), Prometheus stays a native pull `/metrics` endpoint rather than routed through an OTel Collector, new shared `coordin8-observability` crate. SDK-side trace propagation explicitly deferred (Djinn-only for v1). |
+| Structured logging (tracing crate) | Done | Env-controlled log levels; see below for JSON |
+| Structured JSON logging, OTel tracing, Prometheus metrics | **Done** | `.claude/plans/observability/PRD.md` — COMPLETE, [PR #36](https://github.com/jsarman/coordin8/pull/36). New shared `coordin8-observability` crate: JSON log lines to stdout (`COORDIN8_LOG_FORMAT`, no vendor-specific push), W3C `traceparent` propagation across every internal call (mirrors `coordin8-auth`'s interceptor split; span creation/propagation run unconditionally, OTLP export opt-in via `COORDIN8_OTEL_ENDPOINT`), native pull `/metrics` endpoint (`COORDIN8_METRICS_PORT`) with RED-method RPC metrics + Linux process CPU/RAM/fd metrics, rather than routing through an OTel Collector. SDK-side trace propagation explicitly deferred (Djinn-only for v1). |
 | Dashboard UI (React) | Not started | Phase 9 |
 | Provenance trace explorer | Not started | |
 
