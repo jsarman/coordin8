@@ -330,3 +330,77 @@ impl RegistryService for RegistryServiceImpl {
         Ok(Response::new(Box::pin(stream)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coordin8_core::LeaseConfig;
+    use coordin8_lease::manager::LeaseManager;
+    use coordin8_provider_local::InMemoryRegistryStore;
+    use std::time::Duration;
+
+    fn service() -> RegistryServiceImpl {
+        let registry_store: Arc<dyn coordin8_core::RegistryStore> =
+            Arc::new(InMemoryRegistryStore::default());
+        let index = Arc::new(RegistryIndex::new(registry_store));
+        let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
+            Arc::new(coordin8_provider_local::InMemoryLeaseStore::default()),
+            LeaseConfig::default(),
+            broadcast::channel(16).0,
+        ));
+        RegistryServiceImpl::new(
+            index,
+            lease_manager,
+            broadcast::channel(16).0,
+            "127.0.0.1",
+            9002,
+        )
+    }
+
+    /// Regression test for a follow-up finding on the self-registration
+    /// recovery fix (2026-09-07): a re-`Register` call on an entry whose
+    /// lease has genuinely expired — but which is still present in the
+    /// index, because nothing has reaped it yet — must surface
+    /// `FailedPrecondition`, not `NotFound`. This is the code path
+    /// `coordin8_bootstrap::self_register`'s renewal task now also treats as
+    /// "entry unusable, re-register", alongside `NotFound`.
+    ///
+    /// Reproduced deterministically without a real reaper task or a Dynamo
+    /// backend: this test constructs a `RegistryServiceImpl` directly (as
+    /// production code does per-service, in `coordin8-djinn/src/services.rs`)
+    /// with no reaper wired up, grants a real 1-second lease, and waits for
+    /// it to actually expire — so the index still has the entry (nothing
+    /// removed it), but `LeaseManager::renew` sees a genuinely expired
+    /// record and returns `Error::LeaseExpired`.
+    #[tokio::test]
+    async fn reregister_on_an_entry_with_an_expired_lease_is_failed_precondition() {
+        let svc = service();
+
+        let initial = svc
+            .register(Request::new(RegisterRequest {
+                interface: "Whatever".to_string(),
+                attrs: Default::default(),
+                ttl_seconds: 1,
+                transport: None,
+                capability_id: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        let err = svc
+            .register(Request::new(RegisterRequest {
+                interface: "Whatever".to_string(),
+                attrs: Default::default(),
+                ttl_seconds: 1,
+                transport: None,
+                capability_id: initial.capability_id,
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+}

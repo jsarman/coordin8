@@ -179,15 +179,42 @@ pub struct SelfRegistrationHandle {
 }
 
 impl SelfRegistrationHandle {
-    /// Returns the lease ID granted by Registry for this registration.
-    pub fn lease_id(&self) -> &str {
+    /// Returns the lease ID granted by Registry for the *initial*
+    /// registration. If the renewal task has since recovered from an
+    /// unusable entry (see `self_register`'s renewal loop), the live lease
+    /// ID has changed and this no longer reflects it — there is currently no
+    /// way to observe the post-recovery ID from this handle.
+    pub fn initial_lease_id(&self) -> &str {
         &self.lease_id
     }
 
-    /// Returns the capability ID assigned by Registry.
-    pub fn capability_id(&self) -> &str {
+    /// Returns the capability ID assigned by Registry for the *initial*
+    /// registration. Stale after a recovery re-registration, same caveat as
+    /// `initial_lease_id`.
+    pub fn initial_capability_id(&self) -> &str {
         &self.capability_id
     }
+}
+
+/// Whether a `Register` (renewal) failure means this registry entry is gone
+/// or otherwise unusable, and re-registering fresh is the right response —
+/// as opposed to a transient error worth logging-and-retrying unchanged.
+///
+/// `NotFound` means the entry itself is gone (a Registry restart with the
+/// local provider drops both its index and lease store together, so a
+/// missed TTL window shows up this way). `FailedPrecondition` means the
+/// entry survived but `Register`'s own `renew()` call found the lease
+/// already expired (`Error::LeaseExpired`) — a real window with the Dynamo
+/// provider, where the index and lease store persist independently, so a
+/// Registry restart can come back up with the entry present but its lease
+/// already past due, before the reaper's first sweep converts it to
+/// `NotFound`. Treating both the same removes the dependency on reaper
+/// timing for that window to self-heal.
+fn entry_is_unusable(code: tonic::Code) -> bool {
+    matches!(
+        code,
+        tonic::Code::NotFound | tonic::Code::FailedPrecondition
+    )
 }
 
 /// Register this service in Registry and keep the entry alive.
@@ -265,14 +292,14 @@ pub async fn self_register(
         let mut interval = tokio::time::interval(renewal_interval);
         interval.tick().await; // consume the immediate tick
 
-        // Mutable, unlike the request this replaced: a NotFound below means
-        // the entry is confirmed gone (not a transient error), so this task
-        // re-registers fresh and adopts whatever new capability_id/lease
-        // comes back for every renewal after that — otherwise a single missed
-        // TTL window (a Registry restart, a network blip longer than
-        // ttl_seconds) makes this service invisible in Registry forever
-        // while it keeps running healthy, since every subsequent renewal
-        // would otherwise keep citing the now-unknown capability_id.
+        // Mutable, unlike the request this replaced: an unusable entry
+        // (see `entry_is_unusable`) means this task re-registers fresh and
+        // adopts whatever new capability_id/lease comes back for every
+        // renewal after that — otherwise a single missed TTL window (a
+        // Registry restart, a network blip longer than ttl_seconds) makes
+        // this service invisible in Registry forever while it keeps running
+        // healthy, since every subsequent renewal would otherwise keep
+        // citing the now-unknown capability_id.
         let mut current_request = renewal_request;
 
         loop {
@@ -280,10 +307,10 @@ pub async fn self_register(
                 _ = interval.tick() => {
                     match registry_client.register(current_request.clone()).await {
                         Ok(_) => debug!(capability_id = %log_cap_id, "registry entry renewed"),
-                        Err(e) if e.code() == tonic::Code::NotFound => {
+                        Err(e) if entry_is_unusable(e.code()) => {
                             warn!(
                                 capability_id = %log_cap_id,
-                                "registry entry gone (missed its TTL while unreachable) — re-registering fresh"
+                                "registry entry unusable (gone, or its lease expired) — re-registering fresh"
                             );
                             current_request.capability_id = String::new();
                             match registry_client.register(current_request.clone()).await {
@@ -579,5 +606,30 @@ impl CapabilityResolver for PendingCapabilityResolver {
                 "waiting on dependency: Registry".to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for a follow-up finding (2026-09-07) on the
+    /// self-registration recovery fix: the renewal task originally
+    /// re-registered only on `NotFound`, but `Register`'s own re-registration
+    /// path can also surface `FailedPrecondition` (the entry survives, only
+    /// its lease expired — `coordin8-registry`'s own
+    /// `reregister_on_an_entry_with_an_expired_lease_is_failed_precondition`
+    /// test proves that response really happens). Both must be treated as
+    /// "entry unusable, re-register"; nothing else should be.
+    #[test]
+    fn entry_is_unusable_matches_not_found_and_failed_precondition_only() {
+        assert!(entry_is_unusable(tonic::Code::NotFound));
+        assert!(entry_is_unusable(tonic::Code::FailedPrecondition));
+
+        assert!(!entry_is_unusable(tonic::Code::Ok));
+        assert!(!entry_is_unusable(tonic::Code::Unavailable));
+        assert!(!entry_is_unusable(tonic::Code::DeadlineExceeded));
+        assert!(!entry_is_unusable(tonic::Code::InvalidArgument));
+        assert!(!entry_is_unusable(tonic::Code::Internal));
     }
 }

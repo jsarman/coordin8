@@ -155,8 +155,8 @@ fn spawn_bundled_self_register(interface: &'static str, port: u16, client_auth: 
         .await;
         info!(
             "  ✓ {interface}: self-registered (capability: {}, lease: {})",
-            handle.capability_id(),
-            handle.lease_id()
+            handle.initial_capability_id(),
+            handle.initial_lease_id()
         );
         std::future::pending::<()>().await;
     });
@@ -776,8 +776,8 @@ pub async fn run_event_on_listener(
         .await;
         info!(
             "  ✓ EventMgr: self-registered (capability: {}, lease: {})",
-            handle.capability_id(),
-            handle.lease_id()
+            handle.initial_capability_id(),
+            handle.initial_lease_id()
         );
         std::future::pending::<()>().await;
     };
@@ -913,8 +913,8 @@ pub async fn run_space_on_listener(
         .await;
         info!(
             "  ✓ Space: self-registered (capability: {}, lease: {})",
-            handle.capability_id(),
-            handle.lease_id()
+            handle.initial_capability_id(),
+            handle.initial_lease_id()
         );
         std::future::pending::<()>().await;
     };
@@ -1028,8 +1028,8 @@ pub async fn run_txn_on_listener(
         .await;
         info!(
             "  ✓ TransactionMgr: self-registered (capability: {}, lease: {})",
-            handle.capability_id(),
-            handle.lease_id()
+            handle.initial_capability_id(),
+            handle.initial_lease_id()
         );
         std::future::pending::<()>().await;
     };
@@ -1144,8 +1144,8 @@ pub async fn run_proxy_on_listener(
         .await;
         info!(
             "  ✓ Proxy: self-registered (capability: {}, lease: {})",
-            handle.capability_id(),
-            handle.lease_id()
+            handle.initial_capability_id(),
+            handle.initial_lease_id()
         );
         std::future::pending::<()>().await;
     };
