@@ -259,9 +259,27 @@ async fn serve(port: u16) {
     }
 }
 
+/// Routes the metrics HTTP server: `GET /metrics` returns the current
+/// snapshot, anything else 404s or 405s rather than dumping the full
+/// metrics body for every request regardless of path/verb. Deliberately
+/// unauthenticated — standard for a Prometheus scrape target — so this is
+/// the one thing keeping it from being "any request gets everything."
 async fn handle_request(
-    _req: hyper::Request<hyper::body::Incoming>,
+    req: hyper::Request<hyper::body::Incoming>,
 ) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, std::convert::Infallible> {
+    if req.uri().path() != "/metrics" {
+        return Ok(hyper::Response::builder()
+            .status(hyper::StatusCode::NOT_FOUND)
+            .body(http_body_util::Full::new(bytes::Bytes::new()))
+            .expect("static response is always valid"));
+    }
+    if req.method() != hyper::Method::GET {
+        return Ok(hyper::Response::builder()
+            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+            .body(http_body_util::Full::new(bytes::Bytes::new()))
+            .expect("static response is always valid"));
+    }
+
     let body = render();
     Ok(hyper::Response::builder()
         .header("content-type", "text/plain; version=0.0.4")
