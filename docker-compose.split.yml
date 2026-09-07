@@ -16,6 +16,19 @@
 # separate, not-yet-done roadmap item (item 4); running more than one
 # instance of any of these services isn't meaningful until that lands,
 # since in-memory stores wouldn't be shared across instances.
+#
+# Add COORDIN8_LOG_FORMAT=json to any service's environment for opt-in
+# structured (one JSON object per line) logs — see
+# .claude/plans/observability/PRD.md. Unset = today's plaintext, unchanged.
+#
+# Add COORDIN8_OTEL_ENDPOINT=http://otel-collector:4317 for opt-in OTLP/gRPC
+# trace export. Unset = spans still exist and traceparent propagation still
+# works across every service, but nothing is ever exported anywhere.
+#
+# Add COORDIN8_METRICS_PORT=9091 (pick a distinct port per service, since
+# each is its own container here) for an opt-in Prometheus /metrics
+# endpoint — RED-method RPC metrics plus process CPU/RAM/fd metrics on
+# Linux. Unset = no HTTP server bound at all.
 
 services:
   registry:

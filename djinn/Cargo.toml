@@ -4,6 +4,7 @@ members = [
     "crates/coordin8-core",
     "crates/coordin8-proto",
     "crates/coordin8-auth",
+    "crates/coordin8-observability",
     "crates/coordin8-lease",
     "crates/coordin8-registry",
     "crates/coordin8-proxy",
@@ -21,6 +22,7 @@ members = [
 coordin8-core      = { path = "crates/coordin8-core" }
 coordin8-proto     = { path = "crates/coordin8-proto" }
 coordin8-auth      = { path = "crates/coordin8-auth" }
+coordin8-observability = { path = "crates/coordin8-observability" }
 coordin8-bootstrap = { path = "crates/coordin8-bootstrap" }
 coordin8-lease   = { path = "crates/coordin8-lease" }
 coordin8-registry = { path = "crates/coordin8-registry" }
@@ -63,4 +65,4 @@ futures = "0.3"
 
 # Tracing
 tracing            = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

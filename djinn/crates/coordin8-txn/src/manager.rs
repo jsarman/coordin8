@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use coordin8_auth::{wrap_channel, ClientAuthConfig};
+use coordin8_auth::ClientAuthConfig;
+use coordin8_observability::wrap_traced_channel as wrap_channel;
 use futures::future::join_all;
 use tracing::{debug, error, warn};
 use uuid::Uuid;

@@ -73,13 +73,21 @@ async fn main() -> Result<()> {
     // Skip the log subscriber for healthcheck — it runs every few seconds
     // under `docker healthcheck`, and its own pass/fail is signaled purely
     // via exit code, not logs.
-    if !matches!(cli.command, Some(Command::Healthcheck { .. })) {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive("coordin8=info".parse()?),
-            )
-            .init();
+    let service_name = match &cli.command {
+        None | Some(Command::All) => Some("coordin8-djinn"),
+        Some(Command::Registry) => Some("coordin8-registry"),
+        Some(Command::Event) => Some("coordin8-event"),
+        Some(Command::Space) => Some("coordin8-space"),
+        Some(Command::Txn) => Some("coordin8-txn"),
+        Some(Command::Proxy) => Some("coordin8-proxy"),
+        Some(Command::Healthcheck { .. }) => None,
+    };
+    if let Some(service_name) = service_name {
+        coordin8_observability::init(service_name);
+        // Fire-and-forget, same as every self-registration task elsewhere
+        // in this binary — dropping the JoinHandle detaches, it does not
+        // abort. A no-op (binds nothing) unless COORDIN8_METRICS_PORT is set.
+        coordin8_observability::MetricsConfig::from_env().spawn();
     }
 
     match cli.command {

@@ -11,6 +11,7 @@ path = "src/main.rs"
 coordin8-core             = { workspace = true }
 coordin8-proto            = { workspace = true }
 coordin8-auth             = { workspace = true }
+coordin8-observability    = { workspace = true }
 coordin8-lease            = { workspace = true }
 coordin8-registry         = { workspace = true }
 coordin8-proxy            = { workspace = true }
@@ -26,6 +27,5 @@ tonic              = { workspace = true }
 tonic-health       = { workspace = true }
 anyhow             = { workspace = true }
 tracing            = { workspace = true }
-tracing-subscriber = { workspace = true }
 clap               = { version = "4", features = ["derive"] }
 tokio-stream       = { version = "0.1", features = ["net"] }

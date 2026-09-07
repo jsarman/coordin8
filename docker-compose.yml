@@ -36,6 +36,9 @@ services:
       - "9100-9200:9100-9200"  # Proxy forwarding port range
     environment:
       RUST_LOG: "coordin8_lease=debug,coordin8_registry=debug,coordin8_proxy=debug,coordin8_event=debug,coordin8_txn=debug,coordin8_space=debug,djinn=info"
+      # COORDIN8_LOG_FORMAT: "json"  # opt-in structured (one JSON object per line) logs for a log-shipping agent — see .claude/plans/observability/PRD.md. Unset = today's plaintext, unchanged.
+      # COORDIN8_OTEL_ENDPOINT: "http://otel-collector:4317"  # opt-in OTLP/gRPC trace export. Unset = spans still exist (propagation works) but nothing is exported anywhere.
+      # COORDIN8_METRICS_PORT: "9091"  # opt-in Prometheus /metrics endpoint (RED-method RPC metrics + process CPU/RAM on Linux). Unset = no HTTP server bound at all.
       PROXY_BIND_HOST: "0.0.0.0"
       PROXY_PORT_MIN: "9100"
       PROXY_PORT_MAX: "9200"
