@@ -32,13 +32,26 @@ fi
 
 secret="${COORDIN8_JWT_SECRET:-$(openssl rand -hex 32)}"
 
+# 720h (30-day) TTL, no jti/revocation: an accepted v1 trade-off of the
+# static-token model (Decision 2, .claude/plans/grpc-security/PRD.md) —
+# there is no live issuance/revocation service, so the only remedy for a
+# leaked token is rotating the shared secret, which invalidates every
+# other token at the same time. Fine for dev/example stacks; a real
+# deployment should mint shorter-lived tokens and rotate on its own
+# schedule instead of relying on this script's default.
+: > "$out"
+chmod 600 "$out"
+
 {
   echo "COORDIN8_JWT_SECRET=$secret"
   for identity in "$@"; do
-    token=$("$cli" auth mint-token --secret "$secret" --sub "$identity" --ttl 720h)
+    # Pass the secret via env, not --secret — an argv value is visible to
+    # any other user on the box via `ps`, and the CLI already reads
+    # $COORDIN8_JWT_SECRET on its own (same as every other Coordin8 knob).
+    token=$(COORDIN8_JWT_SECRET="$secret" "$cli" auth mint-token --sub "$identity" --ttl 720h)
     var_name="COORDIN8_TOKEN_$(echo "$identity" | tr '[:lower:]-' '[:upper:]_')"
     echo "$var_name=$token"
   done
-} > "$out"
+} >> "$out"
 
 echo "wrote $out (1 secret + $# token(s))" >&2

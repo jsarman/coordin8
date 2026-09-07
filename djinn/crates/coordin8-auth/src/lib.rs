@@ -65,7 +65,11 @@ pub struct AuthConfig {
     /// Defaults to `true`. Setting this to `false` means this service's
     /// security now depends on the network path actually guaranteeing that
     /// only already-validated requests can reach it — verify that's true
-    /// for your topology before disabling this.
+    /// for your topology before disabling this. `from_env()` logs a loud
+    /// `warn!` at startup when this is off, precisely because Coordin8 has
+    /// no gateway of its own and peer-to-peer paths (lease renewal via
+    /// `grantor_host:grantor_port`, every service binding `0.0.0.0`) don't
+    /// traverse one — the precondition is real, not automatically true.
     verify_signature: bool,
     /// If set, tokens must carry a matching `iss` claim.
     issuer: Option<String>,
@@ -93,6 +97,28 @@ impl AuthConfig {
         let verify_signature = std::env::var(VERIFY_SIGNATURE_ENV_VAR)
             .map(|v| v != "false" && v != "0")
             .unwrap_or(true);
+
+        // Loud, not a debug!/info! — the operator who inherits this config
+        // is the one who needs to see it, and this is a real trust
+        // precondition, not a convenience flag. See the field doc comment
+        // and .claude/plans/review-followups/PRD.md Decision 3.
+        if secret.is_some() && !verify_signature {
+            tracing::warn!(
+                "{VERIFY_SIGNATURE_ENV_VAR}=false: this service will accept any \
+                 syntactically valid JWT without checking its signature. Safe \
+                 ONLY if every request path to this service's port already passes \
+                 through something that verified the signature first (an Envoy \
+                 JWT filter, an Istio RequestAuthentication, an OIDC-terminating \
+                 ALB, or another Coordin8 service forwarding an already-checked \
+                 token). Coordin8 has no gateway of its own, and peer-to-peer \
+                 paths — lease renewal via grantor_host:grantor_port, every \
+                 service binding 0.0.0.0 — do not traverse one. Confirm that \
+                 precondition actually holds for this deployment's topology; if \
+                 it doesn't, any client that can reach this port can forge \
+                 tokens for any identity."
+            );
+        }
+
         Self {
             secret,
             verify_signature,

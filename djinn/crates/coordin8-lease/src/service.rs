@@ -65,6 +65,13 @@ impl LeaseServiceImpl {
 
 type BoxStream<T> = Pin<Box<dyn futures_core::Stream<Item = Result<T, Status>> + Send + 'static>>;
 
+/// Maximum items accepted by a single `RenewAll` call. Without a cap, one
+/// oversized request ties up this handler for however long the full batch
+/// takes — it's a sequential `await` loop, so it saves gRPC round-trips but
+/// not store round-trips. A client with more than this to renew should
+/// split into multiple calls.
+const RENEW_ALL_MAX_ITEMS: usize = 1000;
+
 fn renew_status(e: coordin8_core::Error) -> Status {
     match e {
         coordin8_core::Error::LeaseNotFound(_) => Status::not_found(e.to_string()),
@@ -98,6 +105,12 @@ impl LeaseService for LeaseServiceImpl {
         req: Request<RenewAllRequest>,
     ) -> Result<Response<RenewAllResponse>, Status> {
         let r = req.into_inner();
+        if r.leases.len() > RENEW_ALL_MAX_ITEMS {
+            return Err(Status::invalid_argument(format!(
+                "RenewAll accepts at most {RENEW_ALL_MAX_ITEMS} items per call, got {} — split into multiple calls",
+                r.leases.len()
+            )));
+        }
         let mut results = Vec::with_capacity(r.leases.len());
         for renew_all_request::Item {
             lease_id,
@@ -163,5 +176,73 @@ impl LeaseService for LeaseServiceImpl {
         });
 
         Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coordin8_core::LeaseConfig;
+    use coordin8_provider_local::InMemoryLeaseStore;
+
+    fn service() -> LeaseServiceImpl {
+        let store: Arc<dyn coordin8_core::LeaseStore> = Arc::new(InMemoryLeaseStore::default());
+        let manager = Arc::new(LeaseManager::new(
+            store,
+            LeaseConfig::default(),
+            tokio::sync::broadcast::channel(16).0,
+        ));
+        LeaseServiceImpl::new(
+            manager,
+            tokio::sync::broadcast::channel(16).0,
+            "127.0.0.1",
+            9002,
+        )
+    }
+
+    /// Regression test for a code-review finding (2026-09-07): RenewAll had
+    /// no cap on batch size, so one oversized request would tie up this
+    /// handler — a sequential await loop — for however long the full batch
+    /// took, with no way for a caller to know the limit up front.
+    #[tokio::test]
+    async fn renew_all_rejects_a_batch_over_the_cap() {
+        let svc = service();
+        let leases = (0..=RENEW_ALL_MAX_ITEMS)
+            .map(|i| renew_all_request::Item {
+                lease_id: format!("lease-{i}"),
+                ttl_seconds: 30,
+            })
+            .collect();
+
+        let err = svc
+            .renew_all(Request::new(RenewAllRequest { leases }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn renew_all_accepts_a_batch_at_exactly_the_cap() {
+        let svc = service();
+        let leases = (0..RENEW_ALL_MAX_ITEMS)
+            .map(|i| renew_all_request::Item {
+                lease_id: format!("lease-{i}"),
+                ttl_seconds: 30,
+            })
+            .collect();
+
+        // Every lease_id is unknown, so each individual renew fails — but
+        // the call itself must not be rejected for being too large, and
+        // every item gets its own per-item error rather than the whole
+        // batch failing.
+        let resp = svc
+            .renew_all(Request::new(RenewAllRequest { leases }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.results.len(), RENEW_ALL_MAX_ITEMS);
+        assert!(resp.results.iter().all(|r| r.lease.is_none()));
     }
 }

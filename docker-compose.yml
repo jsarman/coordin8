@@ -1,6 +1,6 @@
 services:
 
-  # Deploys all 9 DynamoDB tables via CloudFormation before Djinn starts.
+  # Deploys all 12 DynamoDB tables via CloudFormation before Djinn starts.
   # Runs unconditionally — harmless when COORDIN8_PROVIDER=local since tables are just unused.
   cfn-init:
     image: amazon/aws-cli

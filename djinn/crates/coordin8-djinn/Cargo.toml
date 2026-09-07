@@ -29,3 +29,6 @@ anyhow             = { workspace = true }
 tracing            = { workspace = true }
 clap               = { version = "4", features = ["derive"] }
 tokio-stream       = { version = "0.1", features = ["net"] }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

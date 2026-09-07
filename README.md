@@ -21,18 +21,17 @@ A Rust daemon that runs five layered coordination services:
 | Layer | Service | Port | What it does |
 |-------|---------|------|-------------|
 | 0 | **Provider** | — | Pluggable storage backend (in-memory or DynamoDB) |
-| 1 | **LeaseMgr** | 9001 | TTL-based liveness contracts. The bedrock — everything is leased. |
-| 2a | **Registry** | 9002 | Attribute-based service discovery. Find services by *what they are*, not where they live. |
-| 2b | **EventMgr** | 9005 | Durable event delivery with leased subscriptions. DURABLE (mailbox) and BEST_EFFORT modes. |
-| 2c | **Space** | 9006 | Distributed reactive tuple store. `out`, `take`, `read`, `watch` with transactional isolation. |
-| 3 | **Smart Proxy** | 9003 | TCP forwarding with live failover. `openProxy(template)` → local port. |
-| 4 | **TransactionMgr** | 9004 | Real 2PC distributed transactions. Participants register their own gRPC endpoint. |
+| 1 | **Registry** | 9002 | Attribute-based service discovery. Find services by *what they are*, not where they live. |
+| 1 | **EventMgr** | 9005 | Durable event delivery with leased subscriptions. DURABLE (mailbox) and BEST_EFFORT modes. |
+| 1 | **Space** | 9006 | Distributed reactive tuple store. `out`, `take`, `read`, `watch` with transactional isolation. |
+| 2 | **Smart Proxy** | 9003 | TCP forwarding with live failover. `openProxy(template)` → local port. |
+| 3 | **TransactionMgr** | 9004 | Real 2PC distributed transactions. Participants register their own gRPC endpoint. |
 
-No circular dependencies. LeaseMgr is the foundation. Everything builds upward cleanly.
+No circular dependencies. No standalone LeaseMgr, either: Registry, EventMgr, Space, and TransactionMgr each embed their own `LeaseManager` and mount a `LeaseService` on their own port — matching Jini/Apache River's `Landlord` pattern, where every service that grants leases manages them in-process rather than depending on a shared external service. That's why Registry, EventMgr, and Space all sit at Layer 1: none of them has a blocking dependency on anything else for its own operation.
 
 ### Lease
 
-A **liveness contract**: "this fact is true for a bounded period unless actively renewed." Stop renewing and the lease expires — that IS the signal.
+A **liveness contract**: "this fact is true for a bounded period unless actively renewed." Stop renewing and the lease expires — that IS the signal. A lease is self-describing — it carries the `grantor_host`/`grantor_port` of whichever service granted it, so a holder always knows where to renew without prior knowledge of which service that was.
 
 Lease expiry drives leader election, distributed locks, circuit breakers, session management, and failure detection. Absence is not an error — it's a coordination event.
 
@@ -71,7 +70,7 @@ A distributed reactive tuple store inspired by JavaSpaces. Write tuples with `ou
 The provider layer is a set of storage traits (`LeaseStore`, `RegistryStore`, `EventStore`, `TxnStore`, `SpaceStore`) that abstract the backing store. Two implementations ship today:
 
 - **`local`** (default) — in-memory with `DashMap`. Fast, zero dependencies, perfect for dev and edge.
-- **`dynamo`** — DynamoDB-backed, 9 tables, tested against MiniStack. State survives restarts.
+- **`dynamo`** — DynamoDB-backed, 12 tables, tested against MiniStack. State survives restarts.
 
 Switch at startup: `COORDIN8_PROVIDER=dynamo`
 
@@ -145,7 +144,7 @@ mise r up          # start full Docker stack
 docker compose up --build
 ```
 
-Starts the Djinn (ports 9001–9006, proxy range 9100–9200) and a Go greeter service pre-registered in the Registry.
+Starts the Djinn (ports 9002–9006, proxy range 9100–9200) and a Go greeter service pre-registered in the Registry.
 
 Run a client against it:
 
@@ -174,12 +173,11 @@ mise r djinn
 ```
 Djinn starting...
   ✓ Provider: local (in-memory)
-  ✓ LeaseMgr:       listening on 0.0.0.0:9001
-  ✓ Registry:       listening on 0.0.0.0:9002
-  ✓ EventMgr:       listening on 0.0.0.0:9005
+  ✓ Registry:       listening on 0.0.0.0:9002 (+ LeaseService)
   ✓ Proxy:          listening on 0.0.0.0:9003
-  ✓ TransactionMgr: listening on 0.0.0.0:9004
-  ✓ Space:          listening on 0.0.0.0:9006
+  ✓ TransactionMgr: listening on 0.0.0.0:9004 (+ LeaseService)
+  ✓ EventMgr:       listening on 0.0.0.0:9005 (+ LeaseService)
+  ✓ Space:          listening on 0.0.0.0:9006 (+ LeaseService)
 Djinn ready.
 ```
 
@@ -207,7 +205,7 @@ No cleanup. No stale entries. The lease expired — that's the signal.
 COORDIN8_PROVIDER=dynamo docker compose up --build
 ```
 
-All 9 DynamoDB tables are created automatically. State survives container restarts.
+All 12 DynamoDB tables are created automatically. State survives container restarts.
 
 ### Demos
 
@@ -225,21 +223,20 @@ mise r demo-txn
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                  Application Code                    │
-│  (no IPs, no ports, no hardcoded endpoints)          │
+│                   Application Code                   │
+│   (no IPs, no ports, no hardcoded endpoints)         │
 └───────────────┬──────────────────────────────────────┘
                 │  gRPC + Protobuf
 ┌───────────────▼──────────────────────────────────────┐
-│                  The Djinn (Rust)                     │
+│                   The Djinn (Rust)                   │
 │                                                      │
-│   LeaseMgr      :9001                                │
-│   Registry      :9002                                │
-│   EventMgr      :9005                                │
-│   Space         :9006                                │
-│   Proxy         :9003                                │
-│   TransactionMgr :9004                               │
+│    Registry        :9002  (+ LeaseService)           │
+│    Proxy           :9003                             │
+│    TransactionMgr  :9004  (+ LeaseService)           │
+│    EventMgr        :9005  (+ LeaseService)           │
+│    Space           :9006  (+ LeaseService)           │
 │                                                      │
-│   Provider: local (in-memory) or dynamo (DynamoDB)   │
+│    Provider: local (in-memory) or dynamo (DynamoDB)  │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -258,7 +255,7 @@ coordin8/
     crates/
       coordin8-core/           Shared types and provider traits
       coordin8-proto/          Generated gRPC code
-      coordin8-lease/          LeaseMgr implementation
+      coordin8-lease/          LeaseManager + reaper (library — Registry/EventMgr/Space/TransactionMgr each embed their own)
       coordin8-registry/       Registry + template matching
       coordin8-proxy/          Smart Proxy (TCP forwarding)
       coordin8-event/          EventMgr implementation
@@ -293,14 +290,14 @@ coordin8/
 
 | Service | Status | Description |
 |---------|--------|-------------|
-| **LeaseMgr** | Built | TTL-based liveness contracts |
+| **Distributed leasing** | Built | Registry/EventMgr/Space/TransactionMgr each embed their own `LeaseManager` — no standalone LeaseMgr |
 | **Registry** | Built | Attribute-based service discovery |
 | **Smart Proxy** | Built | TCP forwarding with live failover |
 | **ServiceDiscovery** | Built | Jini-inspired one-liner client (Go, Java, Node) |
 | **EventMgr** | Built | Durable event delivery, leased subscriptions, mailbox buffering |
 | **TransactionMgr** | Built | Real 2PC — parallel prepare, single-participant optimization, veto abort |
 | **Space** | Built | Distributed reactive tuple store with transactional isolation |
-| **DynamoDB Provider** | Built | All 5 stores backed by DynamoDB (9 tables), tested against MiniStack |
+| **DynamoDB Provider** | Built | All 5 stores backed by DynamoDB (12 tables), tested against MiniStack |
 | **Split Mode** | Built | Each service can run as its own process (`djinn lease\|registry\|event\|space\|txn\|proxy`), discoverable through Registry. Chaos-tested. |
 | Cloud Topology | Planned | Independent service deployment — Lambda + Fargate + external pub/sub |
 | Dashboard | Planned | Real-time coordination plane visualization |

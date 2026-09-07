@@ -10,15 +10,14 @@ This is the only crate in the workspace that pulls in concrete provider implemen
 
 ```
 Layer 0   Provider               (local | dynamo)
-Layer 1   LeaseMgr      :9001
-Layer 2a  Registry      :9002
-Layer 2b  EventMgr      :9005
-Layer 2c  Space         :9006
-Layer 3   Proxy         :9003
-Layer 4   TransactionMgr :9004
+Layer 1   Registry      :9002    (+ LeaseService)
+Layer 1   EventMgr      :9005    (+ LeaseService)
+Layer 1   Space         :9006    (+ LeaseService)
+Layer 2   Proxy         :9003
+Layer 3   TransactionMgr :9004   (+ LeaseService)
 ```
 
-Lease expirations are broadcast on a `tokio::sync::broadcast` channel; Registry, EventMgr, Space, and TransactionMgr each spawn a task that subscribes and routes by `resource_id` prefix (`registry:`, `event:`, `space:`, `space-watch:`, `txn:`).
+There's no standalone LeaseMgr — Registry, EventMgr, Space, and TransactionMgr each embed their own `LeaseManager` and mount `LeaseService` on their own port, which is why all three of Registry/EventMgr/Space sit at Layer 1 rather than depending on a shared bedrock service. Each service's own lease expirations are broadcast on its own `tokio::sync::broadcast` channel; Registry, EventMgr, Space, and TransactionMgr each spawn a task that subscribes to its own and routes by `resource_id` prefix (`registry:`, `event:`, `space:`, `space-watch:`, `txn:`).
 
 ## Layout
 

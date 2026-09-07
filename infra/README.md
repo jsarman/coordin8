@@ -5,18 +5,23 @@ CloudFormation provisioning for the Coordin8 DynamoDB provider.
 ## What's Here
 
 ```
-dynamodb-tables.cfn.yml      defines all 9 DynamoDB tables used by coordin8-provider-dynamo
+dynamodb-tables.cfn.yml      defines all 12 DynamoDB tables used by coordin8-provider-dynamo
 ```
 
 This template is the **authoritative schema** for the DynamoDB provider in production. The matching `ensure_*_table` helpers in [`../djinn/providers/dynamo/`](../djinn/providers/dynamo/README.md) only run when `COORDIN8_AUTO_CREATE_TABLES=true` and exist for local dev / integration tests; in any environment that ships to AWS, deploy this template instead.
 
 ## Tables
 
-All `PAY_PER_REQUEST`. Only `coordin8_leases` has DynamoDB TTL enabled.
+All `PAY_PER_REQUEST`. The four `coordin8_leases_*` tables have DynamoDB TTL enabled.
+
+Leasing is distributed — there's no standalone LeaseMgr, so there's no single shared leases table either. Registry, EventMgr, Space, and TransactionMgr each own their own lease table, namespaced by service (`coordin8-djinn/src/services.rs`'s `lease_store_from_env()` builds `coordin8_leases_{namespace}` at runtime — keep this list in sync with that function if a new leasing service is ever added).
 
 | Table                          | Owner          |
 |--------------------------------|----------------|
-| `coordin8_leases`              | LeaseMgr       |
+| `coordin8_leases_registry`     | Registry       |
+| `coordin8_leases_event`        | EventMgr       |
+| `coordin8_leases_space`        | Space          |
+| `coordin8_leases_txn`          | TransactionMgr |
 | `coordin8_registry`            | Registry       |
 | `coordin8_txn`                 | TransactionMgr |
 | `coordin8_event_subscriptions` | EventMgr       |

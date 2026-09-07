@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use coordin8_core::{Error, LeaseRecord, LeaseStore, LEASE_FOREVER};
 
-use crate::table::{ensure_lease_table, LEASE_TABLE, RESOURCE_GSI};
+use crate::table::{ensure_lease_table, RESOURCE_GSI};
 
 pub struct DynamoLeaseStore {
     client: Client,
@@ -13,13 +13,10 @@ pub struct DynamoLeaseStore {
 }
 
 impl DynamoLeaseStore {
-    pub fn new(client: Client) -> Self {
-        Self {
-            client,
-            table_name: LEASE_TABLE.to_string(),
-        }
-    }
-
+    /// Leasing is distributed — there's no single shared lease table, so
+    /// there's no bare-default constructor either. Every caller names its
+    /// own namespaced table (`coordin8-djinn/src/services.rs`'s
+    /// `lease_store_from_env()` builds `coordin8_leases_{namespace}`).
     pub fn with_table(client: Client, table_name: impl Into<String>) -> Self {
         Self {
             client,

@@ -8,11 +8,16 @@ Selected by the Djinn binary when `COORDIN8_PROVIDER=dynamo`. The binary calls `
 
 ## Tables
 
-Nine tables, all `PAY_PER_REQUEST`. Only `coordin8_leases` has DynamoDB TTL enabled.
+Twelve tables, all `PAY_PER_REQUEST`. The four `coordin8_leases_*` tables have DynamoDB TTL enabled.
+
+Leasing is distributed — there's no single shared `coordin8_leases` table. Registry, EventMgr, Space, and TransactionMgr each own their own lease table, namespaced by service (`lease_store_from_env()` in `coordin8-djinn/src/services.rs` builds `coordin8_leases_{namespace}` at runtime).
 
 | Table                          | Hash key          | Range key  | GSI                  |
 |--------------------------------|-------------------|------------|----------------------|
-| `coordin8_leases`              | `lease_id`        | —          | `resource_id-index`  |
+| `coordin8_leases_registry`     | `lease_id`        | —          | `resource_id-index`  |
+| `coordin8_leases_event`        | `lease_id`        | —          | `resource_id-index`  |
+| `coordin8_leases_space`        | `lease_id`        | —          | `resource_id-index`  |
+| `coordin8_leases_txn`          | `lease_id`        | —          | `resource_id-index`  |
 | `coordin8_registry`            | `capability_id`   | —          | `lease_id-index`     |
 | `coordin8_txn`                 | `txn_id`          | —          | —                    |
 | `coordin8_event_subscriptions` | `registration_id` | —          | `lease_id-index`     |
@@ -61,3 +66,4 @@ Integration tests assume MiniStack is running (`mise r stack-up` or `docker comp
 - `auto_create_enabled()` is opt-in by design — production runs through CloudFormation so the schema can evolve under change control
 - The `cfn-init` compose service deploys the template into MiniStack before the Djinn starts, so `docker compose up` works regardless of provider
 - DynamoDB TTL is eventual — the Djinn's reaper still drives lease expiry semantics; the TTL attribute is a backstop for cleanup
+- **Single replica per namespace, if you run more than one instance of a service.** A lease's `grantor_host`/`grantor_port` is the granting *process's own* address, not a shared VIP — if you run N replicas of, say, Space sharing `coordin8_leases_space`, a lease is only renewable at the specific replica that granted it. If that replica dies, a surviving replica can see the record but has no live grantor to reach for it, and the lease lapses even though Space as a whole is still up. Each replica's reaper also independently scans the same table, so N replicas do duplicated (not corrupting — handlers are idempotent) cleanup work. See `.claude/plans/distributed-leasing/PRD.md`'s "Remaining follow-ups" for the full writeup; not fixed here, since it's not worth the bigger change (a shared service-level grantor address, or a centralized reaper) until a real multi-replica-per-namespace deployment needs it.
