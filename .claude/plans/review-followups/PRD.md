@@ -1,6 +1,6 @@
 # Review Follow-ups (2026-09-07) — PRD
 
-> **Status: In progress — all 6 findings from the review's suggested order are implemented, not yet merged to main.** Addresses the actionable findings from an independent code review at commit `145d87a` (`coordin8-review-2026-09-07.md`, supplied by the user). TLS and coordinator recovery (the review's own item 7) are explicitly deferred to their own future topic folder(s) — both are larger, cross-cutting efforts the review itself says don't belong bolted onto this pass. One extra fix beyond the review's own findings, surfaced while chasing down Finding 2: `infra/dynamodb-tables.cfn.yml` still provisioned a single `coordin8_leases` table that the distributed-leasing runtime hasn't looked for since it landed — split into the four namespaced tables the runtime actually requests, live-verified against real DynamoDB (MiniStack).
+> **Status: In progress — all 6 findings plus a follow-up review's 4 residuals are implemented, not yet merged to main.** Addresses the actionable findings from an independent code review at commit `145d87a` (`coordin8-review-2026-09-07.md`, supplied by the user). TLS and coordinator recovery (the review's own item 7) are explicitly deferred to their own future topic folder(s) — both are larger, cross-cutting efforts the review itself says don't belong bolted onto this pass. One extra fix beyond the review's own findings, surfaced while chasing down Finding 2: `infra/dynamodb-tables.cfn.yml` still provisioned a single `coordin8_leases` table that the distributed-leasing runtime hasn't looked for since it landed — split into the four namespaced tables the runtime actually requests, live-verified against real DynamoDB (MiniStack). A second review pass of PR #38 itself (same file, updated) found 3 non-blocking residuals plus a minor naming issue — all 4 fixed, see "Follow-up round" below.
 
 ## Goal
 
@@ -36,6 +36,17 @@ An external review of the post-observability-merge codebase (`145d87a`) found re
 | 6 | `RenewAll` batch cap + `/metrics` 404/405 routing | `5c87f46` |
 
 Every commit was live-verified against real running services (not just unit tests) — see each commit message for the specific verification performed.
+
+## Follow-up round — a second review of PR #38 itself
+
+The same reviewer looked at PR #38's actual diff (not just the original codebase) and confirmed all 6 findings were addressed well, calling out the subprocess-based regression test and the `verify_signature` warning specifically. It found 3 non-blocking residuals plus one minor naming issue — all fixed:
+
+| # | What | Commit |
+|---|------|--------|
+| 1 | `cli/README.md` still said `9001 lease, 9002 registry` — missed by `566200d`'s doc sweep. Also broader staleness found while fixing it: wrong global flag name, wrong lease flag names, missing `space`/`auth mint-token` docs | `ae02d13` |
+| 2 | Agent tooling (`stack-up`/`stack-down` SKILL.md, `test-runner.md`) polled `nc -z localhost 9001` for readiness — a port nothing binds, so every run burned the full 60s (20×3s) and reported the stack down. Switched to 9002 (Registry) | `6ea3c5c` |
+| 3 | Self-registration recovery (`07fe670`) only re-registered on `NotFound`; widened to also treat `FailedPrecondition` as "entry unusable, re-register" — the code path `Register`'s own re-registration hits when the entry survives but its lease alone expired (real window with the Dynamo provider, where entry+lease persist independently, unlike local where a restart drops both together). Extracted `entry_is_unusable()`, added a `coordin8-registry` unit test that reproduces the exact `FailedPrecondition` response deterministically (grant a real short lease, let it expire with no reaper running), and a `coordin8-bootstrap` unit test on the predicate itself — verified red against the pre-fix (`NotFound`-only) behavior before restoring the fix | `d8d61f2` |
+| 4 (minor) | `SelfRegistrationHandle::capability_id()`/`lease_id()` renamed to `initial_capability_id()`/`initial_lease_id()` — a recovery re-registration changes the live IDs but these accessors didn't track that, so the old names silently went stale after the first recovery. Only consumed by one boot-time `info!` log per service, so a rename to make the contract honest was enough — no `Arc<Mutex<_>>` state for correctness nobody's using yet | `d8d61f2` |
 
 ## Non-Goals (for this pass — the review's own item 7, and beyond)
 
