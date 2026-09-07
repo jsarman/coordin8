@@ -259,17 +259,52 @@ pub async fn self_register(
 
     let renewal_interval = Duration::from_secs(ttl_seconds.max(3) / 3);
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
-    let log_cap_id = capability_id.clone();
+    let mut log_cap_id = capability_id.clone();
 
     let renewal_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(renewal_interval);
         interval.tick().await; // consume the immediate tick
 
+        // Mutable, unlike the request this replaced: a NotFound below means
+        // the entry is confirmed gone (not a transient error), so this task
+        // re-registers fresh and adopts whatever new capability_id/lease
+        // comes back for every renewal after that — otherwise a single missed
+        // TTL window (a Registry restart, a network blip longer than
+        // ttl_seconds) makes this service invisible in Registry forever
+        // while it keeps running healthy, since every subsequent renewal
+        // would otherwise keep citing the now-unknown capability_id.
+        let mut current_request = renewal_request;
+
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    match registry_client.register(renewal_request.clone()).await {
+                    match registry_client.register(current_request.clone()).await {
                         Ok(_) => debug!(capability_id = %log_cap_id, "registry entry renewed"),
+                        Err(e) if e.code() == tonic::Code::NotFound => {
+                            warn!(
+                                capability_id = %log_cap_id,
+                                "registry entry gone (missed its TTL while unreachable) — re-registering fresh"
+                            );
+                            current_request.capability_id = String::new();
+                            match registry_client.register(current_request.clone()).await {
+                                Ok(resp) => {
+                                    let new_cap_id = resp.into_inner().capability_id;
+                                    info!(
+                                        old_capability_id = %log_cap_id,
+                                        new_capability_id = %new_cap_id,
+                                        "re-registered after expiry"
+                                    );
+                                    current_request.capability_id = new_cap_id.clone();
+                                    log_cap_id = new_cap_id;
+                                }
+                                Err(e2) => {
+                                    // Leave capability_id empty — the next
+                                    // tick retries a fresh registration too,
+                                    // rather than citing a stale ID again.
+                                    warn!(capability_id = %log_cap_id, "re-registration after expiry failed: {e2}");
+                                }
+                            }
+                        }
                         Err(e) => warn!(capability_id = %log_cap_id, "registry renewal failed: {e}"),
                     }
                 }

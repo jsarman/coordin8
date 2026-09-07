@@ -90,6 +90,42 @@ async fn dial_registry_authed(
     }
 }
 
+/// Dials Registry and calls [`self_register`], retrying the whole pair with
+/// a fixed backoff until it succeeds. `dial_registry_authed` already retries
+/// connection failures forever; this closes the remaining gap the initial
+/// `Register` RPC itself could fail even once connected (Registry
+/// transiently erroring) — previously terminal, since the caller just
+/// logged and gave up rather than retrying, unlike the dial it wraps.
+async fn self_register_retrying(
+    registry_url: &str,
+    client_auth: &coordin8_auth::ClientAuthConfig,
+    interface: &str,
+    attrs: std::collections::HashMap<String, String>,
+    host: &str,
+    port: u16,
+    ttl_seconds: u64,
+) -> coordin8_bootstrap::SelfRegistrationHandle {
+    loop {
+        let registry_client = dial_registry_authed(registry_url, client_auth).await;
+        match self_register(
+            registry_client,
+            interface,
+            attrs.clone(),
+            host,
+            port,
+            ttl_seconds,
+        )
+        .await
+        {
+            Ok(handle) => return handle,
+            Err(e) => {
+                tracing::warn!("{interface}: self_register failed: {e}, retrying in 500ms");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
 /// Self-register a bundled-mode service into the same process's Registry.
 ///
 /// Split mode already self-registers every service (see the `run_*_on_listener`
@@ -107,30 +143,22 @@ fn spawn_bundled_self_register(interface: &'static str, port: u16, client_auth: 
     let advertise = advertise_host();
     let client_auth = client_auth.client_config(interface);
     tokio::spawn(async move {
-        let registry_client = dial_registry_authed("http://localhost:9002", &client_auth).await;
-
-        match self_register(
-            registry_client,
+        let handle = self_register_retrying(
+            "http://localhost:9002",
+            &client_auth,
             interface,
             std::collections::HashMap::new(),
             &advertise,
             port,
             30,
         )
-        .await
-        {
-            Ok(handle) => {
-                info!(
-                    "  ✓ {interface}: self-registered (capability: {}, lease: {})",
-                    handle.capability_id(),
-                    handle.lease_id()
-                );
-                std::future::pending::<()>().await;
-            }
-            Err(e) => {
-                tracing::error!("{interface}: self_register failed: {e}");
-            }
-        }
+        .await;
+        info!(
+            "  ✓ {interface}: self-registered (capability: {}, lease: {})",
+            handle.capability_id(),
+            handle.lease_id()
+        );
+        std::future::pending::<()>().await;
     });
 }
 
@@ -736,31 +764,22 @@ pub async fn run_event_on_listener(
     let self_client_auth = auth_config.client_config("EventMgr");
 
     let register_fut = async move {
-        let registry_client = dial_registry_authed(&registry_url, &self_client_auth).await;
-
-        match self_register(
-            registry_client,
+        let handle = self_register_retrying(
+            &registry_url,
+            &self_client_auth,
             "EventMgr",
             std::collections::HashMap::new(),
             &advertise_host_owned,
             advertise_port,
             self_lease_ttl,
         )
-        .await
-        {
-            Ok(handle) => {
-                info!(
-                    "  ✓ EventMgr: self-registered (capability: {}, lease: {})",
-                    handle.capability_id(),
-                    handle.lease_id()
-                );
-                std::future::pending::<()>().await;
-            }
-            Err(e) => {
-                tracing::error!("self_register failed: {e}");
-                std::future::pending::<()>().await;
-            }
-        }
+        .await;
+        info!(
+            "  ✓ EventMgr: self-registered (capability: {}, lease: {})",
+            handle.capability_id(),
+            handle.lease_id()
+        );
+        std::future::pending::<()>().await;
     };
 
     let server_fut = Server::builder()
@@ -882,31 +901,22 @@ pub async fn run_space_on_listener(
     let self_client_auth = auth_config.client_config("Space");
 
     let register_fut = async move {
-        let registry_client = dial_registry_authed(&registry_url, &self_client_auth).await;
-
-        match self_register(
-            registry_client,
+        let handle = self_register_retrying(
+            &registry_url,
+            &self_client_auth,
             "Space",
             std::collections::HashMap::new(),
             &advertise_host_owned,
             advertise_port,
             self_lease_ttl,
         )
-        .await
-        {
-            Ok(handle) => {
-                info!(
-                    "  ✓ Space: self-registered (capability: {}, lease: {})",
-                    handle.capability_id(),
-                    handle.lease_id()
-                );
-                std::future::pending::<()>().await;
-            }
-            Err(e) => {
-                tracing::error!("self_register failed: {e}");
-                std::future::pending::<()>().await;
-            }
-        }
+        .await;
+        info!(
+            "  ✓ Space: self-registered (capability: {}, lease: {})",
+            handle.capability_id(),
+            handle.lease_id()
+        );
+        std::future::pending::<()>().await;
     };
 
     let server_fut = Server::builder()
@@ -1006,31 +1016,22 @@ pub async fn run_txn_on_listener(
     let self_client_auth = auth_config.client_config("TransactionMgr");
 
     let register_fut = async move {
-        let registry_client = dial_registry_authed(&registry_url, &self_client_auth).await;
-
-        match self_register(
-            registry_client,
+        let handle = self_register_retrying(
+            &registry_url,
+            &self_client_auth,
             "TransactionMgr",
             std::collections::HashMap::new(),
             &advertise_host_owned,
             advertise_port,
             self_lease_ttl,
         )
-        .await
-        {
-            Ok(handle) => {
-                info!(
-                    "  ✓ TransactionMgr: self-registered (capability: {}, lease: {})",
-                    handle.capability_id(),
-                    handle.lease_id()
-                );
-                std::future::pending::<()>().await;
-            }
-            Err(e) => {
-                tracing::error!("self_register failed: {e}");
-                std::future::pending::<()>().await;
-            }
-        }
+        .await;
+        info!(
+            "  ✓ TransactionMgr: self-registered (capability: {}, lease: {})",
+            handle.capability_id(),
+            handle.lease_id()
+        );
+        std::future::pending::<()>().await;
     };
 
     let server_fut = Server::builder()
@@ -1131,31 +1132,22 @@ pub async fn run_proxy_on_listener(
     let self_client_auth = auth_config.client_config("Proxy");
 
     let register_fut = async move {
-        let registry_client = dial_registry_authed(&registry_url, &self_client_auth).await;
-
-        match self_register(
-            registry_client,
+        let handle = self_register_retrying(
+            &registry_url,
+            &self_client_auth,
             "Proxy",
             std::collections::HashMap::new(),
             &advertise_host_owned,
             advertise_port,
             self_lease_ttl,
         )
-        .await
-        {
-            Ok(handle) => {
-                info!(
-                    "  ✓ Proxy: self-registered (capability: {}, lease: {})",
-                    handle.capability_id(),
-                    handle.lease_id()
-                );
-                std::future::pending::<()>().await;
-            }
-            Err(e) => {
-                tracing::error!("self_register failed: {e}");
-                std::future::pending::<()>().await;
-            }
-        }
+        .await;
+        info!(
+            "  ✓ Proxy: self-registered (capability: {}, lease: {})",
+            handle.capability_id(),
+            handle.lease_id()
+        );
+        std::future::pending::<()>().await;
     };
 
     let server_fut = Server::builder()
