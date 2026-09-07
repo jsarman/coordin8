@@ -179,23 +179,45 @@ fn make_span(req: &http::Request<tonic::body::BoxBody>) -> tracing::Span {
     // so this has to be done explicitly.
     let trace_id = span.context().span().span_context().trace_id();
     span.record("trace_id", tracing::field::display(trace_id));
+
+    // Phase 3: stash (service, method) as a span extension so the metrics
+    // on_response/on_failure hooks below — which don't receive the
+    // original request, only the response/failure and this span — can
+    // label coordin8_grpc_requests_total/..._duration_seconds correctly.
+    let (service, method) = crate::metrics::split_grpc_path(req.uri().path());
+    crate::metrics::stash_grpc_labels(&span, service, method);
+
     span
 }
 
 /// Builds the server-side layer that creates one span per gRPC call,
-/// parented to whatever `traceparent` the caller sent (Decision 2). Apply
+/// parented to whatever `traceparent` the caller sent (Decision 2), and
+/// (Phase 3) records RED-method metrics on every response/failure. Apply
 /// via `Server::builder().layer(coordin8_observability::server_layer())`
 /// *before* `.add_service(...)` so it wraps every service mounted on that
-/// server. Runs unconditionally, independent of whether OTLP export is
-/// configured — see the module docs.
+/// server. Span creation/propagation run unconditionally, independent of
+/// whether OTLP export is configured — see the module docs.
 pub type ServerTraceLayer = tower_http::trace::TraceLayer<
-    tower_http::classify::SharedClassifier<tower_http::classify::GrpcErrorsAsFailures>,
+    tower_http::trace::GrpcMakeClassifier,
     fn(&http::Request<tonic::body::BoxBody>) -> tracing::Span,
+    tower_http::trace::DefaultOnRequest,
+    fn(&http::Response<tonic::body::BoxBody>, std::time::Duration, &tracing::Span),
+    tower_http::trace::DefaultOnBodyChunk,
+    tower_http::trace::DefaultOnEos,
+    fn(tower_http::classify::GrpcFailureClass, std::time::Duration, &tracing::Span),
 >;
 
 pub fn server_layer() -> ServerTraceLayer {
     tower_http::trace::TraceLayer::new_for_grpc()
         .make_span_with(make_span as fn(&http::Request<tonic::body::BoxBody>) -> tracing::Span)
+        .on_response(
+            crate::metrics::on_response
+                as fn(&http::Response<tonic::body::BoxBody>, std::time::Duration, &tracing::Span),
+        )
+        .on_failure(
+            crate::metrics::on_failure
+                as fn(tower_http::classify::GrpcFailureClass, std::time::Duration, &tracing::Span),
+        )
 }
 
 /// Injects the currently active span's trace context as a `traceparent`

@@ -84,6 +84,10 @@ async fn main() -> Result<()> {
     };
     if let Some(service_name) = service_name {
         coordin8_observability::init(service_name);
+        // Fire-and-forget, same as every self-registration task elsewhere
+        // in this binary — dropping the JoinHandle detaches, it does not
+        // abort. A no-op (binds nothing) unless COORDIN8_METRICS_PORT is set.
+        coordin8_observability::MetricsConfig::from_env().spawn();
     }
 
     match cli.command {
