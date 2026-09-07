@@ -20,6 +20,10 @@
 # Add COORDIN8_LOG_FORMAT=json to any service's environment for opt-in
 # structured (one JSON object per line) logs — see
 # .claude/plans/observability/PRD.md. Unset = today's plaintext, unchanged.
+#
+# Add COORDIN8_OTEL_ENDPOINT=http://otel-collector:4317 for opt-in OTLP/gRPC
+# trace export. Unset = spans still exist and traceparent propagation still
+# works across every service, but nothing is ever exported anywhere.
 
 services:
   registry:

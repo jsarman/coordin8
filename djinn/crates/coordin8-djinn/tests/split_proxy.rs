@@ -95,7 +95,7 @@ async fn split_proxy_forwards_through_remote_registry() {
         .connect()
         .await
         .expect("dial Registry from test");
-    let registry_client = RegistryServiceClient::new(coordin8_auth::wrap_channel(
+    let registry_client = RegistryServiceClient::new(coordin8_observability::wrap_traced_channel(
         channel,
         &coordin8_auth::ClientAuthConfig::trust(),
     ));

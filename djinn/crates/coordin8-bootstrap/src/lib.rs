@@ -30,7 +30,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use coordin8_auth::{wrap_channel, AuthedChannel, ClientAuthConfig};
+use coordin8_auth::ClientAuthConfig;
+use coordin8_observability::{
+    wrap_traced_channel as wrap_channel, TracedAuthedChannel as AuthedChannel,
+};
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
@@ -105,7 +108,7 @@ async fn discover_service_channel(
         .connect()
         .await?;
 
-    let mut registry = RegistryServiceClient::with_interceptor(channel, client_auth.interceptor());
+    let mut registry = RegistryServiceClient::new(wrap_channel(channel, client_auth));
 
     let template = HashMap::from([("interface".to_string(), interface.to_string())]);
 

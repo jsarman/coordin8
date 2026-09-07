@@ -61,13 +61,15 @@ pub fn advertise_host() -> String {
 
 /// Dial Registry at `registry_url`, retrying with a fixed backoff, and wrap
 /// the client with `client_auth` (Decision 8 —
-/// `.claude/plans/grpc-security/PRD.md`) so every internal self-registration
-/// call attaches whatever that strategy provides (nothing, by default).
+/// `.claude/plans/grpc-security/PRD.md`) plus trace-context propagation
+/// (Decision 2 — `.claude/plans/observability/PRD.md`) so every internal
+/// self-registration call attaches whatever the auth strategy provides
+/// (nothing, by default) and carries the current trace onward.
 async fn dial_registry_authed(
     registry_url: &str,
     client_auth: &coordin8_auth::ClientAuthConfig,
 ) -> coordin8_proto::coordin8::registry_service_client::RegistryServiceClient<
-    coordin8_auth::AuthedChannel,
+    coordin8_observability::TracedAuthedChannel,
 > {
     loop {
         match tonic::transport::Channel::from_shared(registry_url.to_string())
@@ -77,7 +79,7 @@ async fn dial_registry_authed(
         {
             Ok(channel) => {
                 return coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::new(
-                    coordin8_auth::wrap_channel(channel, client_auth),
+                    coordin8_observability::wrap_traced_channel(channel, client_auth),
                 )
             }
             Err(e) => {
@@ -535,19 +537,26 @@ pub async fn run_all() -> Result<()> {
 
     tokio::try_join!(
         Server::builder()
+            .layer(coordin8_observability::server_layer())
             .add_service(registry_svc)
             .add_service(lease_svc_for_registry)
             .serve(registry_addr),
-        Server::builder().add_service(proxy_svc).serve(proxy_addr),
         Server::builder()
+            .layer(coordin8_observability::server_layer())
+            .add_service(proxy_svc)
+            .serve(proxy_addr),
+        Server::builder()
+            .layer(coordin8_observability::server_layer())
             .add_service(txn_svc)
             .add_service(lease_svc_for_txn)
             .serve(txn_addr),
         Server::builder()
+            .layer(coordin8_observability::server_layer())
             .add_service(event_svc)
             .add_service(lease_svc_for_event)
             .serve(event_addr),
         Server::builder()
+            .layer(coordin8_observability::server_layer())
             .add_service(space_svc)
             .add_service(space_participant_svc)
             .add_service(lease_svc_for_space)
@@ -643,6 +652,7 @@ pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Resu
     info!("  ✓ Registry (split): listening on {actual_addr} (+ LeaseService)");
 
     Server::builder()
+        .layer(coordin8_observability::server_layer())
         .add_service(health_service)
         .add_service(registry_svc)
         .add_service(lease_svc)
@@ -754,6 +764,7 @@ pub async fn run_event_on_listener(
     };
 
     let server_fut = Server::builder()
+        .layer(coordin8_observability::server_layer())
         .add_service(health_service)
         .add_service(event_svc)
         .add_service(lease_svc)
@@ -899,6 +910,7 @@ pub async fn run_space_on_listener(
     };
 
     let server_fut = Server::builder()
+        .layer(coordin8_observability::server_layer())
         .add_service(health_service)
         .add_service(space_svc)
         .add_service(space_participant_svc)
@@ -1022,6 +1034,7 @@ pub async fn run_txn_on_listener(
     };
 
     let server_fut = Server::builder()
+        .layer(coordin8_observability::server_layer())
         .add_service(health_service)
         .add_service(txn_svc)
         .add_service(lease_svc)
@@ -1146,6 +1159,7 @@ pub async fn run_proxy_on_listener(
     };
 
     let server_fut = Server::builder()
+        .layer(coordin8_observability::server_layer())
         .add_service(health_service)
         .add_service(proxy_svc)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));

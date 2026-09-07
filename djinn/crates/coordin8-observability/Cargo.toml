@@ -4,5 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tracing            = { workspace = true }
-tracing-subscriber = { workspace = true }
+coordin8-auth         = { workspace = true }
+tracing               = { workspace = true }
+tracing-subscriber    = { workspace = true }
+tracing-opentelemetry = "0.33"
+opentelemetry         = "0.32"
+opentelemetry_sdk     = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp    = { version = "0.32", features = ["grpc-tonic"] }
+tower-http            = { version = "0.7", features = ["trace"] }
+http                  = "1"
+tonic                 = { workspace = true }

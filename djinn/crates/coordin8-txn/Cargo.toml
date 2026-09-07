@@ -7,6 +7,7 @@ edition = "2021"
 coordin8-core  = { workspace = true }
 coordin8-proto = { workspace = true }
 coordin8-auth  = { workspace = true }
+coordin8-observability = { workspace = true }
 coordin8-lease = { workspace = true }
 
 async-trait = { workspace = true }

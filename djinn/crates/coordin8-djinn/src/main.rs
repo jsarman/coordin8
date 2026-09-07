@@ -73,8 +73,17 @@ async fn main() -> Result<()> {
     // Skip the log subscriber for healthcheck — it runs every few seconds
     // under `docker healthcheck`, and its own pass/fail is signaled purely
     // via exit code, not logs.
-    if !matches!(cli.command, Some(Command::Healthcheck { .. })) {
-        coordin8_observability::LoggingConfig::from_env().init();
+    let service_name = match &cli.command {
+        None | Some(Command::All) => Some("coordin8-djinn"),
+        Some(Command::Registry) => Some("coordin8-registry"),
+        Some(Command::Event) => Some("coordin8-event"),
+        Some(Command::Space) => Some("coordin8-space"),
+        Some(Command::Txn) => Some("coordin8-txn"),
+        Some(Command::Proxy) => Some("coordin8-proxy"),
+        Some(Command::Healthcheck { .. }) => None,
+    };
+    if let Some(service_name) = service_name {
+        coordin8_observability::init(service_name);
     }
 
     match cli.command {
