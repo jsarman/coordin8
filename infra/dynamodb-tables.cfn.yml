@@ -1,16 +1,102 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Coordin8 DynamoDB tables. Deploy this template before starting the Djinn.
-  All tables use PAY_PER_REQUEST billing. Only coordin8_leases has TTL enabled.
+  All tables use PAY_PER_REQUEST billing. The four coordin8_leases_* tables
+  have TTL enabled.
 
 Resources:
 
-  # ── LeaseMgr ─────────────────────────────────────────────────────────────────
+  # ── Leasing (distributed — no standalone LeaseMgr) ──────────────────────────
+  #
+  # Registry, EventMgr, Space, and TransactionMgr each embed their own
+  # LeaseManager and read/write their own lease table, namespaced by service
+  # (coordin8-djinn/src/services.rs's lease_store_from_env() builds
+  # "coordin8_leases_{namespace}" at runtime) — matching Jini/Apache River's
+  # Landlord pattern, where every grantor manages its own leases rather than
+  # sharing one external LeaseMgr table. See
+  # .claude/plans/distributed-leasing/PRD.md for the full rationale.
+  #
+  # A single shared coordin8_leases table would NOT work here: this is a real
+  # mismatch to keep in sync going forward, not just a naming choice — the
+  # runtime never looks up a bare "coordin8_leases" table for any of these
+  # four services.
 
-  LeasesTable:
+  RegistryLeasesTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: coordin8_leases
+      TableName: coordin8_leases_registry
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: lease_id
+          AttributeType: S
+        - AttributeName: resource_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: lease_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: resource_id-index
+          KeySchema:
+            - AttributeName: resource_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  EventLeasesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_leases_event
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: lease_id
+          AttributeType: S
+        - AttributeName: resource_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: lease_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: resource_id-index
+          KeySchema:
+            - AttributeName: resource_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  SpaceLeasesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_leases_space
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: lease_id
+          AttributeType: S
+        - AttributeName: resource_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: lease_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: resource_id-index
+          KeySchema:
+            - AttributeName: resource_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  TxnLeasesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordin8_leases_txn
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: lease_id

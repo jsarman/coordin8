@@ -1,6 +1,6 @@
 # djinn
 
-The Rust workspace that implements the Coordin8 daemon — the **Djinn**. Every coordination service (Lease, Registry, Proxy, Event, Transaction, Space) lives here as its own crate, plus the binary that wires them together at boot.
+The Rust workspace that implements the Coordin8 daemon — the **Djinn**. Every coordination service (Registry, Proxy, Event, Transaction, Space) lives here as its own crate, plus the binary that wires them together at boot. Leasing isn't a separate service — it's a library (`coordin8-lease`) that Registry, EventMgr, Space, and TransactionMgr each embed.
 
 For the high-level pitch and architecture, see the [root README](../README.md) and [CLAUDE.md](../CLAUDE.md). This document is for working inside the workspace.
 
@@ -12,16 +12,16 @@ djinn/
   crates/
     coordin8-core/     shared types + provider traits (LeaseStore, RegistryStore, ...)
     coordin8-proto/    tonic-generated gRPC bindings (build.rs compiles ../proto)
-    coordin8-lease/    LeaseMgr + reaper                       (port 9001)
-    coordin8-registry/ Registry + template matcher             (port 9002)
+    coordin8-lease/    LeaseManager + reaper (library — no port of its own; Registry/EventMgr/Space/TransactionMgr each embed one)
+    coordin8-registry/ Registry + template matcher             (port 9002, + LeaseService)
     coordin8-proxy/    Smart Proxy (TCP forwarder)             (port 9003)
-    coordin8-txn/      TransactionMgr (2PC coordinator)        (port 9004)
-    coordin8-event/    EventMgr (durable + best-effort)        (port 9005)
-    coordin8-space/    Space (reactive tuple store)            (port 9006)
+    coordin8-txn/      TransactionMgr (2PC coordinator)        (port 9004, + LeaseService)
+    coordin8-event/    EventMgr (durable + best-effort)        (port 9005, + LeaseService)
+    coordin8-space/    Space (reactive tuple store)            (port 9006, + LeaseService)
     coordin8-djinn/    binary entry point — boots all services
   providers/
     local/             InMemory provider (DashMap, default)
-    dynamo/            DynamoDB provider (9 tables, MiniStack-tested)
+    dynamo/            DynamoDB provider (12 tables, MiniStack-tested)
 ```
 
 ## Boot Order
@@ -30,15 +30,16 @@ The binary in `crates/coordin8-djinn` enforces a strict layered boot. Violating 
 
 ```
 Layer 0   Provider               (storage backend)
-Layer 1   LeaseMgr      :9001    (bedrock — everything depends on leases)
-Layer 2a  Registry      :9002
-Layer 2b  EventMgr      :9005    (subscribes to lease expiry)
-Layer 2c  Space         :9006    (subscribes to lease expiry)
-Layer 3   Proxy         :9003    (depends on Registry)
-Layer 4   TransactionMgr :9004   (depends on LeaseMgr; lease expiry = abort)
+Layer 1   Registry      :9002    (+ LeaseService — no blocking dependency on anything else)
+Layer 1   EventMgr      :9005    (+ LeaseService — no blocking dependency on anything else)
+Layer 1   Space         :9006    (+ LeaseService — no blocking dependency on anything else)
+Layer 2   Proxy         :9003    (depends on Registry)
+Layer 3   TransactionMgr :9004   (+ LeaseService; lease expiry = abort)
 ```
 
-Lease expirations are broadcast on a `tokio::sync::broadcast` channel; Registry, EventMgr, Space, and TransactionMgr each subscribe and act on resource-id prefixes (`registry:`, `event:`, `space:`, `space-watch:`, `txn:`).
+Leasing is distributed, not a layer of its own: there's no standalone LeaseMgr — Registry, EventMgr, Space, and TransactionMgr each embed their own `LeaseManager` and mount `LeaseService` on their own port, matching Jini/Apache River's `Landlord` pattern. That's why Registry, EventMgr, and Space all sit at Layer 1 — none of them has a blocking dependency on anything else for its own operation. See [`.claude/plans/distributed-leasing/PRD.md`](../.claude/plans/distributed-leasing/PRD.md) for the full rationale.
+
+Each service's own lease expirations are broadcast on its own `tokio::sync::broadcast` channel; Registry, EventMgr, Space, and TransactionMgr each subscribe to their own and act on resource-id prefixes (`registry:`, `event:`, `space:`, `space-watch:`, `txn:`).
 
 ## Provider Selection
 

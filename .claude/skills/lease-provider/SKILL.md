@@ -105,7 +105,7 @@ The `resource_id` convention encodes the owner: `registry:{cap_id}`, `event:{sub
 
 ## DynamoDB Table Schema
 
-Table: `coordin8_leases`
+Leasing is distributed — there's no single shared table. Each service that grants leases (Registry, EventMgr, Space, TransactionMgr) owns its own table, named `coordin8_leases_{namespace}` (e.g. `coordin8_leases_registry`) by `lease_store_from_env()` in `coordin8-djinn/src/services.rs`. Same schema in each:
 
 | Attribute | Type | Role |
 |-----------|------|------|

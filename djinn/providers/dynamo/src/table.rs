@@ -9,7 +9,6 @@ use aws_sdk_dynamodb::{
 };
 use tracing::{info, warn};
 
-pub const LEASE_TABLE: &str = "coordin8_leases";
 pub const RESOURCE_GSI: &str = "resource_id-index";
 
 pub const REGISTRY_TABLE: &str = "coordin8_registry";
@@ -28,7 +27,7 @@ pub const SPACE_TXN_TAKEN_TABLE: &str = "coordin8_space_txn_taken";
 pub const SPACE_WATCHES_TABLE: &str = "coordin8_space_watches";
 pub const SPACE_WATCHES_LEASE_GSI: &str = "lease_id-index";
 
-/// Ensure the `coordin8_leases` table (or a custom-named one) exists.
+/// Ensure a lease table (named by the caller — e.g. `coordin8_leases_registry`) exists.
 /// Creates it on first call; ignores `ResourceInUseException` on subsequent calls.
 /// Also enables DynamoDB native TTL on the `ttl` attribute.
 pub async fn ensure_lease_table(client: &Client, table_name: &str) -> Result<(), String> {

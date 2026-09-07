@@ -8,11 +8,16 @@ Selected by the Djinn binary when `COORDIN8_PROVIDER=dynamo`. The binary calls `
 
 ## Tables
 
-Nine tables, all `PAY_PER_REQUEST`. Only `coordin8_leases` has DynamoDB TTL enabled.
+Twelve tables, all `PAY_PER_REQUEST`. The four `coordin8_leases_*` tables have DynamoDB TTL enabled.
+
+Leasing is distributed — there's no single shared `coordin8_leases` table. Registry, EventMgr, Space, and TransactionMgr each own their own lease table, namespaced by service (`lease_store_from_env()` in `coordin8-djinn/src/services.rs` builds `coordin8_leases_{namespace}` at runtime).
 
 | Table                          | Hash key          | Range key  | GSI                  |
 |--------------------------------|-------------------|------------|----------------------|
-| `coordin8_leases`              | `lease_id`        | —          | `resource_id-index`  |
+| `coordin8_leases_registry`     | `lease_id`        | —          | `resource_id-index`  |
+| `coordin8_leases_event`        | `lease_id`        | —          | `resource_id-index`  |
+| `coordin8_leases_space`        | `lease_id`        | —          | `resource_id-index`  |
+| `coordin8_leases_txn`          | `lease_id`        | —          | `resource_id-index`  |
 | `coordin8_registry`            | `capability_id`   | —          | `lease_id-index`     |
 | `coordin8_txn`                 | `txn_id`          | —          | —                    |
 | `coordin8_event_subscriptions` | `registration_id` | —          | `lease_id-index`     |

@@ -20,15 +20,21 @@ coordin8/
 ## Public API
 
 ```go
-djinn, err := coordin8.Connect("localhost")  // dials :9001 / :9002 / :9003
+// Dials Registry — the one address a caller needs in advance — then looks
+// up Proxy, Space, and EventMgr through it. There is no separate LeaseMgr
+// address: Registry's own leases are renewed via RegistryLeases() below,
+// mounted on the same connection.
+djinn, err := coordin8.Connect("localhost:9002")
 defer djinn.Close()
 
-leases   := djinn.Leases()
+leases   := djinn.RegistryLeases()
 registry := djinn.Registry()
 
 // One-liner discovery — caches by template, refreshes on lease expiry
-discovery, _ := coordin8.Watch(djinn)
-greeter := pb.NewGreeterClient(discovery.Get(coordin8.Template{"interface": "Greeter"}))
+discovery := coordin8.NewServiceDiscovery(djinn)
+defer discovery.Close()
+conn, _ := discovery.Get(context.Background(), coordin8.Template{"interface": "Greeter"})
+greeter := pb.NewGreeterClient(conn)
 ```
 
 ## Build / Test
