@@ -60,26 +60,25 @@ impl LoggingConfig {
     /// `Pretty`/`Json` produce different concrete `fmt::Layer` types and
     /// this needs to return one or the other from the same function.
     ///
-    /// Emits a log line when a span (e.g. Phase 2's per-RPC `grpc_request`
-    /// span) closes, carrying that span's fields (including `trace_id` —
-    /// see `otel::make_span`) and duration — this is new behavior Phase 2
-    /// adds on top of Phase 1's plain format toggle, not a regression of
-    /// it: Phase 1 had no spans to report on yet.
+    /// Does *not* log a line on every span close (e.g. Phase 2's per-RPC
+    /// `grpc_request` span, mounted on every service): with a self-
+    /// registering split-mode service renewing its lease every `ttl/3`
+    /// seconds, plus `ServiceDiscovery` cache refreshes and health checks,
+    /// that produced one line per RPC completion on every service, all the
+    /// time — pure noise, not signal. What it would have carried is
+    /// available elsewhere without the noise: `trace_id` is already on
+    /// every log line emitted *within* the span (via `span.record` +
+    /// `otel::make_span` — a separate mechanism from span-close events),
+    /// and duration is captured by both the exported OTel span and Phase
+    /// 3's `coordin8_grpc_requests_total`/`..._duration_seconds` Prometheus
+    /// histograms.
     pub fn fmt_layer<S>(&self) -> Box<dyn Layer<S> + Send + Sync>
     where
         S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
     {
-        use tracing_subscriber::fmt::format::FmtSpan;
-
         match self.format {
-            LogFormat::Pretty => {
-                Box::new(tracing_subscriber::fmt::layer().with_span_events(FmtSpan::CLOSE))
-            }
-            LogFormat::Json => Box::new(
-                tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_span_events(FmtSpan::CLOSE),
-            ),
+            LogFormat::Pretty => Box::new(tracing_subscriber::fmt::layer()),
+            LogFormat::Json => Box::new(tracing_subscriber::fmt::layer().json()),
         }
     }
 }
