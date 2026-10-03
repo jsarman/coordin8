@@ -184,12 +184,10 @@ describe("LeaseClient", () => {
       ac.abort();
     });
 
-    // Known bug: keepAlive only listens for a future "abort" event, so a
-    // signal that is already aborted never clears the timer and renewals run
-    // forever (and keep the process alive).
+    // Regression: an "abort" listener never fires for an already-aborted
+    // signal, so keepAlive must check signal.aborted up front.
     it(
       "does not start renewing if the signal is already aborted",
-      { skip: "known bug: pre-aborted signal is ignored" },
       async () => {
         const { fake, client } = await start();
         const ac = new AbortController();

@@ -131,6 +131,8 @@ export class LeaseClient {
     signal: AbortSignal,
     onFailure?: (err: unknown) => void
   ): void {
+    // An "abort" listener never fires for a signal that is already aborted.
+    if (signal.aborted) return;
     const intervalMs = (ttlSeconds / 2) * 1000;
     const timer = setInterval(async () => {
       try {
