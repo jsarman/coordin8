@@ -1,6 +1,6 @@
 # Code Review Fixes (2026-10-03) — PRD
 
-> **Status: In progress.** Phase 1 PRs open (#41–#45); Phase 2: I (#48), J (#46, #47) open; F/G/H unblocked by D1–D4 (decided 2026-10-03). Enlist SSRF (finding 12a) still needs a design call.
+> **Status: COMPLETE (merged to main, 2026-10-03)** — PRs #40–#53. See `session-1-complete.md`. Remaining items are listed there under "Not done".
 
 ## Goal
 

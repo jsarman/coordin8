@@ -9,7 +9,7 @@
 
 | Topic | Status | Notes |
 |-------|--------|-------|
-| [review-2026-10-03](review-2026-10-03/PRD.md) | In progress | Fixes from a full-repo review (2PC races, Dynamo lease/event bugs, Space txn leases, security), plus Claude tooling + docs refresh |
+| [review-2026-10-03](review-2026-10-03/PRD.md) | COMPLETE (2026-10-03, #40–#53) | Fixes from a full-repo review (2PC races, Dynamo lease/event bugs, Space txn leases, event durability, registry/proxy/txn security, graceful shutdown), first SDK test suites, Claude tooling + docs refresh |
 
 ---
 
