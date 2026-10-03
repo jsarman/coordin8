@@ -41,7 +41,7 @@ greeter := pb.NewGreeterClient(conn)
 
 ```bash
 go build ./...
-go test  ./...
+go test -race ./...   # unit tests against in-process fake gRPC servers
 
 # from the repo root
 mise r test-go     # equivalent
