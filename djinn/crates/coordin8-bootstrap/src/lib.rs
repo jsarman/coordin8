@@ -44,9 +44,9 @@ use coordin8_core::{
     TxnEnlister,
 };
 use coordin8_proto::coordin8::{
-    registry_service_client::RegistryServiceClient,
-    transaction_service_client::TransactionServiceClient, Capability, EnlistRequest, LookupRequest,
-    RegisterRequest, TransportDescriptor,
+    lease_service_client::LeaseServiceClient, registry_service_client::RegistryServiceClient,
+    transaction_service_client::TransactionServiceClient, CancelRequest, Capability, EnlistRequest,
+    LookupRequest, RegisterRequest, TransportDescriptor,
 };
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -166,33 +166,91 @@ pub async fn discover_txn_mgr(
 /// background task re-registers (renews) the entry every `ttl/3` seconds.
 ///
 /// When dropped, the renewal task is stopped via the cancel oneshot. The
-/// registry entry will then expire on its own TTL — allowing the Registry
-/// to self-clean without any explicit cancellation RPC.
+/// registry entry will then expire on its own TTL. To remove the entry
+/// immediately instead (graceful shutdown), call [`cancel`](Self::cancel).
 pub struct SelfRegistrationHandle {
+    initial_lease_id: String,
+    initial_capability_id: String,
+    /// The live lease/capability ids, updated by the renewal task whenever
+    /// it recovers by re-registering. Shared so `cancel` targets the entry
+    /// that actually exists in Registry now, not the initial one.
+    current: Arc<std::sync::Mutex<CurrentRegistration>>,
+    // Signals the renewal task to stop. Dropping it does the same — without
+    // it the spawned task would outlive the handle (dropping a JoinHandle
+    // detaches, it does not abort).
+    cancel_tx: Option<oneshot::Sender<()>>,
+    renewal_task: Option<JoinHandle<()>>,
+    lease_client: LeaseServiceClient<AuthedChannel>,
+}
+
+#[derive(Clone)]
+struct CurrentRegistration {
     lease_id: String,
     capability_id: String,
-    // Dropping this oneshot signals the renewal task to stop. Without it the
-    // spawned task would outlive the handle — dropping a JoinHandle detaches,
-    // it does not abort.
-    _cancel_tx: oneshot::Sender<()>,
-    _renewal_task: JoinHandle<()>,
 }
 
 impl SelfRegistrationHandle {
     /// Returns the lease ID granted by Registry for the *initial*
-    /// registration. If the renewal task has since recovered from an
-    /// unusable entry (see `self_register`'s renewal loop), the live lease
-    /// ID has changed and this no longer reflects it — there is currently no
-    /// way to observe the post-recovery ID from this handle.
+    /// registration. Stale once the renewal task has recovered by
+    /// re-registering; use [`current_lease_id`](Self::current_lease_id) for
+    /// the live one.
     pub fn initial_lease_id(&self) -> &str {
-        &self.lease_id
+        &self.initial_lease_id
     }
 
     /// Returns the capability ID assigned by Registry for the *initial*
     /// registration. Stale after a recovery re-registration, same caveat as
     /// `initial_lease_id`.
     pub fn initial_capability_id(&self) -> &str {
-        &self.capability_id
+        &self.initial_capability_id
+    }
+
+    /// The lease ID of the registry entry as of the renewal task's most
+    /// recent successful (re-)registration. Empty if a recovery attempt is
+    /// currently mid-flight and has not yet produced a new lease.
+    pub fn current_lease_id(&self) -> String {
+        self.current.lock().unwrap().lease_id.clone()
+    }
+
+    /// The capability ID of the registry entry as of the renewal task's most
+    /// recent successful (re-)registration.
+    pub fn current_capability_id(&self) -> String {
+        self.current.lock().unwrap().capability_id.clone()
+    }
+
+    /// Stop renewing and proactively cancel the *current* lease via
+    /// `LeaseService.Cancel` on Registry, so the entry disappears now
+    /// instead of after its TTL. Used for graceful shutdown.
+    ///
+    /// Waits for the renewal task to finish first so it cannot re-register
+    /// behind our back. Best-effort: on RPC failure the entry still expires
+    /// on its own TTL, and the error is returned for logging.
+    pub async fn cancel(mut self) -> Result<(), Error> {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(task) = self.renewal_task.take() {
+            let _ = task.await;
+        }
+        let lease_id = self.current_lease_id();
+        if lease_id.is_empty() {
+            return Ok(());
+        }
+        match self
+            .lease_client
+            .cancel(CancelRequest {
+                lease_id: lease_id.clone(),
+            })
+            .await
+        {
+            Ok(_) => {
+                info!(lease_id = %lease_id, "self-registration cancelled");
+                Ok(())
+            }
+            // Already gone (expired / reaped) — the goal is met.
+            Err(s) if s.code() == tonic::Code::NotFound => Ok(()),
+            Err(s) => Err(Error::Status(s)),
+        }
     }
 }
 
@@ -219,24 +277,27 @@ fn entry_is_unusable(code: tonic::Code) -> bool {
 
 /// Register this service in Registry and keep the entry alive.
 ///
-/// Calls `Register` on `registry_client` with the given `interface`, `attrs`,
+/// Calls `Register` on a Registry client built from `channel` with the given `interface`, `attrs`,
 /// and a `grpc` transport descriptor carrying `host` and `port` — the same
 /// convention used by the Go/Java SDK registrations and `ProxyManager`.
 ///
 /// Spawns a background task that re-registers (renews the registry lease)
 /// every `ttl_seconds / 3` seconds. Returns a [`SelfRegistrationHandle`]
-/// whose `Drop` stops renewal — after which the entry expires on its own TTL.
+/// whose `Drop` stops renewal (the entry then expires on its own TTL) and
+/// whose `cancel` also removes the entry immediately.
 ///
 /// Returns `Error` if the initial `Register` call fails so callers can
 /// distinguish transient Registry unavailability from permanent failures.
 pub async fn self_register(
-    mut registry_client: RegistryServiceClient<AuthedChannel>,
+    channel: AuthedChannel,
     interface: &str,
     attrs: HashMap<String, String>,
     host: &str,
     port: u16,
     ttl_seconds: u64,
 ) -> Result<SelfRegistrationHandle, Error> {
+    let mut registry_client = RegistryServiceClient::new(channel.clone());
+    let lease_client = LeaseServiceClient::new(channel);
     let transport_config = HashMap::from([
         ("host".to_string(), host.to_string()),
         ("port".to_string(), port.to_string()),
@@ -287,6 +348,11 @@ pub async fn self_register(
     let renewal_interval = Duration::from_secs(ttl_seconds.max(3) / 3);
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
     let mut log_cap_id = capability_id.clone();
+    let current = Arc::new(std::sync::Mutex::new(CurrentRegistration {
+        lease_id: lease_id.clone(),
+        capability_id: capability_id.clone(),
+    }));
+    let current_for_task = Arc::clone(&current);
 
     let renewal_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(renewal_interval);
@@ -306,16 +372,30 @@ pub async fn self_register(
             tokio::select! {
                 _ = interval.tick() => {
                     match registry_client.register(current_request.clone()).await {
-                        Ok(_) => debug!(capability_id = %log_cap_id, "registry entry renewed"),
+                        Ok(resp) => {
+                            if let Some(l) = resp.into_inner().lease {
+                                current_for_task.lock().unwrap().lease_id = l.lease_id;
+                            }
+                            debug!(capability_id = %log_cap_id, "registry entry renewed");
+                        }
                         Err(e) if entry_is_unusable(e.code()) => {
                             warn!(
                                 capability_id = %log_cap_id,
                                 "registry entry unusable (gone, or its lease expired) — re-registering fresh"
                             );
                             current_request.capability_id = String::new();
+                            // Nothing live to cancel until re-registration succeeds.
+                            current_for_task.lock().unwrap().lease_id = String::new();
                             match registry_client.register(current_request.clone()).await {
                                 Ok(resp) => {
-                                    let new_cap_id = resp.into_inner().capability_id;
+                                    let resp = resp.into_inner();
+                                    let new_cap_id = resp.capability_id;
+                                    {
+                                        let mut cur = current_for_task.lock().unwrap();
+                                        cur.lease_id =
+                                            resp.lease.map(|l| l.lease_id).unwrap_or_default();
+                                        cur.capability_id = new_cap_id.clone();
+                                    }
                                     info!(
                                         old_capability_id = %log_cap_id,
                                         new_capability_id = %new_cap_id,
@@ -344,10 +424,12 @@ pub async fn self_register(
     });
 
     Ok(SelfRegistrationHandle {
-        lease_id,
-        capability_id,
-        _cancel_tx: cancel_tx,
-        _renewal_task: renewal_task,
+        initial_lease_id: lease_id,
+        initial_capability_id: capability_id,
+        current,
+        cancel_tx: Some(cancel_tx),
+        renewal_task: Some(renewal_task),
+        lease_client,
     })
 }
 

@@ -33,6 +33,7 @@ pub struct LeaseServiceImpl {
     expiry_tx: ExpiryBroadcast,
     grantor_host: String,
     grantor_port: u16,
+    shutdown: coordin8_core::shutdown::ShutdownSignal,
 }
 
 impl LeaseServiceImpl {
@@ -47,7 +48,16 @@ impl LeaseServiceImpl {
             expiry_tx,
             grantor_host: grantor_host.into(),
             grantor_port,
+            shutdown: Default::default(),
         }
+    }
+
+    /// End this service's long-lived server streams when `shutdown` fires
+    /// (graceful drain), with `UNAVAILABLE` so client reconnect loops
+    /// reconnect elsewhere instead of seeing a clean EOF.
+    pub fn with_shutdown(mut self, shutdown: coordin8_core::shutdown::ShutdownSignal) -> Self {
+        self.shutdown = shutdown;
+        self
     }
 
     fn record_to_proto(&self, r: LeaseRecord) -> Lease {
@@ -175,6 +185,10 @@ impl LeaseService for LeaseServiceImpl {
             }
         });
 
+        #[allow(clippy::result_large_err)] // tonic::Status is the gRPC error type
+        let stream = self.shutdown.end_stream(Box::pin(stream), || {
+            Err(Status::unavailable("server shutting down"))
+        });
         Ok(Response::new(Box::pin(stream)))
     }
 }
