@@ -3,7 +3,16 @@ use chrono::Utc;
 use dashmap::DashMap;
 use uuid::Uuid;
 
-use coordin8_core::{Error, LeaseRecord, LeaseStore};
+use coordin8_core::{checked_expiry, Error, LeaseRecord, LeaseStore};
+
+fn expiry_for(from: chrono::DateTime<Utc>, ttl_secs: u64) -> Result<chrono::DateTime<Utc>, Error> {
+    if ttl_secs == coordin8_core::LEASE_FOREVER {
+        // FOREVER: far-future sentinel.
+        return Ok(chrono::DateTime::<Utc>::MAX_UTC);
+    }
+    checked_expiry(from, ttl_secs)
+        .ok_or_else(|| Error::Storage(format!("lease ttl out of range: {ttl_secs}s")))
+}
 
 /// Thread-safe in-memory lease store. Zero dependencies. Dev and test use.
 pub struct InMemoryLeaseStore {
@@ -28,12 +37,7 @@ impl Default for InMemoryLeaseStore {
 impl LeaseStore for InMemoryLeaseStore {
     async fn create(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error> {
         let now = Utc::now();
-        let expires_at = if ttl_secs == coordin8_core::LEASE_FOREVER {
-            // FOREVER: set far-future sentinel so list_expired never picks it up.
-            chrono::DateTime::<Utc>::MAX_UTC
-        } else {
-            now + chrono::Duration::seconds(ttl_secs as i64)
-        };
+        let expires_at = expiry_for(now, ttl_secs)?;
         let record = LeaseRecord {
             lease_id: Uuid::new_v4().to_string(),
             resource_id: resource_id.to_string(),
@@ -46,15 +50,12 @@ impl LeaseStore for InMemoryLeaseStore {
     }
 
     async fn renew(&self, lease_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error> {
+        let new_expiry = expiry_for(Utc::now(), ttl_secs)?;
         let mut entry = self
             .leases
             .get_mut(lease_id)
             .ok_or_else(|| Error::LeaseNotFound(lease_id.to_string()))?;
-        if ttl_secs == coordin8_core::LEASE_FOREVER {
-            entry.expires_at = chrono::DateTime::<Utc>::MAX_UTC;
-        } else {
-            entry.expires_at = Utc::now() + chrono::Duration::seconds(ttl_secs as i64);
-        }
+        entry.expires_at = new_expiry;
         entry.ttl_seconds = ttl_secs;
         Ok(entry.clone())
     }
@@ -77,18 +78,21 @@ impl LeaseStore for InMemoryLeaseStore {
     }
 
     async fn list_expired(&self) -> Result<Vec<LeaseRecord>, Error> {
-        let now = Utc::now();
         Ok(self
             .leases
             .iter()
-            .filter(|r| r.expires_at <= now)
+            .filter(|r| r.is_expired())
             .map(|r| r.clone())
             .collect())
     }
 
-    async fn remove(&self, lease_id: &str) -> Result<(), Error> {
-        self.leases.remove(lease_id);
-        Ok(())
+    async fn remove_if_unchanged(&self, record: &LeaseRecord) -> Result<bool, Error> {
+        Ok(self
+            .leases
+            .remove_if(&record.lease_id, |_, cur| {
+                cur.expires_at == record.expires_at
+            })
+            .is_some())
     }
 }
 
@@ -137,5 +141,51 @@ mod tests {
         sleep(Duration::from_millis(10)).await;
         let expired = store.list_expired().await.unwrap();
         assert!(!expired.iter().any(|r| r.lease_id == record.lease_id));
+    }
+
+    #[tokio::test]
+    async fn renewed_between_list_and_remove_is_not_removed() {
+        let store = InMemoryLeaseStore::new();
+        let record = store.create("racer", 1).await.unwrap();
+        sleep(Duration::from_millis(1100)).await;
+        let expired = store.list_expired().await.unwrap();
+        assert_eq!(expired.len(), 1);
+
+        store.renew(&record.lease_id, 60).await.unwrap();
+        assert!(!store.remove_if_unchanged(&expired[0]).await.unwrap());
+        assert!(store.get(&record.lease_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn remove_if_unchanged_removes_unchanged_lease() {
+        let store = InMemoryLeaseStore::new();
+        let record = store.create("plain", 1).await.unwrap();
+        sleep(Duration::from_millis(1100)).await;
+        let expired = store.list_expired().await.unwrap();
+        assert!(store.remove_if_unchanged(&expired[0]).await.unwrap());
+        assert!(store.get(&record.lease_id).await.unwrap().is_none());
+        // Already gone.
+        assert!(!store.remove_if_unchanged(&expired[0]).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn huge_ttl_negotiates_to_forever_and_does_not_panic() {
+        let cfg = coordin8_core::LeaseConfig {
+            max_ttl: None,
+            preferred_ttl: 300,
+        };
+        let granted = cfg.negotiate(100_000_000_000_000_000);
+        assert_eq!(granted, coordin8_core::LEASE_FOREVER);
+        let granted_neg = cfg.negotiate(u64::MAX - 1);
+        assert_eq!(granted_neg, coordin8_core::LEASE_FOREVER);
+
+        let store = InMemoryLeaseStore::new();
+        let record = store.create("huge", granted).await.unwrap();
+        assert!(!record.is_expired());
+        store.renew(&record.lease_id, granted).await.unwrap();
+        // Direct, un-negotiated huge TTLs error instead of panicking.
+        assert!(store.create("bad", 100_000_000_000_000_000).await.is_err());
+        assert!(store.create("bad", u64::MAX - 1).await.is_err());
+        assert!(store.renew(&record.lease_id, u64::MAX - 1).await.is_err());
     }
 }

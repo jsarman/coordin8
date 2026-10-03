@@ -8,8 +8,8 @@ pub mod txn;
 pub use error::Error;
 pub use event::{DeliveryMode, EventRecord, EventStore, SubscriptionRecord};
 pub use lease::{
-    LeaseConfig, LeaseReclaimed, LeaseRecord, LeaseStore, Leasing, ReclaimReason, LEASE_ANY,
-    LEASE_FOREVER,
+    checked_expiry, LeaseConfig, LeaseReclaimed, LeaseRecord, LeaseStore, Leasing, ReclaimReason,
+    LEASE_ANY, LEASE_FOREVER, MAX_REPRESENTABLE_TTL_SECS,
 };
 pub use registry::{CapabilityResolver, RegistryEntry, RegistryStore, TransportConfig};
 pub use space::{SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord};

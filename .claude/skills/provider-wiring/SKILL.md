@@ -1,115 +1,63 @@
+---
+name: provider-wiring
+description: How storage providers (InMemory vs DynamoDB) are selected and wired into the Djinn at runtime via COORDIN8_PROVIDER and the *_store_from_env() functions in coordin8-djinn/src/services.rs. Use when adding a new provider backend, adding or renaming a store or Dynamo table, changing per-service lease-table namespacing, or debugging which backend a Djinn service booted with.
+---
+
 # provider-wiring
 
-How to wire storage providers into the Djinn boot sequence. Load this skill when adding provider selection or a new provider backend.
+How storage providers are wired into the Djinn. Load this skill when adding a provider backend, adding a store, or touching provider selection.
 
-## Current State
+## Current Design (already implemented)
 
-`main.rs` in `coordin8-djinn` hard-codes InMemory stores at Layer 0:
+Provider selection is a **runtime** choice, not compile-time and not hard-coded in `main.rs`. `main.rs` only parses the subcommand; all wiring lives in `djinn/crates/coordin8-djinn/src/services.rs`.
 
-```rust
-let lease_store = Arc::new(InMemoryLeaseStore::new());
-let registry_store = Arc::new(InMemoryRegistryStore::new());
-let event_store = Arc::new(InMemoryEventStore::new());
-let txn_store = Arc::new(InMemoryTxnStore::new());
-let space_store = Arc::new(InMemorySpaceStore::new());
-```
+- `provider_from_env()` reads `COORDIN8_PROVIDER` (default `local`). `dynamo` selects DynamoDB. **Any other value silently falls through to `local`** (the `_` match arm) — it never panics on an unknown name.
+- One factory per store, each a `match provider_from_env()`:
 
-All managers accept `Arc<dyn TraitName>`:
-- `LeaseManager::new(store: Arc<dyn LeaseStore>, config: LeaseConfig)`
-- `RegistryIndex::new(store: Arc<dyn RegistryStore>)`
-- `EventManager::new(store: Arc<dyn EventStore>, ...)`
-- `TxnManager::new(store: Arc<dyn TxnStore>, ...)`
-- `SpaceManager::new(store: Arc<dyn SpaceStore>, ...)`
+| Factory | Returns | Dynamo type |
+|---------|---------|-------------|
+| `registry_store_from_env()` | `Arc<dyn RegistryStore>` | `DynamoRegistryStore::new(client)` |
+| `event_store_from_env()` | `Arc<dyn EventStore>` | `DynamoEventStore::new(client)` |
+| `txn_store_from_env()` | `Arc<dyn TxnStore>` | `DynamoTxnStore::new(client)` |
+| `space_store_from_env()` | `Arc<dyn SpaceStore>` | `DynamoSpaceStore::new(client)` |
+| `lease_store_from_env(namespace)` | `Arc<dyn LeaseStore>` | `DynamoLeaseStore::with_table(client, "coordin8_leases_{namespace}")` |
 
-This means the stores are already behind trait objects — swapping providers is just changing which concrete type gets `Arc::new()`.
+- Every Dynamo branch does `make_dynamo_client().await`, constructs the store, then `store.init().await?` before use (boot order: provider init completes before any manager starts), and logs `✓ Provider: ... — <Store>`.
+- **Leasing is distributed**: `embedded_landlord(namespace, host, port, auth)` builds each service's own `LeaseManager` + reaper + `LeaseService`, calling `lease_store_from_env(namespace)`. Namespaces are `registry`, `event`, `txn`, `space`, giving the Dynamo tables `coordin8_leases_registry`, `coordin8_leases_event`, `coordin8_leases_txn`, `coordin8_leases_space`. They never share lease state. There is no shared/central lease table.
+- The same factories serve bundled mode (`run_all()`) and every split-mode service (`run_registry`, `run_event`, `run_space`, `run_txn`, and their `*_on_listener` variants), so `COORDIN8_PROVIDER=dynamo` behaves identically in both. `run_proxy` has no store of its own: bundled mode hands `LocalCapabilityResolver` the registry store; split mode uses `RemoteCapabilityResolver` through Registry.
+- Managers take trait objects: `RegistryIndex::new(Arc<dyn RegistryStore>)`, `LeaseManager::new(store, config, expiry_tx)`, etc. Bundled mode passes the **same** `registry_store` Arc to both `RegistryIndex` and the proxy's `LocalCapabilityResolver`.
+- `coordin8-djinn/Cargo.toml` depends on both `coordin8-provider-local` and `coordin8-provider-dynamo` unconditionally; the Docker image is one binary for both.
 
-## Target Design
+## Dynamo Environment
 
-Environment variable: `COORDIN8_PROVIDER` (default: `local`)
+| Var | Purpose |
+|-----|---------|
+| `COORDIN8_PROVIDER` | `local` (default) or `dynamo` |
+| `DYNAMODB_ENDPOINT` | Endpoint override (MiniStack: `http://localhost:4566`, in compose `http://ministack:4566`); unset = real AWS credential chain |
+| `COORDIN8_AUTO_CREATE_TABLES` | `true`/`1` makes every store's `init()` create its tables (dev/tests). Unset = assume tables exist (production: CloudFormation) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` | Standard AWS config; MiniStack accepts `test`/`test`/`us-east-1` |
 
-```rust
-let provider = std::env::var("COORDIN8_PROVIDER").unwrap_or_else(|_| "local".into());
+Tables are defined in `djinn/providers/dynamo/src/table.rs` (names as consts) and, for production/compose, `infra/dynamodb-tables.cfn.yml` (12 tables; `docker-compose.yml`'s `cfn-init` deploys them to MiniStack before Djinn starts, regardless of provider). Table names: `coordin8_registry`, `coordin8_txn`, `coordin8_event_subscriptions`, `coordin8_event_mailbox`, `coordin8_space`, `coordin8_space_uncommitted`, `coordin8_space_txn_taken`, `coordin8_space_watches`, plus the four `coordin8_leases_*`. **If you add or rename a table, update `table.rs`, the CFN template, and the `init()` of the store.**
 
-// These are Arc<dyn TraitName> — the type erases the concrete provider
-let (lease_store, registry_store, event_store, txn_store, space_store): (
-    Arc<dyn LeaseStore>,
-    Arc<dyn RegistryStore>,
-    Arc<dyn EventStore>,
-    Arc<dyn TxnStore>,
-    Arc<dyn SpaceStore>,
-) = match provider.as_str() {
-    "dynamo" => {
-        let client = coordin8_provider_dynamo::make_dynamo_client().await;
+## Adding a New Store or Backend
 
-        let lease_store = Arc::new(coordin8_provider_dynamo::DynamoLeaseStore::new(client.clone()));
-        lease_store.init().await?;
-
-        let registry_store = Arc::new(coordin8_provider_dynamo::DynamoRegistryStore::new(client.clone()));
-        registry_store.init().await?;
-
-        // TODO: DynamoEventStore, DynamoTxnStore, DynamoSpaceStore not yet implemented
-        // For now, fall back to InMemory for unimplemented stores
-        let event_store = Arc::new(InMemoryEventStore::new());
-        let txn_store = Arc::new(InMemoryTxnStore::new());
-        let space_store = Arc::new(InMemorySpaceStore::new());
-
-        info!("  ✓ Provider: dynamo (DynamoDB)");
-        info!("    lease_store: DynamoDB");
-        info!("    registry_store: DynamoDB");
-        info!("    event_store: local (in-memory) — not yet implemented");
-        info!("    txn_store: local (in-memory) — not yet implemented");
-        info!("    space_store: local (in-memory) — not yet implemented");
-
-        (lease_store, registry_store, event_store, txn_store, space_store)
-    }
-    _ => {
-        let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
-        let registry_store: Arc<dyn RegistryStore> = Arc::new(InMemoryRegistryStore::new());
-        let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
-        let txn_store: Arc<dyn TxnStore> = Arc::new(InMemoryTxnStore::new());
-        let space_store: Arc<dyn SpaceStore> = Arc::new(InMemorySpaceStore::new());
-        info!("  ✓ Provider: local (in-memory)");
-        (lease_store, registry_store, event_store, txn_store, space_store)
-    }
-};
-```
-
-## Files to Modify
-
-### `djinn/crates/coordin8-djinn/Cargo.toml`
-Add the dynamo provider dependency:
-```toml
-coordin8-provider-dynamo = { workspace = true }
-```
-
-### `djinn/crates/coordin8-djinn/src/main.rs`
-1. Add import: `use coordin8_provider_dynamo;`
-2. Add trait imports for type annotations: `use coordin8_core::{LeaseStore, RegistryStore, EventStore, SpaceStore, TxnStore};` (some may already be imported indirectly)
-3. Replace the hard-coded Layer 0 block with the match block above
-4. Everything after Layer 0 (managers, services, gRPC) stays IDENTICAL — it already works with `Arc<dyn Trait>`
-
-### `docker-compose.yml`
-Add to the `djinn` service environment:
-```yaml
-COORDIN8_PROVIDER: "${COORDIN8_PROVIDER:-local}"
-DYNAMODB_ENDPOINT: "http://ministack:4566"
-```
-
-Add `depends_on` for ministack when using dynamo (optional — can be manual for now).
-
-### `Dockerfile.djinn`
-No changes needed — the binary is the same, provider is selected at runtime via env var.
+1. Add the trait to `coordin8-core` and re-export it in `lib.rs`.
+2. Implement it in BOTH `providers/local` and `providers/dynamo`, with identical behavior (see the per-store skills: `lease-provider`, `registry-provider`, `event-provider`, `space-provider`, `txn-provider`).
+3. Add a `<store>_store_from_env()` factory next to the others in `services.rs` and call it from `run_all()` and the matching `run_*_on_listener()`.
+4. Add the table(s) to `table.rs` + `infra/dynamodb-tables.cfn.yml`.
+5. For a whole new backend (not DynamoDB), add a new arm to each factory's `match`, a new provider crate under `djinn/providers/`, and register it in the `djinn/Cargo.toml` workspace members.
 
 ## Important Constraints
 
-- **Boot order is sacred.** Provider init (table creation) MUST complete before LeaseManager starts. The `.init().await?` calls in the dynamo branch handle this.
-- **Hybrid mode is OK.** Using DynamoDB for lease+registry while event/txn/space stay InMemory is a valid intermediate state. Log which stores use which backend clearly.
-- **Default is always `local`.** If `COORDIN8_PROVIDER` is unset or unrecognized, fall back to InMemory. Never panic on an unknown provider name.
-- **ProxyManager takes `Arc<dyn RegistryStore>` directly** — it reads from the registry store for template resolution. Make sure the same `registry_store` instance is passed to both RegistryIndex and ProxyManager.
+- **Boot order is sacred.** Provider `init()` must finish before the corresponding manager starts.
+- **Default is always `local`.** Unset or unrecognized `COORDIN8_PROVIDER` means InMemory.
+- **Per-service lease namespaces.** Never point two services at the same lease table.
+- **InMemory state dies with the process.** Anything that keeps in-memory counters beside a durable store (event sequence numbers, etc.) must reconcile on startup.
 
 ## Verification
 
-After wiring:
-1. `cargo check` from `djinn/` — must compile
-2. `cargo run` with no env vars — must start with InMemory (existing behavior preserved)
-3. `COORDIN8_PROVIDER=dynamo DYNAMODB_ENDPOINT=http://localhost:4566 cargo run` — must start with DynamoDB, create tables, and serve
+1. `cd djinn && cargo build --all && cargo test --all` (CI-equivalent; Dynamo tests are `#[ignore]` and do NOT run).
+2. `mise r djinn` with no env: boots with `Provider: local (in-memory)` log lines for all stores.
+3. MiniStack-backed: `docker compose up -d ministack`, then run `mise r djinn` with `COORDIN8_PROVIDER=dynamo DYNAMODB_ENDPOINT=http://localhost:4566 COORDIN8_AUTO_CREATE_TABLES=true AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1` set — logs should say `Provider: dynamo (DynamoDB)` per store.
+4. Provider tests: `cd djinn && cargo test -p coordin8-provider-dynamo -- --ignored` (needs MiniStack on `:4566`).
+5. Full Dockerized: `COORDIN8_PROVIDER=dynamo mise r up` (compose passes the var through; default `local`).
