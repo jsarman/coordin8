@@ -38,10 +38,9 @@ const greeter = await discovery.get(
 ```bash
 npm install
 npm run build         # tsc → dist/src
+npm test              # build + run the node:test suite (real grpc-js servers on localhost, fake services)
 npm run proto         # regenerate ts-proto stubs from ../../proto
 ```
-
-The Node SDK has no test suite yet.
 
 ## Gotchas
 

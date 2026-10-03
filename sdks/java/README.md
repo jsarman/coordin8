@@ -26,10 +26,9 @@ var greeter = discovery.get(GreeterGrpc::newBlockingStub, Map.of("interface", "G
 
 ```bash
 ./gradlew build
+./gradlew test        # JUnit 5 suite against fake gRPC servers (also runs as part of `build`)
 ./gradlew clean
 ```
-
-The Java SDK has no tests yet (no `src/test`), so `./gradlew test` is a no-op.
 
 ## Regenerating Stubs
 

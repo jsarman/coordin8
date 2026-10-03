@@ -59,18 +59,13 @@ async fn dial(addr: &str) -> RegistryServiceClient<tonic::transport::Channel> {
 /// every real call site uses (Decision 8 / Decision 2 of the auth and
 /// observability PRDs) — auth itself is a no-op here since no
 /// `COORDIN8_JWT_SECRET` is set for the subprocess.
-async fn dial_authed(
-    addr: &str,
-) -> RegistryServiceClient<coordin8_observability::TracedAuthedChannel> {
+async fn dial_authed(addr: &str) -> coordin8_observability::TracedAuthedChannel {
     let channel = tonic::transport::Channel::from_shared(addr.to_string())
         .unwrap()
         .connect()
         .await
         .expect("dial Registry");
-    RegistryServiceClient::new(coordin8_observability::wrap_traced_channel(
-        channel,
-        &coordin8_auth::ClientAuthConfig::trust(),
-    ))
+    coordin8_observability::wrap_traced_channel(channel, &coordin8_auth::ClientAuthConfig::trust())
 }
 
 /// Polls until a plain TCP connect to `addr` succeeds, or panics after
@@ -119,9 +114,9 @@ async fn self_registration_recovers_after_registry_restarts() {
 
     // Short TTL (renewal interval = ttl.max(3)/3 = 1s) so the test doesn't
     // need to wait long for the fix's re-registration path to kick in.
-    let client = dial_authed(&addr).await;
+    let channel = dial_authed(&addr).await;
     let _handle = self_register(
-        client,
+        channel,
         "SelfRegRecoveryTest",
         Default::default(),
         "127.0.0.1",

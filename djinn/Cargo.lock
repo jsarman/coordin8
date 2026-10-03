@@ -807,8 +807,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-core",
  "serde",
  "thiserror 1.0.69",
+ "tokio",
  "uuid",
 ]
 

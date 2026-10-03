@@ -310,17 +310,28 @@ impl SpaceManager {
     }
 
     /// Commit a transaction's Space operations: flush uncommitted writes to the
-    /// visible store and broadcast them. Takes under the txn stay removed.
+    /// visible store and broadcast them. Takes under the txn stay removed and
+    /// their leases are cancelled.
     pub async fn commit_space_txn(&self, txn_id: &str) -> Result<(), Error> {
-        let flushed = self.store.commit_txn(txn_id).await?;
+        let (flushed, taken) = self.store.commit_txn(txn_id).await?;
         self.enlisted.remove(txn_id);
+
+        // Tuples taken under the txn are consumed: cancel their leases.
+        for record in &taken {
+            let _ = self.lease_manager.cancel(&record.lease_id).await;
+        }
 
         // Broadcast all newly visible tuples to wake blocked readers/takers.
         for record in &flushed {
             let _ = self.tuple_tx.send(record.clone());
         }
 
-        debug!(txn_id, flushed = flushed.len(), "space txn committed");
+        debug!(
+            txn_id,
+            flushed = flushed.len(),
+            taken = taken.len(),
+            "space txn committed"
+        );
         Ok(())
     }
 

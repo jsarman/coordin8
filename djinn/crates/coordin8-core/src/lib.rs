@@ -2,6 +2,7 @@ pub mod error;
 pub mod event;
 pub mod lease;
 pub mod registry;
+pub mod shutdown;
 pub mod space;
 pub mod txn;
 

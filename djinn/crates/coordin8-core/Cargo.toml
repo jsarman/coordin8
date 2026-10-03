@@ -9,3 +9,5 @@ thiserror   = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
 serde       = { workspace = true }
+tokio       = { workspace = true }
+futures-core = "0.3"
