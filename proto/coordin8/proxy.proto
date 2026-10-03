@@ -3,6 +3,7 @@ syntax = "proto3";
 package coordin8;
 
 import "google/protobuf/empty.proto";
+import "coordin8/lease.proto";
 
 option go_package = "github.com/coordin8/proto/coordin8";
 
@@ -13,11 +14,18 @@ service ProxyService {
 
 message OpenRequest {
     map<string, string> template = 1;
+    // Requested lease TTL in seconds. 0 = LEASE_ANY (server's preferred TTL),
+    // u64::MAX = LEASE_FOREVER. The proxy is reclaimed (listener closed) when
+    // the lease expires or is cancelled — renew via the returned Lease's grantor.
+    uint64 ttl_seconds = 2;
 }
 
 message ProxyHandle {
     string proxy_id   = 1;
     int32  local_port = 2;
+    // Lease governing this proxy's lifetime. resource_id is "proxy:<proxy_id>".
+    // Carries grantor_host/grantor_port — the Proxy's own LeaseService.
+    Lease  lease      = 3;
 }
 
 message ReleaseRequest {

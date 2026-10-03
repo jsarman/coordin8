@@ -16,6 +16,7 @@ import (
 // cachedConn holds an open proxy + the gRPC connection built on top of it.
 type cachedConn struct {
 	proxyID string
+	handle  *ProxyHandle
 	conn    *grpc.ClientConn
 	stale   bool
 }
@@ -77,12 +78,13 @@ func (sd *ServiceDiscovery) refresh(ctx context.Context, key string, tmpl Templa
 	// address we dialed Proxy at rather than assuming.
 	proxyHost, _, err := net.SplitHostPort(sd.client.proxyConn.Target())
 	if err != nil {
+		_ = handle.Release(ctx)
 		return nil, fmt.Errorf("service discovery: parse proxy target: %w", err)
 	}
 	addr := fmt.Sprintf("%s:%d", proxyHost, handle.LocalPort)
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		_ = sd.client.Proxy().Release(ctx, handle.ProxyID)
+		_ = handle.Release(ctx)
 		return nil, fmt.Errorf("service discovery: %w", err)
 	}
 
@@ -90,9 +92,10 @@ func (sd *ServiceDiscovery) refresh(ctx context.Context, key string, tmpl Templa
 	// Close any previously stale entry
 	if old, exists := sd.cache[key]; exists {
 		old.conn.Close()
-		_ = sd.client.Proxy().Release(context.Background(), old.proxyID)
+		_ = old.handle.Release(context.Background())
 	}
-	sd.cache[key] = &cachedConn{proxyID: handle.ProxyID, conn: conn}
+	sd.cache[key] = &cachedConn{proxyID: handle.ProxyID, handle: handle, conn: conn}
+	go sd.watchLease(key, handle)
 
 	if _, watching := sd.cancels[key]; !watching {
 		watchCtx, cancel := context.WithCancel(context.Background())
@@ -102,6 +105,20 @@ func (sd *ServiceDiscovery) refresh(ctx context.Context, key string, tmpl Templa
 	sd.mu.Unlock()
 
 	return conn, nil
+}
+
+// watchLease marks the cache entry stale if handle's proxy lease is reclaimed
+// by the Djinn, so the next Get reopens a fresh proxy.
+func (sd *ServiceDiscovery) watchLease(key string, handle *ProxyHandle) {
+	select {
+	case <-handle.Lost():
+		sd.mu.Lock()
+		if entry, ok := sd.cache[key]; ok && entry.handle == handle {
+			entry.stale = true
+		}
+		sd.mu.Unlock()
+	case <-handle.stopped:
+	}
 }
 
 func (sd *ServiceDiscovery) watch(ctx context.Context, key string, tmpl Template) {
@@ -177,7 +194,7 @@ func (sd *ServiceDiscovery) Close() {
 	}
 	for _, entry := range sd.cache {
 		entry.conn.Close()
-		_ = sd.client.Proxy().Release(context.Background(), entry.proxyID)
+		_ = entry.handle.Release(context.Background())
 	}
 	sd.cache = make(map[string]*cachedConn)
 	sd.cancels = make(map[string]context.CancelFunc)

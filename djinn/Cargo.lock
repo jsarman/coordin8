@@ -946,8 +946,11 @@ name = "coordin8-proxy"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "coordin8-core",
+ "coordin8-lease",
  "coordin8-proto",
+ "coordin8-provider-local",
  "coordin8-registry",
  "dashmap",
  "prost-types 0.13.5",

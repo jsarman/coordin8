@@ -21,7 +21,7 @@ djinn/
     coordin8-djinn/    binary entry point — boots all services
   providers/
     local/             InMemory provider (DashMap, default)
-    dynamo/            DynamoDB provider (12 tables, MiniStack-tested)
+    dynamo/            DynamoDB provider (13 tables, MiniStack-tested)
 ```
 
 ## Boot Order

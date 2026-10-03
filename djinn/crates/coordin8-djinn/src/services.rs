@@ -498,6 +498,17 @@ fn spawn_cascade(
     });
 }
 
+/// Wire the Proxy's reclaim cascade: when a proxy lease expires or is
+/// cancelled, close that proxy's listener (same effect as `Release`).
+fn spawn_proxy_cascade(manager: &Arc<ProxyManager>, lease_manager: &Arc<LeaseManager>) {
+    let mgr = Arc::clone(manager);
+    spawn_cascade(
+        "proxy",
+        lease_manager.expiry_tx().subscribe(),
+        move |event| mgr.handle_reclaimed(&event),
+    );
+}
+
 // ── Monolith boot ─────────────────────────────────────────────────────────────
 
 /// Boot every service in a single process on fixed ports (the original monolith).
@@ -581,11 +592,19 @@ pub async fn run_all() -> Result<()> {
     info!("  ✓ EventMgr: ready");
 
     // ── Proxy ────────────────────────────────────────────────────────────────
-    // Proxy never grants leases — it only resolves capability templates
-    // against Registry, unrelated to the leasing model.
+    // Proxy is a Landlord for its own proxy leases (namespace "proxy"); a
+    // reclaimed lease (expiry or cancel) closes that proxy's listener.
+    let (proxy_lease_manager, lease_svc_for_proxy) =
+        embedded_landlord("proxy", &host, 9003, &auth_config, &shutdown_sig).await?;
     let proxy_config = ProxyConfig::from_env();
     let proxy_resolver = Arc::new(LocalCapabilityResolver::new(registry_store));
-    let proxy_manager = Arc::new(ProxyManager::new(proxy_resolver, proxy_config));
+    let proxy_leasing: Arc<dyn Leasing> = proxy_lease_manager.clone();
+    let proxy_manager = Arc::new(ProxyManager::new(
+        proxy_resolver,
+        proxy_config,
+        proxy_leasing,
+    ));
+    spawn_proxy_cascade(&proxy_manager, &proxy_lease_manager);
     info!("  ✓ Proxy: ready");
 
     // ── TransactionMgr ───────────────────────────────────────────────────────
@@ -668,7 +687,7 @@ pub async fn run_all() -> Result<()> {
         auth_config.clone(),
     );
     let proxy_svc = ProxyServiceServer::with_interceptor(
-        ProxyServiceImpl::new(proxy_manager),
+        ProxyServiceImpl::new(proxy_manager, &host, 9003),
         auth_config.clone(),
     );
     let txn_svc = TransactionServiceServer::with_interceptor(
@@ -693,7 +712,10 @@ pub async fn run_all() -> Result<()> {
         "  ✓ Registry:       listening on {} (+ LeaseService)",
         registry_addr
     );
-    info!("  ✓ Proxy:          listening on {}", proxy_addr);
+    info!(
+        "  ✓ Proxy:          listening on {} (+ LeaseService)",
+        proxy_addr
+    );
     info!(
         "  ✓ TransactionMgr: listening on {} (+ LeaseService)",
         txn_addr
@@ -737,6 +759,7 @@ pub async fn run_all() -> Result<()> {
             Server::builder()
                 .layer(coordin8_observability::server_layer())
                 .add_service(proxy_svc)
+                .add_service(lease_svc_for_proxy)
                 .serve_with_shutdown(proxy_addr, drain(drain_rx.clone())),
             Server::builder()
                 .layer(coordin8_observability::server_layer())
@@ -1411,7 +1434,7 @@ pub async fn run_proxy_on_listener_until(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
     let auth_config = AuthConfig::from_env();
-    let (shutdown_trigger, _shutdown_sig) = coordin8_core::shutdown::channel();
+    let (shutdown_trigger, shutdown_sig) = coordin8_core::shutdown::channel();
 
     // Construct immediately against a not-yet-resolved Registry — see
     // PendingCapabilityResolver. Discovery happens in the background task
@@ -1421,7 +1444,17 @@ pub async fn run_proxy_on_listener_until(
     let resolver: Arc<dyn coordin8_core::CapabilityResolver> =
         Arc::clone(&pending_resolver) as Arc<dyn coordin8_core::CapabilityResolver>;
     let proxy_config = ProxyConfig::from_env();
-    let proxy_manager = Arc::new(ProxyManager::new(resolver, proxy_config));
+    let (proxy_lease_manager, proxy_lease_svc) = embedded_landlord(
+        "proxy",
+        advertise_host,
+        advertise_port,
+        &auth_config,
+        &shutdown_sig,
+    )
+    .await?;
+    let proxy_leasing: Arc<dyn Leasing> = proxy_lease_manager.clone();
+    let proxy_manager = Arc::new(ProxyManager::new(resolver, proxy_config, proxy_leasing));
+    spawn_proxy_cascade(&proxy_manager, &proxy_lease_manager);
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
@@ -1447,12 +1480,12 @@ pub async fn run_proxy_on_listener_until(
     }
 
     let proxy_svc = ProxyServiceServer::with_interceptor(
-        ProxyServiceImpl::new(proxy_manager),
+        ProxyServiceImpl::new(proxy_manager, advertise_host, advertise_port),
         auth_config.clone(),
     );
 
     info!(
-        "  ✓ Proxy (split): listening on {actual_addr}, advertising {advertise_host}:{advertise_port}"
+        "  ✓ Proxy (split): listening on {actual_addr} (+ LeaseService), advertising {advertise_host}:{advertise_port}"
     );
 
     let registry_url = registry_addr.to_string();
@@ -1471,7 +1504,8 @@ pub async fn run_proxy_on_listener_until(
     let server = Server::builder()
         .layer(coordin8_observability::server_layer())
         .add_service(health_service)
-        .add_service(proxy_svc);
+        .add_service(proxy_svc)
+        .add_service(proxy_lease_svc);
 
     info!("Djinn proxy ready.");
 

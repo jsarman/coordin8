@@ -34,9 +34,15 @@ import java.util.stream.Collectors;
  */
 public class ServiceDiscovery implements AutoCloseable {
 
-    private record CachedEntry(String proxyId, ManagedChannel channel, AtomicBoolean stale) {
-        CachedEntry(String proxyId, ManagedChannel channel) {
-            this(proxyId, channel, new AtomicBoolean(false));
+    private record CachedEntry(String proxyId, ManagedChannel channel, AtomicBoolean stale,
+                               ProxyClient.ProxyHandleRecord handle) {
+        CachedEntry(ProxyClient.ProxyHandleRecord handle, ManagedChannel channel) {
+            this(handle.proxyId(), channel, new AtomicBoolean(false), handle);
+        }
+
+        /** Stale by registry event, or the Djinn reclaimed the proxy's lease. */
+        boolean isStale() {
+            return stale.get() || handle.lost().get();
         }
     }
 
@@ -67,7 +73,7 @@ public class ServiceDiscovery implements AutoCloseable {
     public <T> T get(Function<ManagedChannel, T> factory, Map<String, String> template) {
         String key = templateKey(template);
         CachedEntry entry = cache.get(key);
-        if (entry != null && !entry.stale().get()) {
+        if (entry != null && !entry.isStale()) {
             return factory.apply(entry.channel());
         }
         entry = refresh(key, template);
@@ -77,7 +83,7 @@ public class ServiceDiscovery implements AutoCloseable {
     private synchronized CachedEntry refresh(String key, Map<String, String> template) {
         // Double-check under lock
         CachedEntry existing = cache.get(key);
-        if (existing != null && !existing.stale().get()) {
+        if (existing != null && !existing.isStale()) {
             return existing;
         }
 
@@ -104,7 +110,7 @@ public class ServiceDiscovery implements AutoCloseable {
                 .forAddress("localhost", handle.localPort())
                 .usePlaintext()
                 .build();
-        return new CachedEntry(handle.proxyId(), channel);
+        return new CachedEntry(handle, channel);
     }
 
     private void startWatch(String key, Map<String, String> template) {
@@ -159,7 +165,7 @@ public class ServiceDiscovery implements AutoCloseable {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        djinn.proxy().release(entry.proxyId());
+        entry.handle().close();
     }
 
     /**
@@ -173,7 +179,7 @@ public class ServiceDiscovery implements AutoCloseable {
         watching.clear();
         for (CachedEntry entry : entries) {
             entry.channel().shutdown().awaitTermination(5, TimeUnit.SECONDS);
-            djinn.proxy().release(entry.proxyId());
+            entry.handle().close();
         }
     }
 

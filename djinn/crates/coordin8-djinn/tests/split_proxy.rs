@@ -119,7 +119,10 @@ async fn split_proxy_forwards_through_remote_registry() {
     template.insert("interface".to_string(), "SplitProxyEcho".to_string());
 
     let handle = proxy_client
-        .open(OpenRequest { template })
+        .open(OpenRequest {
+            template,
+            ttl_seconds: 0,
+        })
         .await
         .expect("open (proves RemoteCapabilityResolver.resolve worked)")
         .into_inner();

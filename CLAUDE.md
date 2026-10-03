@@ -28,12 +28,12 @@ Boot order is strict and load-bearing. No circular dependencies.
 | 1 | Registry | 9002 | Attribute-based service discovery. Entries are leased — stop renewing, disappear. |
 | 1 | EventMgr | 9005 | Durable event delivery. Leased subscriptions, mailbox buffering, sequence numbers. |
 | 1 | Space | 9006 | Tuple store. `out/take/read/watch` with leased tuples and reactive streams. |
-| 2 | Proxy | 9003 | TCP forwarding. `OpenProxy(template)` → local port with live failover. |
+| 2 | Proxy | 9003 | TCP forwarding. `OpenProxy(template)` → leased local port with live failover; abandoned proxies are reclaimed when their lease lapses. |
 | 3 | TransactionMgr | 9004 | 2PC coordinator. Participants expose their own gRPC `ParticipantService`. |
 
-**Providers are chosen at runtime.** `COORDIN8_PROVIDER=local` (default, InMemory) or `dynamo` (DynamoDB / MiniStack) via the `*_store_from_env()` factories in `coordin8-djinn/src/services.rs`, shared by bundled and split mode. Every store has two implementations (`djinn/providers/local`, `djinn/providers/dynamo`) that must behave identically. Each service's lease table is namespaced (`coordin8_leases_{registry,event,space,txn}`).
+**Providers are chosen at runtime.** `COORDIN8_PROVIDER=local` (default, InMemory) or `dynamo` (DynamoDB / MiniStack) via the `*_store_from_env()` factories in `coordin8-djinn/src/services.rs`, shared by bundled and split mode. Every store has two implementations (`djinn/providers/local`, `djinn/providers/dynamo`) that must behave identically. Each service's lease table is namespaced (`coordin8_leases_{registry,event,space,txn,proxy}`).
 
-**Leasing is distributed, not a layer.** There is no standalone LeaseMgr service. Registry, EventMgr, Space, and TransactionMgr each embed their own `LeaseManager` and mount `LeaseService` on their own port — matching Jini/Apache River's `Landlord` pattern, where every service that grants leases manages them in-process rather than depending on a shared external service. This is why Registry, EventMgr, and Space all sit at Layer 1: none of them has a blocking dependency on anything else for their own operation. See `.claude/plans/distributed-leasing/PRD.md` for the full rationale (this replaced an earlier centralized-LeaseMgr design that turned out to be the root cause of a whole class of bootstrap-cycle bugs).
+**Leasing is distributed, not a layer.** There is no standalone LeaseMgr service. Registry, EventMgr, Space, TransactionMgr, and Proxy each embed their own `LeaseManager` and mount `LeaseService` on their own port — matching Jini/Apache River's `Landlord` pattern, where every service that grants leases manages them in-process rather than depending on a shared external service. This is why Registry, EventMgr, and Space all sit at Layer 1: none of them has a blocking dependency on anything else for their own operation. See `.claude/plans/distributed-leasing/PRD.md` for the full rationale (this replaced an earlier centralized-LeaseMgr design that turned out to be the root cause of a whole class of bootstrap-cycle bugs).
 
 Lease TTL sentinels (`coordin8-core/src/lease.rs`): `LEASE_ANY = 0` (server picks), `LEASE_FOREVER = u64::MAX`; FOREVER `expires_at` is `DateTime::<Utc>::MAX_UTC`.
 
@@ -118,7 +118,7 @@ coordin8/
     market-watch/              EventMgr live demo — subscribe, mailbox drain, live stream
     double-entry/              TransactionMgr 2PC demo — happy path + veto abort
     auction-house/             Polyglot (Java + Go + Node) Space/EventMgr/Txn demo, own compose stack
-  infra/                       dynamodb-tables.cfn.yml (12 DynamoDB tables)
+  infra/                       dynamodb-tables.cfn.yml (13 DynamoDB tables)
   scripts/gen-auth-env.sh      Mint a JWT secret + per-identity tokens for the *-auth compose overlays
   Dockerfile.djinn / .greeter  Multi-stage builds
   docker-compose.yml           Bundled: MiniStack + cfn-init + Djinn + greeter
@@ -217,7 +217,7 @@ CI (`.github/workflows/ci.yml`) runs: Rust `cargo build --all`, `cargo test --al
 - Proxy port range `9100-9200` must be exposed in compose for host clients to reach forwarded ports
 - `ADVERTISE_HOST` on services tells the Djinn proxy where to forward across the Docker bridge (e.g., `greeter` resolves to the greeter container)
 - Health check: TCP probe on `:9002` (Registry — bundled mode doesn't mount the gRPC Health Checking Protocol on any port; only split mode's services do). Greeter `depends_on` this with `condition: service_healthy`.
-- The base compose file starts MiniStack and a one-shot `cfn-init` (deploys all 12 tables) before Djinn, whatever `COORDIN8_PROVIDER` is; the default stays `local`.
+- The base compose file starts MiniStack and a one-shot `cfn-init` (deploys all 13 tables) before Djinn, whatever `COORDIN8_PROVIDER` is; the default stays `local`.
 - `restart: on-failure` on greeter handles DNS race at container startup
 - `extra_hosts: host.docker.internal:host-gateway` on the djinn service — required on Linux so the 2PC coordinator can call back to participant servers running on the host. On Mac/Windows Docker Desktop this is automatic.
 

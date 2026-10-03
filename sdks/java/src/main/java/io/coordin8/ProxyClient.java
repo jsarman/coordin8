@@ -6,27 +6,60 @@ import coordin8.Proxy.ReleaseRequest;
 import coordin8.Proxy.ProxyHandle;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 public class ProxyClient {
 
+    /** Lease TTL requested by {@link #open(Map)}; renewed in the background until release. */
+    public static final long DEFAULT_PROXY_TTL_SECONDS = 30;
+
     private final ProxyServiceGrpc.ProxyServiceBlockingStub stub;
+    /** LeaseService is mounted on Proxy's own channel (Proxy is a Landlord). */
+    private final LeaseClient leases;
 
     ProxyClient(ManagedChannel channel) {
         this.stub = ProxyServiceGrpc.newBlockingStub(channel);
+        this.leases = LeaseClient.wrap(channel);
     }
 
     /**
      * Ask the Djinn to open a local TCP forwarding port for the given template.
-     * Call {@link ProxyHandleRecord#close()} when done.
+     * The proxy is leased ({@link #DEFAULT_PROXY_TTL_SECONDS}); the SDK renews
+     * the lease in the background until {@link ProxyHandleRecord#close()}.
      */
     public ProxyHandleRecord open(Map<String, String> template) {
+        return open(template, DEFAULT_PROXY_TTL_SECONDS);
+    }
+
+    /** Like {@link #open(Map)} with an explicit lease TTL (0 = server's preferred TTL). */
+    public ProxyHandleRecord open(Map<String, String> template, long ttlSeconds) {
         ProxyHandle handle = stub.open(OpenRequest.newBuilder()
                 .putAllTemplate(template)
+                .setTtlSeconds(ttlSeconds)
                 .build());
-        return new ProxyHandleRecord(handle.getProxyId(), handle.getLocalPort(), this);
+        AtomicBoolean lost = new AtomicBoolean(false);
+        Closeable keepAlive = () -> { };
+        LeaseClient.LeaseRecord lease = null;
+        if (handle.hasLease()) {
+            lease = LeaseClient.toRecord(handle.getLease());
+            long granted = lease.ttlSeconds() > 0 ? lease.ttlSeconds() : ttlSeconds;
+            keepAlive = leases.keepAlive(lease.leaseId(), granted, err -> {
+                if (err instanceof StatusRuntimeException sre) {
+                    Status.Code code = sre.getStatus().getCode();
+                    if (code == Status.Code.NOT_FOUND || code == Status.Code.FAILED_PRECONDITION) {
+                        lost.set(true);
+                    }
+                }
+            });
+        }
+        return new ProxyHandleRecord(handle.getProxyId(), handle.getLocalPort(), this, lease, keepAlive, lost);
     }
 
     /** Release a proxy on the Djinn. */
@@ -57,14 +90,33 @@ public class ProxyClient {
         return factory.apply(channel);
     }
 
+    /**
+     * @param lease     the proxy's lease (grantor = the Proxy itself)
+     * @param lost      set once keep-alive learns the Djinn reclaimed the proxy;
+     *                  the proxy must be reopened
+     */
     public record ProxyHandleRecord(
             String proxyId,
             int localPort,
-            ProxyClient client
+            ProxyClient client,
+            LeaseClient.LeaseRecord lease,
+            Closeable keepAlive,
+            AtomicBoolean lost
     ) implements AutoCloseable {
+        /** Stops lease renewal and releases the proxy (which cancels its lease). */
         @Override
         public void close() {
-            client.release(proxyId);
+            try {
+                keepAlive.close();
+            } catch (IOException ignored) {
+                // keep-alive stop never actually throws
+            }
+            try {
+                client.release(proxyId);
+            } catch (StatusRuntimeException e) {
+                // Already reclaimed (lease expired) — nothing left to release.
+                if (e.getStatus().getCode() != Status.Code.NOT_FOUND) throw e;
+            }
         }
     }
 }

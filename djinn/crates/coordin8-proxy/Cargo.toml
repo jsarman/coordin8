@@ -16,3 +16,8 @@ thiserror   = { workspace = true }
 uuid        = { workspace = true }
 tracing     = { workspace = true }
 dashmap     = { workspace = true }
+chrono      = { workspace = true }
+
+[dev-dependencies]
+coordin8-lease = { workspace = true }
+coordin8-provider-local = { workspace = true }
