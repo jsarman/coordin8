@@ -75,6 +75,50 @@ impl DynamoSpaceStore {
     }
 }
 
+impl DynamoSpaceStore {
+    /// Remove a tuple with this lease from any transaction's uncommitted or
+    /// taken buffer. The buffer tables have no lease GSI (adding one would
+    /// require a schema migration for CloudFormation-provisioned tables), so
+    /// this is a filtered, paginated scan — only reached when the committed
+    /// store has no match.
+    async fn remove_txn_buffered_by_lease(
+        &self,
+        lease_id: &str,
+    ) -> Result<Option<TupleRecord>, Error> {
+        for table in [&self.uncommitted_table, &self.txn_taken_table] {
+            let items = scan_by_lease(&self.client, table, lease_id).await?;
+            for item in items {
+                let txn_id = item
+                    .get("txn_id")
+                    .and_then(|v| v.as_s().ok())
+                    .ok_or_else(|| Error::Storage("buffer item missing txn_id".into()))?
+                    .clone();
+                let tuple_id = item
+                    .get("tuple_id")
+                    .and_then(|v| v.as_s().ok())
+                    .ok_or_else(|| Error::Storage("buffer item missing tuple_id".into()))?
+                    .clone();
+
+                let resp = self
+                    .client
+                    .delete_item()
+                    .table_name(table)
+                    .key("txn_id", AttributeValue::S(txn_id))
+                    .key("tuple_id", AttributeValue::S(tuple_id))
+                    .return_values(aws_sdk_dynamodb::types::ReturnValue::AllOld)
+                    .send()
+                    .await
+                    .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
+
+                if let Some(old) = resp.attributes {
+                    return Ok(Some(tuple_from_item(&old)?));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn tuple_to_item(record: &TupleRecord) -> HashMap<String, AttributeValue> {
@@ -303,6 +347,50 @@ async fn query_by_pk(
     Ok(items)
 }
 
+/// Attribute set on a txn_taken item when the txn took its own uncommitted
+/// write (as opposed to a committed tuple). Such items are never restored.
+const OWN_WRITE_ATTR: &str = "own_write";
+
+fn is_own_write(item: &HashMap<String, AttributeValue>) -> bool {
+    matches!(item.get(OWN_WRITE_ATTR), Some(AttributeValue::Bool(true)))
+}
+
+/// Scan a txn buffer table (no lease GSI) for items with the given lease_id,
+/// handling pagination. Returns the raw items (including txn_id/tuple_id keys).
+async fn scan_by_lease(
+    client: &Client,
+    table_name: &str,
+    lease_id: &str,
+) -> Result<Vec<HashMap<String, AttributeValue>>, Error> {
+    let mut items = Vec::new();
+    let mut last_key: Option<HashMap<String, AttributeValue>> = None;
+
+    loop {
+        let mut req = client
+            .scan()
+            .table_name(table_name)
+            .filter_expression("lease_id = :lid")
+            .expression_attribute_values(":lid", AttributeValue::S(lease_id.to_string()));
+        if let Some(ref lek) = last_key {
+            req = req.set_exclusive_start_key(Some(lek.clone()));
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| Error::Storage(format!("scan (lease filter) failed: {e}")))?;
+
+        items.extend(resp.items.unwrap_or_default());
+
+        last_key = resp.last_evaluated_key;
+        if last_key.is_none() {
+            break;
+        }
+    }
+
+    Ok(items)
+}
+
 // ── trait implementation ──────────────────────────────────────────────────────
 
 #[async_trait]
@@ -382,7 +470,7 @@ impl SpaceStore for DynamoSpaceStore {
 
         let item = match resp.items.and_then(|items| items.into_iter().next()) {
             Some(item) => item,
-            None => return Ok(None),
+            None => return self.remove_txn_buffered_by_lease(lease_id).await,
         };
 
         let tuple_id = item
@@ -391,7 +479,10 @@ impl SpaceStore for DynamoSpaceStore {
             .ok_or_else(|| Error::Storage("GSI item missing tuple_id".into()))?
             .clone();
 
-        self.remove(&tuple_id).await
+        match self.remove(&tuple_id).await? {
+            Some(record) => Ok(Some(record)),
+            None => self.remove_txn_buffered_by_lease(lease_id).await,
+        }
     }
 
     async fn find_match(
@@ -448,6 +539,18 @@ impl SpaceStore for DynamoSpaceStore {
                         .send()
                         .await
                         .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
+
+                    // Track so commit can cancel its lease (abort discards it).
+                    let mut own_item = tuple_to_item(&record);
+                    own_item.insert("txn_id".to_string(), AttributeValue::S(tid.to_string()));
+                    own_item.insert(OWN_WRITE_ATTR.to_string(), AttributeValue::Bool(true));
+                    self.client
+                        .put_item()
+                        .table_name(&self.txn_taken_table)
+                        .set_item(Some(own_item))
+                        .send()
+                        .await
+                        .map_err(|e| Error::Storage(format!("put_item (txn_taken) failed: {e}")))?;
                     return Ok(Some(record));
                 }
             }
@@ -544,7 +647,10 @@ impl SpaceStore for DynamoSpaceStore {
         Ok(results)
     }
 
-    async fn commit_txn(&self, txn_id: &str) -> Result<Vec<TupleRecord>, Error> {
+    async fn commit_txn(
+        &self,
+        txn_id: &str,
+    ) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error> {
         // Flush uncommitted writes to the visible store
         let uncommitted_items =
             query_by_pk(&self.client, &self.uncommitted_table, "txn_id", txn_id).await?;
@@ -572,7 +678,9 @@ impl SpaceStore for DynamoSpaceStore {
         // Finalize takes — clean up tracking buffer (they stay removed)
         let taken_items =
             query_by_pk(&self.client, &self.txn_taken_table, "txn_id", txn_id).await?;
+        let mut taken = Vec::new();
         for item in &taken_items {
+            taken.push(tuple_from_item(item)?);
             self.client
                 .delete_item()
                 .table_name(&self.txn_taken_table)
@@ -586,7 +694,7 @@ impl SpaceStore for DynamoSpaceStore {
                 .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
         }
 
-        Ok(flushed)
+        Ok((flushed, taken))
     }
 
     async fn abort_txn(&self, txn_id: &str) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error> {
@@ -619,8 +727,13 @@ impl SpaceStore for DynamoSpaceStore {
         let mut restored = Vec::new();
         for item in &taken_items {
             let record = tuple_from_item(item)?;
-            self.insert(record.clone()).await?;
-            restored.push(record);
+            if is_own_write(item) {
+                // The txn's own write that it then took — discard, never restore.
+                discarded.push(record);
+            } else {
+                self.insert(record.clone()).await?;
+                restored.push(record);
+            }
 
             self.client
                 .delete_item()
@@ -926,7 +1039,8 @@ mod tests {
             .await
             .unwrap();
 
-        let flushed = store.commit_txn("txn-commit").await.unwrap();
+        let (flushed, taken) = store.commit_txn("txn-commit").await.unwrap();
+        assert!(taken.is_empty());
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].tuple_id, "t-c1");
 
@@ -1034,6 +1148,85 @@ mod tests {
             .unwrap();
 
         assert!(store.has_txn("txn-check").await.unwrap());
+
+        teardown(&client, &tables).await;
+    }
+
+    fn order_template() -> HashMap<String, String> {
+        let mut t = HashMap::new();
+        t.insert("type".to_string(), "order".to_string());
+        t
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn expired_uncommitted_write_not_published_on_commit() {
+        let (store, tables, client) = setup().await;
+
+        store
+            .insert_uncommitted("txn-x", make_tuple("t-x", "lease-x"))
+            .await
+            .unwrap();
+        let removed = store.remove_by_lease("lease-x").await.unwrap();
+        assert_eq!(removed.unwrap().tuple_id, "t-x");
+
+        let (flushed, taken) = store.commit_txn("txn-x").await.unwrap();
+        assert!(flushed.is_empty() && taken.is_empty());
+        assert!(store.get("t-x").await.unwrap().is_none());
+
+        teardown(&client, &tables).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn expired_taken_tuple_not_restored_on_abort() {
+        let (store, tables, client) = setup().await;
+
+        store.insert(make_tuple("t-y", "lease-y")).await.unwrap();
+        let taken = store
+            .take_match(&order_template(), Some("txn-y"))
+            .await
+            .unwrap();
+        assert!(taken.is_some());
+
+        let removed = store.remove_by_lease("lease-y").await.unwrap();
+        assert_eq!(removed.unwrap().tuple_id, "t-y");
+
+        let (discarded, restored) = store.abort_txn("txn-y").await.unwrap();
+        assert!(discarded.is_empty() && restored.is_empty());
+        assert!(store.get("t-y").await.unwrap().is_none());
+
+        teardown(&client, &tables).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn commit_returns_taken_including_own_writes() {
+        let (store, tables, client) = setup().await;
+
+        store.insert(make_tuple("t-c", "lease-c")).await.unwrap();
+        let mut own = make_tuple("t-own", "lease-own");
+        own.attrs.insert("type".to_string(), "receipt".to_string());
+        store.insert_uncommitted("txn-z", own).await.unwrap();
+
+        store
+            .take_match(&order_template(), Some("txn-z"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut receipt = HashMap::new();
+        receipt.insert("type".to_string(), "receipt".to_string());
+        store
+            .take_match(&receipt, Some("txn-z"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (flushed, taken) = store.commit_txn("txn-z").await.unwrap();
+        assert!(flushed.is_empty());
+        let mut ids: Vec<_> = taken.iter().map(|r| r.tuple_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["t-c", "t-own"]);
 
         teardown(&client, &tables).await;
     }
