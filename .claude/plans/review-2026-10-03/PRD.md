@@ -1,6 +1,6 @@
 # Code Review Fixes (2026-10-03) — PRD
 
-> **Status: In progress.** Phase 1 workstreams running in parallel (Sonnet subagents, one worktree + branch + PR each). Phase 2 is blocked on the decisions listed below.
+> **Status: In progress.** Phase 1 PRs open (#41–#45); Phase 2: I (#48), J (#46, #47) open; F/G/H unblocked by D1–D4 (decided 2026-10-03). Enlist SSRF (finding 12a) still needs a design call.
 
 ## Goal
 
@@ -58,12 +58,12 @@ Severity from the review. "WS" = workstream (one branch/PR each).
 | I | Graceful shutdown (13) | — (sequenced after C to avoid conflicts in `services.rs`) |
 | J | SDK + CLI test suites; Java/Node in CI; `clippy --all-targets` | — (sequenced last; large) |
 
-## Decisions needed
+## Decisions — DECIDED 2026-10-03 (John: "go with your recommendations")
 
-- **D1 — Registry ownership.** Recommend: re-`Register`/`ModifyAttrs` must present the entry's `lease_id`, which acts as a capability token (it's already returned only to the registrant and never exposed by `Lookup`). Works with auth off. Alternative: bind entries to the JWT `sub` (only works with auth on).
-- **D2 — Proxy leases.** Recommend: `OpenProxy` grants a lease and Proxy becomes a Landlord like the other services (mounts `LeaseService`); SDK `ServiceDiscovery` keeps it alive. Proto change + all three SDKs. Alternative: idle-timeout reclaim only (no proto change, weaker).
-- **D3 — Event delivery semantics.** Recommend: keep at-least-once; assign a per-*registration* monotonic sequence at enqueue (atomic counter on the subscription item in Dynamo), delete a mailbox entry only after it's sent on the stream, and dedupe by that per-registration sequence.
-- **D4 — Watch lag.** Recommend: on lag, send a terminal `DATA_LOSS`/`ABORTED` status so the client resubscribes and re-snapshots (SDKs already reconnect), rather than silently continuing. And only emit `MODIFIED` on re-`Register` when interface/attrs/transport actually changed.
+- ✅ **D1 — Registry ownership.** Decided: re-`Register`/`ModifyAttrs` must present the entry's `lease_id`, which acts as a capability token (it's already returned only to the registrant and never exposed by `Lookup`). Works with auth off. Alternative: bind entries to the JWT `sub` (only works with auth on).
+- ✅ **D2 — Proxy leases.** Decided: `OpenProxy` grants a lease and Proxy becomes a Landlord like the other services (mounts `LeaseService`); SDK `ServiceDiscovery` keeps it alive. Proto change + all three SDKs. Alternative: idle-timeout reclaim only (no proto change, weaker).
+- ✅ **D3 — Event delivery semantics.** Decided: keep at-least-once; assign a per-*registration* monotonic sequence at enqueue (atomic counter on the subscription item in Dynamo), delete a mailbox entry only after it's sent on the stream, and dedupe by that per-registration sequence.
+- ✅ **D4 — Watch lag.** Decided: on lag, send a terminal `DATA_LOSS`/`ABORTED` status so the client resubscribes and re-snapshots (SDKs already reconnect), rather than silently continuing. And only emit `MODIFIED` on re-`Register` when interface/attrs/transport actually changed.
 
 ## Non-goals
 
