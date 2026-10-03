@@ -23,6 +23,14 @@ fn make_manager() -> Arc<EventManager> {
     Arc::new(EventManager::new(event_store, lease_manager, event_tx))
 }
 
+/// Read the whole mailbox and ack it (what a fully-connected Receive does).
+async fn drain(mgr: &EventManager, reg_id: &str) -> Vec<coordin8_core::EventRecord> {
+    let events = mgr.peek_mailbox(reg_id, 0, 1000).await.unwrap();
+    let seqs: Vec<u64> = events.iter().map(|e| e.seq_num).collect();
+    mgr.ack_mailbox(reg_id, &seqs).await.unwrap();
+    events
+}
+
 // ── Test 1: durable mailbox — emit before receive, drain backlog ─────────────
 
 #[tokio::test]
@@ -61,7 +69,7 @@ async fn durable_mailbox_drains_backlog() {
     }
 
     // Now drain the mailbox
-    let backlog = mgr.drain_mailbox(&reg_id).await.unwrap();
+    let backlog = drain(&mgr, &reg_id).await;
     println!("[demo] Drained {} events from mailbox:", backlog.len());
     for e in &backlog {
         println!(
@@ -78,7 +86,7 @@ async fn durable_mailbox_drains_backlog() {
     assert_eq!(backlog[0].source, "market.signals");
 
     // Second drain should be empty
-    let empty = mgr.drain_mailbox(&reg_id).await.unwrap();
+    let empty = drain(&mgr, &reg_id).await;
     assert!(empty.is_empty());
     println!("[demo] Second drain: empty ✓");
 }
@@ -110,7 +118,7 @@ async fn best_effort_live_only() {
     .await
     .unwrap();
 
-    let queue = mgr.drain_mailbox(&reg_id).await.unwrap();
+    let queue = drain(&mgr, &reg_id).await;
     assert!(queue.is_empty());
     println!("\n[demo] BestEffort: mailbox empty after emit (as expected) ✓");
 }
@@ -152,7 +160,7 @@ async fn template_filtering_enqueues_only_matches() {
     .await
     .unwrap();
 
-    let backlog = mgr.drain_mailbox(&reg_id).await.unwrap();
+    let backlog = drain(&mgr, &reg_id).await;
     println!(
         "\n[demo] Template filter: got {} event(s) (expected 1)",
         backlog.len()
@@ -271,8 +279,7 @@ async fn subscription_lease_expiry_cascade() {
     // Subscription should be gone
     assert!(mgr.get_subscription(&reg_id).await.unwrap().is_none());
 
-    // Mailbox should also be gone (drain returns error)
-    let drain_result = mgr.drain_mailbox(&reg_id).await;
-    assert!(drain_result.is_err());
+    // Mailbox should also be gone (peek yields nothing)
+    assert!(mgr.peek_mailbox(&reg_id, 0, 100).await.unwrap().is_empty());
     println!("[demo] Lease expiry cascade: subscription + mailbox cleaned up ✓");
 }

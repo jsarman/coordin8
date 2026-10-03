@@ -50,8 +50,25 @@ pub trait EventStore: Send + Sync {
     async fn list_subscriptions(&self) -> Result<Vec<SubscriptionRecord>, Error>;
 
     /// Enqueue an event into a durable subscription's mailbox.
-    async fn enqueue(&self, registration_id: &str, event: EventRecord) -> Result<(), Error>;
+    ///
+    /// The store assigns the mailbox entry a per-registration sequence number
+    /// (monotonic, persisted with the subscription so it survives restarts and
+    /// is never reused) and returns it. The stored event's `seq_num` is that
+    /// per-registration sequence, overriding whatever the caller set.
+    /// Errors with `SubscriptionNotFound` if the registration doesn't exist.
+    async fn enqueue(&self, registration_id: &str, event: EventRecord) -> Result<u64, Error>;
 
-    /// Drain and return all queued events for a subscription.
-    async fn dequeue(&self, registration_id: &str) -> Result<Vec<EventRecord>, Error>;
+    /// Read up to `limit` queued events with per-registration seq strictly
+    /// greater than `after_seq`, in ascending seq order, WITHOUT removing
+    /// them. Unknown registrations yield an empty list.
+    async fn peek(
+        &self,
+        registration_id: &str,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, Error>;
+
+    /// Delete (acknowledge) the mailbox entries with the given
+    /// per-registration seqs. Idempotent; unknown entries are ignored.
+    async fn ack(&self, registration_id: &str, seq_nums: &[u64]) -> Result<(), Error>;
 }
