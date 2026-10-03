@@ -135,9 +135,9 @@ coordin8/
 mise r build             # Djinn release + CLI
 mise r build-djinn       # Djinn dev build only
 mise r build-examples    # all example binaries
-mise r test              # cargo test --all + go test (Go SDK has no tests yet)
+mise r test              # cargo test --all + go test (Rust + Go SDK)
 mise r test-rust         # Rust only (what CI runs)
-mise r test-go           # Go SDK only — currently "no test files"
+mise r test-go           # Go SDK only
 mise r lint              # clippy + fmt --check + go vet (SDK only; CI also vets cli/)
 mise r proto             # regenerate all proto stubs
 mise r clean             # remove all build artifacts
@@ -158,8 +158,8 @@ cargo clippy --all --all-targets -- -D warnings   # stricter than CI (CI omits -
 cargo test -p coordin8-provider-dynamo -- --ignored   # Dynamo provider tests; needs MiniStack on :4566
 cargo run                           # starts Djinn locally (in-memory)
 
-# Go SDK (from sdks/go/) — no tests exist yet; build/vet is the check
-go build ./... && go vet ./...
+# Go SDK (from sdks/go/) and CLI (from cli/)
+go test -race ./...
 
 # Node SDK (from sdks/node/)
 npm install && npm run build
@@ -181,7 +181,7 @@ docker compose down
 
 ### CI and test coverage
 
-CI (`.github/workflows/ci.yml`) runs: Rust `cargo build --all`, `cargo test --all`, `cargo clippy --all -- -D warnings`, `cargo fmt --all --check` (Rust 1.94.1); and Go `build` + `vet` for `cli/` and `sdks/go/`. The Go SDK, Java SDK, Node SDK, and CLI have **no tests**, and Java/Node are not in CI. All Dynamo provider tests are `#[ignore]` (need MiniStack), so CI never runs them — a green CI says nothing about the Dynamo provider; run them locally with `-- --ignored`.
+CI (`.github/workflows/ci.yml`) runs: Rust `cargo build --all`, `cargo test --all`, `cargo clippy --all -- -D warnings`, `cargo fmt --all --check` (Rust 1.94.1); a `dynamo-provider` job that runs the `#[ignore]`d Dynamo provider tests against a MiniStack service container; Go `build` + `vet` + `go test -race` for `cli/` and `sdks/go/`; `./gradlew build` (incl. JUnit tests) for the Java SDK; `npm run build && npm test` for the Node SDK. Locally, Dynamo tests need MiniStack on :4566 and `-- --ignored`. CI's clippy omits `--all-targets` — run it locally with `--all-targets` to lint test code too.
 
 **Note:** The Makefile `GO ?=` falls back to `$(HOME)/go-install/go/bin/go` when mise is not active. With mise, `go` is on PATH and the env override takes effect automatically.
 

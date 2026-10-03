@@ -26,6 +26,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.djinn
+    # Longer than COORDIN8_SHUTDOWN_GRACE_SECS (default 20) so the Djinn can
+    # finish its graceful drain; Docker's own default is only 10s.
+    stop_grace_period: 25s
     container_name: coordin8-djinn
     ports:
       - "9002:9002"       # Registry (+ its own LeaseService)

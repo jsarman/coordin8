@@ -13,6 +13,10 @@ pub struct InMemorySpaceStore {
     // Transaction isolation buffers
     uncommitted: DashMap<String, Vec<TupleRecord>>, // txn_id → written tuples (not yet visible)
     txn_taken: DashMap<String, Vec<TupleRecord>>, // txn_id → tuples taken from committed (restore on abort)
+    txn_self_taken: DashMap<String, Vec<TupleRecord>>, // txn_id → txn's own uncommitted writes it then took (never restored)
+    // lease_id → (txn_id, tuple_id) for every tuple living in a txn buffer
+    // (uncommitted, taken, self-taken), so lease expiry can find it.
+    txn_lease_index: DashMap<String, (String, String)>,
 }
 
 impl InMemorySpaceStore {
@@ -24,6 +28,8 @@ impl InMemorySpaceStore {
             watch_lease_index: DashMap::new(),
             uncommitted: DashMap::new(),
             txn_taken: DashMap::new(),
+            txn_self_taken: DashMap::new(),
+            txn_lease_index: DashMap::new(),
         }
     }
 }
@@ -45,6 +51,10 @@ impl SpaceStore for InMemorySpaceStore {
     }
 
     async fn insert_uncommitted(&self, txn_id: &str, record: TupleRecord) -> Result<(), Error> {
+        self.txn_lease_index.insert(
+            record.lease_id.clone(),
+            (txn_id.to_string(), record.tuple_id.clone()),
+        );
         self.uncommitted
             .entry(txn_id.to_string())
             .or_default()
@@ -69,6 +79,18 @@ impl SpaceStore for InMemorySpaceStore {
         if let Some((_, tuple_id)) = self.lease_index.remove(lease_id) {
             if let Some((_, record)) = self.tuples.remove(&tuple_id) {
                 return Ok(Some(record));
+            }
+        }
+
+        // Not committed: the tuple may be sitting in a transaction buffer.
+        // An expired lease means the tuple is gone, even mid-transaction.
+        if let Some((_, (txn_id, tuple_id))) = self.txn_lease_index.remove(lease_id) {
+            for buffers in [&self.uncommitted, &self.txn_taken, &self.txn_self_taken] {
+                if let Some(mut buf) = buffers.get_mut(&txn_id) {
+                    if let Some(pos) = buf.iter().position(|r| r.tuple_id == tuple_id) {
+                        return Ok(Some(buf.remove(pos)));
+                    }
+                }
             }
         }
         Ok(None)
@@ -114,6 +136,11 @@ impl SpaceStore for InMemorySpaceStore {
             if let Some(mut buf) = self.uncommitted.get_mut(tid) {
                 if let Some(pos) = buf.iter().position(|r| matches(&ops, &r.attrs)) {
                     let record = buf.remove(pos);
+                    // Track so commit can cancel its lease (abort discards it).
+                    self.txn_self_taken
+                        .entry(tid.to_string())
+                        .or_default()
+                        .push(record.clone());
                     return Ok(Some(record));
                 }
             }
@@ -136,6 +163,10 @@ impl SpaceStore for InMemorySpaceStore {
 
                         // Under a transaction, track the taken tuple for restore-on-abort.
                         if let Some(tid) = txn_id {
+                            self.txn_lease_index.insert(
+                                record.lease_id.clone(),
+                                (tid.to_string(), record.tuple_id.clone()),
+                            );
                             self.txn_taken
                                 .entry(tid.to_string())
                                 .or_default()
@@ -181,10 +212,14 @@ impl SpaceStore for InMemorySpaceStore {
         Ok(results)
     }
 
-    async fn commit_txn(&self, txn_id: &str) -> Result<Vec<TupleRecord>, Error> {
+    async fn commit_txn(
+        &self,
+        txn_id: &str,
+    ) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error> {
         // Flush uncommitted writes to the visible store.
         let flushed = if let Some((_, tuples)) = self.uncommitted.remove(txn_id) {
             for record in &tuples {
+                self.txn_lease_index.remove(&record.lease_id);
                 let tuple_id = record.tuple_id.clone();
                 let lease_id = record.lease_id.clone();
                 self.tuples.insert(tuple_id.clone(), record.clone());
@@ -195,23 +230,44 @@ impl SpaceStore for InMemorySpaceStore {
             vec![]
         };
 
-        // Finalize takes — they stay removed, just clean up the tracking buffer.
-        self.txn_taken.remove(txn_id);
+        // Finalize takes — they stay removed; return them so leases get cancelled.
+        let mut taken = self
+            .txn_taken
+            .remove(txn_id)
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        taken.extend(
+            self.txn_self_taken
+                .remove(txn_id)
+                .map(|(_, v)| v)
+                .unwrap_or_default(),
+        );
+        for record in &taken {
+            self.txn_lease_index.remove(&record.lease_id);
+        }
 
-        Ok(flushed)
+        Ok((flushed, taken))
     }
 
     async fn abort_txn(&self, txn_id: &str) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error> {
         // Discard uncommitted writes — return them for lease cleanup.
-        let discarded = if let Some((_, tuples)) = self.uncommitted.remove(txn_id) {
+        let mut discarded = if let Some((_, tuples)) = self.uncommitted.remove(txn_id) {
             tuples
         } else {
             vec![]
         };
+        // Own writes that were then taken are discarded too.
+        if let Some((_, own)) = self.txn_self_taken.remove(txn_id) {
+            discarded.extend(own);
+        }
+        for record in &discarded {
+            self.txn_lease_index.remove(&record.lease_id);
+        }
 
         // Restore taken tuples back to the committed store.
         let restored = if let Some((_, taken)) = self.txn_taken.remove(txn_id) {
             for record in &taken {
+                self.txn_lease_index.remove(&record.lease_id);
                 let tuple_id = record.tuple_id.clone();
                 let lease_id = record.lease_id.clone();
                 self.tuples.insert(tuple_id.clone(), record.clone());
@@ -230,7 +286,11 @@ impl SpaceStore for InMemorySpaceStore {
             .uncommitted
             .get(txn_id)
             .map_or(false, |v| !v.is_empty());
-        let has_takes = self.txn_taken.contains_key(txn_id);
+        let has_takes = self.txn_taken.get(txn_id).map_or(false, |v| !v.is_empty())
+            || self
+                .txn_self_taken
+                .get(txn_id)
+                .map_or(false, |v| !v.is_empty());
         Ok(has_writes || has_takes)
     }
 

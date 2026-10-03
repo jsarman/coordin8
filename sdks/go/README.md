@@ -41,9 +41,11 @@ greeter := pb.NewGreeterClient(conn)
 
 ```bash
 go build ./...
-```
+go test -race ./...   # unit tests against in-process fake gRPC servers
 
-The Go SDK has no tests yet. `go test ./...` (and `mise r test-go`) compiles the packages and passes with "no test files".
+# from the repo root
+mise r test-go     # equivalent
+```
 
 ## Regenerating Stubs
 

@@ -3,6 +3,7 @@
 /// Demonstrates the full cycle:
 ///   write → read → take → blocking take → notify → contents → lease expiry
 ///   transactional isolation: uncommitted writes, commit, abort
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1372,4 +1373,159 @@ async fn txn_contents_includes_uncommitted() {
     assert_eq!(with.len(), 3, "contents with txn should see 3");
 
     println!("\n[demo] Txn contents: includes uncommitted ✓");
+}
+
+// ── Txn / lease lifecycle ───────────────────────────────────────────────────
+
+/// Manager plus the concrete LeaseManager so tests can inspect lease state.
+fn make_manager_with_leases() -> (Arc<SpaceManager>, Arc<LeaseManager>) {
+    let lease_store = Arc::new(InMemoryLeaseStore::new());
+    let (lease_expiry_tx, _) = broadcast::channel(256);
+    let lease_manager = Arc::new(LeaseManager::new(
+        lease_store,
+        coordin8_core::LeaseConfig::default(),
+        lease_expiry_tx,
+    ));
+    let leasing: Arc<dyn Leasing> = lease_manager.clone();
+    let (tuple_tx, _) = broadcast::channel(256);
+    let (expiry_tx, _) = broadcast::channel(256);
+    let mgr = Arc::new(SpaceManager::new(
+        Arc::new(InMemorySpaceStore::new()),
+        leasing,
+        tuple_tx,
+        expiry_tx,
+    ));
+    (mgr, lease_manager)
+}
+
+fn tmpl(k: &str, v: &str) -> HashMap<String, String> {
+    HashMap::from([(k.to_string(), v.to_string())])
+}
+
+#[tokio::test]
+async fn txn_write_expired_mid_txn_not_published_on_commit() {
+    let (mgr, _) = make_manager_with_leases();
+
+    let (_, lease) = mgr
+        .write(
+            tmpl("k", "w"),
+            vec![],
+            60,
+            "t".into(),
+            None,
+            Some("txn-a".into()),
+        )
+        .await
+        .unwrap();
+
+    // Lease expires while the txn is open.
+    mgr.on_tuple_expired(&lease.lease_id).await;
+    mgr.commit_space_txn("txn-a").await.unwrap();
+
+    assert!(mgr
+        .read(tmpl("k", "w"), false, 0, None)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(mgr.contents(HashMap::new(), None).await.unwrap().is_empty());
+    assert!(!mgr.has_txn("txn-a").await.unwrap());
+}
+
+#[tokio::test]
+async fn txn_taken_expired_mid_txn_not_restored_on_abort() {
+    let (mgr, _) = make_manager_with_leases();
+
+    let (_, lease) = mgr
+        .write(tmpl("k", "t"), vec![], 60, "t".into(), None, None)
+        .await
+        .unwrap();
+    let taken = mgr
+        .take(tmpl("k", "t"), false, 0, Some("txn-b".into()))
+        .await
+        .unwrap();
+    assert!(taken.is_some());
+
+    mgr.on_tuple_expired(&lease.lease_id).await;
+    mgr.abort_space_txn("txn-b").await.unwrap();
+
+    assert!(mgr
+        .read(tmpl("k", "t"), false, 0, None)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(mgr.contents(HashMap::new(), None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn commit_cancels_leases_of_taken_tuples() {
+    let (mgr, lease_mgr) = make_manager_with_leases();
+
+    // Committed tuple taken under the txn.
+    let (_, committed_lease) = mgr
+        .write(tmpl("k", "c"), vec![], 60, "t".into(), None, None)
+        .await
+        .unwrap();
+    // The txn's own uncommitted write, which it then takes.
+    let (_, own_lease) = mgr
+        .write(
+            tmpl("k", "own"),
+            vec![],
+            60,
+            "t".into(),
+            None,
+            Some("txn-c".into()),
+        )
+        .await
+        .unwrap();
+
+    mgr.take(tmpl("k", "c"), false, 0, Some("txn-c".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    mgr.take(tmpl("k", "own"), false, 0, Some("txn-c".into()))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Leases still live while the txn is open.
+    assert!(lease_mgr
+        .get(&committed_lease.lease_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(lease_mgr.get(&own_lease.lease_id).await.unwrap().is_some());
+
+    mgr.commit_space_txn("txn-c").await.unwrap();
+
+    assert!(lease_mgr
+        .get(&committed_lease.lease_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(lease_mgr.get(&own_lease.lease_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn abort_cancels_lease_of_own_write_taken_in_txn() {
+    let (mgr, lease_mgr) = make_manager_with_leases();
+
+    let (_, own_lease) = mgr
+        .write(
+            tmpl("k", "own"),
+            vec![],
+            60,
+            "t".into(),
+            None,
+            Some("txn-d".into()),
+        )
+        .await
+        .unwrap();
+    mgr.take(tmpl("k", "own"), false, 0, Some("txn-d".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    mgr.abort_space_txn("txn-d").await.unwrap();
+
+    assert!(lease_mgr.get(&own_lease.lease_id).await.unwrap().is_none());
+    assert!(mgr.contents(HashMap::new(), None).await.unwrap().is_empty());
 }
