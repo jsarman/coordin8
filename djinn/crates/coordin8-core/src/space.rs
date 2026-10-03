@@ -50,6 +50,9 @@ pub trait SpaceStore: Send + Sync {
     async fn remove(&self, tuple_id: &str) -> Result<Option<TupleRecord>, Error>;
 
     /// Remove a tuple by its lease ID. Returns the removed tuple if found.
+    /// Also finds tuples held in a transaction's uncommitted or taken buffer:
+    /// a tuple whose lease expired is gone, even mid-transaction, and must be
+    /// neither published on commit nor restored on abort.
     async fn remove_by_lease(&self, lease_id: &str) -> Result<Option<TupleRecord>, Error>;
 
     /// Find the first tuple matching the template (non-destructive).
@@ -78,10 +81,14 @@ pub trait SpaceStore: Send + Sync {
     ) -> Result<Vec<TupleRecord>, Error>;
 
     /// Commit a transaction: flush uncommitted writes to the visible store,
-    /// finalize takes (stay removed). Returns the flushed tuples for broadcasting.
-    async fn commit_txn(&self, txn_id: &str) -> Result<Vec<TupleRecord>, Error>;
+    /// finalize takes (stay removed). Returns (flushed, taken).
+    /// Flushed tuples need broadcasting; taken tuples (including the txn's own
+    /// uncommitted writes it took) need lease cleanup.
+    async fn commit_txn(&self, txn_id: &str)
+        -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error>;
 
-    /// Abort a transaction: discard uncommitted writes, restore taken tuples.
+    /// Abort a transaction: discard uncommitted writes (including own writes the
+    /// txn took), restore tuples taken from the committed store.
     /// Returns (discarded_uncommitted, restored_taken).
     /// Discarded tuples need lease cleanup; restored tuples need broadcasting.
     async fn abort_txn(&self, txn_id: &str) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error>;
