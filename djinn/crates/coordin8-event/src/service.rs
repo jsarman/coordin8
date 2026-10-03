@@ -300,7 +300,11 @@ impl EventService for EventServiceImpl {
                 template,
                 handback,
             ));
-            return Ok(Response::new(Box::pin(ReceiverStream::new(rx))));
+            #[allow(clippy::result_large_err)] // tonic::Status is the gRPC error type
+            let stream = self.shutdown.end_stream(ReceiverStream::new(rx), || {
+                Err(Status::unavailable("server shutting down"))
+            });
+            return Ok(Response::new(Box::pin(stream)));
         }
 
         // A failing backlog read is surfaced to the caller, not swallowed.
@@ -597,6 +601,28 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::DataLoss);
         // and then the stream is over
         assert!(s.next().await.is_none());
+    }
+
+    /// Both delivery modes must end their Receive stream with UNAVAILABLE on
+    /// shutdown; an unwrapped stream holds the server's drain open for the
+    /// whole grace period.
+    #[tokio::test]
+    async fn receive_ends_unavailable_on_shutdown_in_both_modes() {
+        for mode in [DeliveryMode::BestEffort, DeliveryMode::Durable] {
+            let m = manager(mem(), 16);
+            let (trigger, signal) = coordin8_core::shutdown::channel();
+            let svc = EventServiceImpl::new(m.clone(), "h", 1).with_shutdown(signal);
+            let reg = subscribe(&m, mode.clone()).await;
+            let mut s = receive(&svc, &reg).await;
+            trigger.trigger();
+            let item = tokio::time::timeout(Duration::from_secs(2), s.next())
+                .await
+                .unwrap_or_else(|_| panic!("{mode:?}: stream still open after shutdown"));
+            let status = item
+                .expect("stream should yield a final status")
+                .expect_err("final item should be an error status");
+            assert_eq!(status.code(), tonic::Code::Unavailable, "{mode:?}");
+        }
     }
 
     /// Store whose enqueue always fails.
