@@ -19,6 +19,19 @@ pub const LEASE_ANY: u64 = 0;
 /// old `0`, which collided with proto3's default-unset value for `uint64`.
 pub const LEASE_FOREVER: u64 = u64::MAX;
 
+/// Largest finite TTL (~100 years, in seconds) the server will grant. When no
+/// cap is configured, a longer request negotiates to [`LEASE_FOREVER`] rather
+/// than overflowing date arithmetic.
+pub const MAX_REPRESENTABLE_TTL_SECS: u64 = 100 * 365 * 24 * 60 * 60;
+
+/// Compute `from + ttl_secs` without panicking. Returns `None` if the TTL or
+/// the resulting timestamp is not representable.
+pub fn checked_expiry(from: DateTime<Utc>, ttl_secs: u64) -> Option<DateTime<Utc>> {
+    let secs = i64::try_from(ttl_secs).ok()?;
+    let delta = chrono::TimeDelta::try_seconds(secs)?;
+    from.checked_add_signed(delta)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaseRecord {
     pub lease_id: String,
@@ -103,6 +116,7 @@ impl LeaseConfig {
                 Some(max) => max,
             },
             ttl => match self.max_ttl {
+                None if ttl > MAX_REPRESENTABLE_TTL_SECS => LEASE_FOREVER,
                 None => ttl,
                 Some(max) => ttl.min(max),
             },
@@ -127,9 +141,13 @@ pub trait LeaseStore: Send + Sync {
     async fn cancel(&self, lease_id: &str) -> Result<(), Error>;
     async fn get(&self, lease_id: &str) -> Result<Option<LeaseRecord>, Error>;
     async fn get_by_resource(&self, resource_id: &str) -> Result<Option<LeaseRecord>, Error>;
-    /// Returns all records whose expires_at is in the past.
+    /// Returns all records whose expires_at is in the past. FOREVER leases are
+    /// never returned.
     async fn list_expired(&self) -> Result<Vec<LeaseRecord>, Error>;
-    async fn remove(&self, lease_id: &str) -> Result<(), Error>;
+    /// Remove the lease only if it is still the version in `record` (same
+    /// `expires_at`), so a lease renewed after `list_expired` survives the
+    /// reaper. Returns `true` if removed, `false` if it changed or is gone.
+    async fn remove_if_unchanged(&self, record: &LeaseRecord) -> Result<bool, Error>;
 }
 
 /// Why a lease was reclaimed — broadcast alongside the record so cascade

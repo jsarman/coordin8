@@ -134,7 +134,7 @@ coordin8 registry watch --match interface=WeatherStation
 ```bash
 mise install       # install pinned tool versions
 mise r djinn       # start Djinn locally
-mise r test        # run all tests
+mise r test        # Rust tests (Go SDK and CLI have none yet)
 mise r up          # start full Docker stack
 ```
 
