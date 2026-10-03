@@ -19,10 +19,7 @@ use tokio::task::JoinHandle;
 
 use coordin8_bootstrap::self_register;
 use coordin8_djinn::services::{run_proxy_on_listener, run_registry_on_listener};
-use coordin8_proto::coordin8::{
-    proxy_service_client::ProxyServiceClient, registry_service_client::RegistryServiceClient,
-    OpenRequest,
-};
+use coordin8_proto::coordin8::{proxy_service_client::ProxyServiceClient, OpenRequest};
 
 async fn ephemeral_listener() -> (tokio::net::TcpListener, u16) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -95,12 +92,12 @@ async fn split_proxy_forwards_through_remote_registry() {
         .connect()
         .await
         .expect("dial Registry from test");
-    let registry_client = RegistryServiceClient::new(coordin8_observability::wrap_traced_channel(
+    let registry_channel = coordin8_observability::wrap_traced_channel(
         channel,
         &coordin8_auth::ClientAuthConfig::trust(),
-    ));
+    );
     let _handle = self_register(
-        registry_client,
+        registry_channel,
         "SplitProxyEcho",
         HashMap::new(),
         "127.0.0.1",

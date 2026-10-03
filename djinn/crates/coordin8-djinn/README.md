@@ -47,7 +47,27 @@ mise r djinn                           # equivalent to `cd djinn && cargo run`
 | `COORDIN8_LEASE_PREFERRED_TTL`   | (set in core) | default suggested TTL |
 | `PROXY_BIND_HOST`                | `127.0.0.1` | bind for forwarded ports — use `0.0.0.0` in containers |
 | `PROXY_PORT_MIN` / `PROXY_PORT_MAX` | unset | fixed forwarded-port range |
+| `COORDIN8_SHUTDOWN_GRACE_SECS`   | `20`    | graceful-shutdown budget (see below) |
 | `RUST_LOG`                       | `coordin8=info` | tracing filter |
+
+## Graceful shutdown
+
+On SIGTERM or SIGINT the Djinn (bundled and every split subcommand) will:
+flip its gRPC health status to NOT_SERVING (split mode), cancel its own
+Registry self-registrations so clients stop resolving it immediately rather
+than after the 30s self-lease TTL, stop accepting connections, drain in-flight
+RPCs (including 2PC commits), and exit 0. The whole sequence is bounded by
+`COORDIN8_SHUTDOWN_GRACE_SECS` (default `20`, kept under the usual 30s
+Docker/k8s grace period); if RPCs are still in flight when it elapses the
+process logs an error and exits non-zero. Long-lived server streams
+(Registry `Watch`, `LeaseService.WatchExpiry`, EventMgr `Receive`, Space
+`Notify`) are ended when draining starts, with `UNAVAILABLE` ("server shutting
+down") so client reconnect loops move on rather than stalling the drain.
+
+Docker stops a container after 10s by default, so the compose files set
+`stop_grace_period: 25s` on the Djinn services (above the 20s default grace;
+the k8s default `terminationGracePeriodSeconds` is 30s). If you lower the
+Docker/k8s timeout, lower `COORDIN8_SHUTDOWN_GRACE_SECS` to stay under it.
 
 ## Notes
 

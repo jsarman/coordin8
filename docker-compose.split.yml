@@ -35,6 +35,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.djinn
+    # Longer than COORDIN8_SHUTDOWN_GRACE_SECS (default 20) so each service can
+    # finish its graceful drain; Docker's own default is only 10s.
+    stop_grace_period: 25s
     container_name: coordin8-registry
     command: ["registry"]
     environment:
@@ -55,6 +58,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.djinn
+    stop_grace_period: 25s
     container_name: coordin8-event
     command: ["event"]
     environment:
@@ -76,6 +80,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.djinn
+    stop_grace_period: 25s
     container_name: coordin8-space
     command: ["space"]
     environment:
@@ -97,6 +102,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.djinn
+    stop_grace_period: 25s
     container_name: coordin8-txn
     command: ["txn"]
     environment:
@@ -120,6 +126,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.djinn
+    stop_grace_period: 25s
     container_name: coordin8-proxy
     command: ["proxy"]
     environment:

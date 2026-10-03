@@ -26,6 +26,19 @@ dependencies {
     api "com.google.protobuf:protobuf-java:${protobufVersion}"
 
     compileOnly 'javax.annotation:javax.annotation-api:1.3.2'
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation "io.grpc:grpc-inprocess:${grpcVersion}"
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
 }
 
 sourceSets {

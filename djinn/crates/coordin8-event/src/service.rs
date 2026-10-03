@@ -54,6 +54,7 @@ pub struct EventServiceImpl {
     /// EventMgr's own listening address.
     grantor_host: String,
     grantor_port: u16,
+    shutdown: coordin8_core::shutdown::ShutdownSignal,
 }
 
 impl EventServiceImpl {
@@ -66,7 +67,16 @@ impl EventServiceImpl {
             manager,
             grantor_host: grantor_host.into(),
             grantor_port,
+            shutdown: Default::default(),
         }
+    }
+
+    /// End this service's long-lived server streams when `shutdown` fires
+    /// (graceful drain), with `UNAVAILABLE` so client reconnect loops
+    /// reconnect elsewhere instead of seeing a clean EOF.
+    pub fn with_shutdown(mut self, shutdown: coordin8_core::shutdown::ShutdownSignal) -> Self {
+        self.shutdown = shutdown;
+        self
     }
 
     fn lease_to_proto(&self, lease: coordin8_core::LeaseRecord) -> Lease {
@@ -315,7 +325,11 @@ impl EventService for EventServiceImpl {
             first_batch,
         ));
 
-        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+        #[allow(clippy::result_large_err)] // tonic::Status is the gRPC error type
+        let stream = self.shutdown.end_stream(ReceiverStream::new(rx), || {
+            Err(Status::unavailable("server shutting down"))
+        });
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn emit(&self, req: Request<EmitRequest>) -> Result<Response<()>, Status> {
