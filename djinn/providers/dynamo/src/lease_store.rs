@@ -3,13 +3,16 @@ use aws_sdk_dynamodb::{types::AttributeValue, Client};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use coordin8_core::{Error, LeaseRecord, LeaseStore, LEASE_FOREVER};
+use coordin8_core::{checked_expiry, Error, LeaseRecord, LeaseStore, LEASE_FOREVER};
 
 use crate::table::{ensure_lease_table, RESOURCE_GSI};
 
 pub struct DynamoLeaseStore {
     client: Client,
     table_name: String,
+    /// Max items evaluated per scan page (DynamoDB `Limit`). `None` = server
+    /// default (1MB pages). Exists so tests can force pagination cheaply.
+    scan_page_limit: Option<i32>,
 }
 
 impl DynamoLeaseStore {
@@ -21,7 +24,15 @@ impl DynamoLeaseStore {
         Self {
             client,
             table_name: table_name.into(),
+            scan_page_limit: None,
         }
+    }
+
+    /// Cap the number of items evaluated per `list_expired` scan page.
+    /// Intended for tests that need to exercise pagination.
+    pub fn with_scan_page_limit(mut self, limit: i32) -> Self {
+        self.scan_page_limit = Some(limit);
+        self
     }
 
     /// Create the backing table if `COORDIN8_AUTO_CREATE_TABLES` is set to
@@ -55,6 +66,16 @@ fn ttl_epoch(expires_at: &DateTime<Utc>, ttl_seconds: u64) -> Option<i64> {
     } else {
         Some(expires_at.timestamp())
     }
+}
+
+/// Expiry for a new grant/renewal; FOREVER maps to the far-future sentinel and
+/// unrepresentable TTLs are an error rather than a panic.
+fn expiry_for(from: DateTime<Utc>, ttl_secs: u64) -> Result<DateTime<Utc>, Error> {
+    if ttl_secs == LEASE_FOREVER {
+        return Ok(DateTime::<Utc>::MAX_UTC);
+    }
+    checked_expiry(from, ttl_secs)
+        .ok_or_else(|| Error::Storage(format!("lease ttl out of range: {ttl_secs}s")))
 }
 
 fn record_from_item(
@@ -109,11 +130,7 @@ fn record_from_item(
 impl LeaseStore for DynamoLeaseStore {
     async fn create(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error> {
         let now = Utc::now();
-        let expires_at = if ttl_secs == LEASE_FOREVER {
-            DateTime::<Utc>::MAX_UTC
-        } else {
-            now + chrono::Duration::seconds(ttl_secs as i64)
-        };
+        let expires_at = expiry_for(now, ttl_secs)?;
 
         let record = LeaseRecord {
             lease_id: Uuid::new_v4().to_string(),
@@ -160,11 +177,7 @@ impl LeaseStore for DynamoLeaseStore {
             .await?
             .ok_or_else(|| Error::LeaseNotFound(lease_id.to_string()))?;
 
-        let new_expires_at = if ttl_secs == LEASE_FOREVER {
-            DateTime::<Utc>::MAX_UTC
-        } else {
-            Utc::now() + chrono::Duration::seconds(ttl_secs as i64)
-        };
+        let new_expires_at = expiry_for(Utc::now(), ttl_secs)?;
 
         let (update_expr, ttl_val) = match ttl_epoch(&new_expires_at, ttl_secs) {
             Some(epoch) => (
@@ -192,9 +205,15 @@ impl LeaseStore for DynamoLeaseStore {
             req = req.expression_attribute_values(":ttl", AttributeValue::N(epoch.to_string()));
         }
 
-        req.send()
-            .await
-            .map_err(|e| Error::Storage(format!("update_item failed: {e}")))?;
+        req.send().await.map_err(|e| {
+            if e.as_service_error()
+                .is_some_and(|se| se.is_conditional_check_failed_exception())
+            {
+                Error::LeaseNotFound(lease_id.to_string())
+            } else {
+                Error::Storage(format!("update_item failed: {e}"))
+            }
+        })?;
 
         Ok(LeaseRecord {
             expires_at: new_expires_at,
@@ -250,33 +269,80 @@ impl LeaseStore for DynamoLeaseStore {
     }
 
     async fn list_expired(&self) -> Result<Vec<LeaseRecord>, Error> {
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
+        let mut records = Vec::new();
+        let mut last_key: Option<std::collections::HashMap<String, AttributeValue>> = None;
 
-        let resp = self
-            .client
-            .scan()
-            .table_name(&self.table_name)
-            // Exclude FOREVER leases (ttl_seconds = 0) and only return records
-            // whose expires_at is in the past.
-            .filter_expression("expires_at <= :now AND ttl_seconds <> :zero")
-            .expression_attribute_values(":now", AttributeValue::S(now))
-            .expression_attribute_values(":zero", AttributeValue::N("0".to_string()))
-            .send()
-            .await
-            .map_err(|e| Error::Storage(format!("scan failed: {e}")))?;
+        loop {
+            // Pre-filter on the numeric `ttl` epoch. FOREVER leases have no
+            // `ttl` attribute, so they are excluded. The epoch is truncated to
+            // seconds, so this is a superset; `is_expired()` below is the
+            // final authority.
+            let mut req = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .filter_expression("attribute_exists(#ttl_field) AND #ttl_field <= :now")
+                .expression_attribute_names("#ttl_field", "ttl")
+                .expression_attribute_values(
+                    ":now",
+                    AttributeValue::N(now.timestamp().to_string()),
+                );
+            if let Some(limit) = self.scan_page_limit {
+                req = req.limit(limit);
+            }
+            if let Some(ref lek) = last_key {
+                req = req.set_exclusive_start_key(Some(lek.clone()));
+            }
 
-        let records = resp
-            .items
-            .unwrap_or_default()
-            .into_iter()
-            .map(|item| record_from_item(&item))
-            .collect::<Result<Vec<_>, _>>()?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| Error::Storage(format!("scan failed: {e}")))?;
+
+            for item in resp.items.unwrap_or_default() {
+                let record = record_from_item(&item)?;
+                if record.is_expired() {
+                    records.push(record);
+                }
+            }
+
+            last_key = resp.last_evaluated_key;
+            if last_key.is_none() {
+                break;
+            }
+        }
 
         Ok(records)
     }
 
-    async fn remove(&self, lease_id: &str) -> Result<(), Error> {
-        self.cancel(lease_id).await
+    async fn remove_if_unchanged(&self, record: &LeaseRecord) -> Result<bool, Error> {
+        let result = self
+            .client
+            .delete_item()
+            .table_name(&self.table_name)
+            .key("lease_id", AttributeValue::S(record.lease_id.clone()))
+            .condition_expression("expires_at = :listed")
+            .expression_attribute_values(
+                ":listed",
+                AttributeValue::S(record.expires_at.to_rfc3339()),
+            )
+            .send()
+            .await;
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let is_condition_check = e
+                    .as_service_error()
+                    .is_some_and(|se| se.is_conditional_check_failed_exception());
+                if is_condition_check {
+                    Ok(false)
+                } else {
+                    Err(Error::Storage(format!("delete_item failed: {e}")))
+                }
+            }
+        }
     }
 }
 
@@ -408,6 +474,98 @@ mod tests {
             "renewed expires_at should be later"
         );
 
+        teardown(&client, &table_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn forever_lease_not_listed_even_when_others_expired() {
+        let (store, table_name, client) = setup().await;
+
+        let forever = store
+            .create("f", coordin8_core::LEASE_FOREVER)
+            .await
+            .unwrap();
+        let short = store.create("s", 1).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        let expired = store.list_expired().await.unwrap();
+        assert!(expired.iter().any(|r| r.lease_id == short.lease_id));
+        assert!(!expired.iter().any(|r| r.lease_id == forever.lease_id));
+
+        teardown(&client, &table_name).await;
+    }
+
+    /// Pagination: a scan page limit of 2 with 7 expired leases (plus a live
+    /// and a FOREVER lease interleaved) forces multiple pages, some of which
+    /// contain no matching items.
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn list_expired_paginates() {
+        let (store, table_name, client) = setup().await;
+        let store = store.with_scan_page_limit(2);
+
+        let mut expired_ids = Vec::new();
+        for i in 0..7 {
+            expired_ids.push(store.create(&format!("e-{i}"), 1).await.unwrap().lease_id);
+        }
+        let live = store.create("live", 3600).await.unwrap();
+        let forever = store
+            .create("forever", coordin8_core::LEASE_FOREVER)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        let listed: Vec<String> = store
+            .list_expired()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.lease_id)
+            .collect();
+        assert_eq!(listed.len(), 7, "listed: {listed:?}");
+        for id in &expired_ids {
+            assert!(listed.contains(id));
+        }
+        assert!(!listed.contains(&live.lease_id));
+        assert!(!listed.contains(&forever.lease_id));
+
+        teardown(&client, &table_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn remove_if_unchanged_is_conditional() {
+        let (store, table_name, client) = setup().await;
+
+        let record = store.create("cond", 1).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let expired = store.list_expired().await.unwrap();
+        let listed = expired
+            .iter()
+            .find(|r| r.lease_id == record.lease_id)
+            .unwrap()
+            .clone();
+
+        // Renewed after listing: must not be removed.
+        store.renew(&record.lease_id, 60).await.unwrap();
+        assert!(!store.remove_if_unchanged(&listed).await.unwrap());
+        assert!(store.get(&record.lease_id).await.unwrap().is_some());
+
+        // Unchanged: removed. Then already gone: false.
+        let current = store.get(&record.lease_id).await.unwrap().unwrap();
+        assert!(store.remove_if_unchanged(&current).await.unwrap());
+        assert!(store.get(&record.lease_id).await.unwrap().is_none());
+        assert!(!store.remove_if_unchanged(&current).await.unwrap());
+
+        teardown(&client, &table_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn huge_ttl_does_not_panic() {
+        let (store, table_name, client) = setup().await;
+        assert!(store.create("huge", u64::MAX - 1).await.is_err());
         teardown(&client, &table_name).await;
     }
 }

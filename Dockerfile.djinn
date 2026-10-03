@@ -21,12 +21,16 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home --shell /usr/sbin/nologin coordin8
 
 COPY --from=builder /build/djinn/target/release/djinn /usr/local/bin/djinn
 
-# LeaseMgr | Registry | Proxy
-EXPOSE 9001 9002 9003
+# Registry | Proxy | TransactionMgr | EventMgr | Space | proxy forwarding range
+# (leasing has no port of its own — each service mounts LeaseService on its own)
+EXPOSE 9002 9003 9004 9005 9006 9100-9200
+
+USER coordin8
 
 ENV RUST_LOG=info
 

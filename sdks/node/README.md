@@ -41,6 +41,8 @@ npm run build         # tsc → dist/src
 npm run proto         # regenerate ts-proto stubs from ../../proto
 ```
 
+The Node SDK has no test suite yet.
+
 ## Gotchas
 
 - `tsconfig.json` has `rootDir: "."` so output lands in `dist/src/`. `package.json` `main` and `types` point to `dist/src/index.{js,d.ts}` — don't move these without updating both.

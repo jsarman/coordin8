@@ -1,3 +1,8 @@
+---
+name: registry-provider
+description: Domain knowledge for the RegistryStore trait and its InMemory/DynamoDB providers (capability entries, lease index, template matching boundary). Use when implementing or modifying RegistryStore, registry storage or the coordin8_registry table, or Registry lease-expiry cleanup.
+---
+
 # registry-provider
 
 Domain knowledge for implementing and modifying RegistryStore providers. Load this skill when working on registry-related storage backends.
@@ -40,7 +45,7 @@ The InMemory implementation (`providers/local/src/registry_store.rs`) is the ref
 ### insert
 - Stores the entry keyed by `capability_id`
 - Maintains a lease index: `lease_id → capability_id` for fast expiry cleanup
-- Overwrites if `capability_id` already exists (no upsert error)
+- Overwrites if `capability_id` already exists (no upsert error). Note: InMemory does not clear the OLD `lease_index` entry when overwriting with a different `lease_id`, so a stale lease_id can still resolve; Dynamo has no such index (GSI is derived from the row). Don't rely on either behavior; callers insert fresh capability_ids.
 
 ### update
 - If `capability_id` exists: update the entry, update lease index if `lease_id` changed, return `Some(entry)`
@@ -76,7 +81,7 @@ The registry store never returns `ResourceNotFound` — it signals "not found" t
 
 ## DynamoDB Table Schema
 
-Table: `coordin8_registry`
+Table: `coordin8_registry` (`REGISTRY_TABLE`; created by `init()` only when `COORDIN8_AUTO_CREATE_TABLES=true|1`, otherwise provisioned by `infra/dynamodb-tables.cfn.yml`)
 
 | Attribute | Type | Role |
 |-----------|------|------|
@@ -101,7 +106,8 @@ GSI: `lease_id-index` (PK: `lease_id`, projection: ALL) — for `remove_by_lease
 
 - Each registry entry has a `lease_id` referencing a lease in the LeaseStore
 - The `resource_id` convention for registry leases is `registry:{capability_id}`
-- When a lease expires, the expiry cascade in `main.rs` calls `registry_index.unregister_by_lease(&lease.lease_id)` which calls through to `RegistryStore::remove_by_lease`
+- Registry grants these leases from its OWN embedded `LeaseManager` (namespace `registry`; Dynamo lease table `coordin8_leases_registry`) — not a shared lease service.
+- When a lease is reclaimed (expiry or explicit cancel), the cascade spawned in `coordin8-djinn/src/services.rs` (`spawn_cascade`, in `run_all` and `run_registry_on_listener`) calls `registry_index.unregister_by_lease(&record.lease_id)` which calls through to `RegistryStore::remove_by_lease`, then broadcasts the removal to watchers
 - The RegistryIndex (in `coordin8-registry` crate) wraps the RegistryStore and adds template matching logic
 - Template matching (contains:, starts_with:, exact, Any) happens in the RegistryIndex, NOT in the store — the store is just CRUD
 
@@ -113,7 +119,9 @@ GSI: `lease_id-index` (PK: `lease_id`, projection: ALL) — for `remove_by_lease
 | `djinn/crates/coordin8-core/src/error.rs` | Error enum |
 | `djinn/crates/coordin8-registry/` | RegistryIndex + template matcher (consumes RegistryStore) |
 | `djinn/providers/local/src/registry_store.rs` | InMemory reference implementation |
-| `djinn/providers/dynamo/src/registry_store.rs` | DynamoDB implementation (to be created) |
+| `djinn/providers/dynamo/src/registry_store.rs` | DynamoDB implementation (`DynamoRegistryStore::new` / `with_table`, `init()`) |
+| `djinn/crates/coordin8-djinn/src/services.rs` | `registry_store_from_env()` provider selection + expiry cascade |
+| `djinn/providers/dynamo/src/table.rs` | `REGISTRY_TABLE`, `REGISTRY_LEASE_GSI`, `ensure_registry_table` |
 
 ## Test Expectations
 
@@ -128,4 +136,4 @@ Every provider must pass these scenarios:
 8. **list_all** — insert multiple, verify all returned
 9. **update changes lease_id** — update with new lease_id, verify old lease_id no longer resolves via get_by_lease
 
-DynamoDB tests use `#[ignore]` and unique table names per run.
+DynamoDB tests use `#[ignore]` and unique table names per run, so CI never runs them: run `cd djinn && cargo test -p coordin8-provider-dynamo registry_store -- --ignored` against MiniStack.
