@@ -64,6 +64,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Test
+        run: go test -race ./...
+
   go-sdk:
     name: Go SDK
     runs-on: ubuntu-latest
@@ -87,6 +90,8 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Test
+        run: go test -race ./...
   dynamo-provider:
     name: Dynamo provider (MiniStack)
     runs-on: ubuntu-latest
