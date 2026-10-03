@@ -226,6 +226,46 @@ impl TxnStore for DynamoTxnStore {
         }
     }
 
+    async fn update_state_if(
+        &self,
+        txn_id: &str,
+        expected: TransactionState,
+        new: TransactionState,
+    ) -> Result<bool, Error> {
+        let result = self
+            .client
+            .update_item()
+            .table_name(&self.table_name)
+            .key("txn_id", AttributeValue::S(txn_id.to_string()))
+            .update_expression("SET #s = :new")
+            .expression_attribute_names("#s", "state")
+            .expression_attribute_values(":new", AttributeValue::S(state_to_str(&new).to_string()))
+            .expression_attribute_values(
+                ":exp",
+                AttributeValue::S(state_to_str(&expected).to_string()),
+            )
+            .condition_expression("#s = :exp")
+            .send()
+            .await;
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let is_condition_check = e
+                    .as_service_error()
+                    .is_some_and(|se| se.is_conditional_check_failed_exception());
+                if !is_condition_check {
+                    return Err(Error::Storage(format!("update_item failed: {e}")));
+                }
+                // Condition failed: either wrong state or missing item.
+                match self.get(txn_id).await? {
+                    Some(_) => Ok(false),
+                    None => Err(Error::TransactionNotFound(txn_id.to_string())),
+                }
+            }
+        }
+    }
+
     async fn add_participant(
         &self,
         txn_id: &str,
@@ -237,11 +277,16 @@ impl TxnStore for DynamoTxnStore {
             .table_name(&self.table_name)
             .key("txn_id", AttributeValue::S(txn_id.to_string()))
             .update_expression("SET participants = list_append(participants, :p)")
+            .expression_attribute_names("#s", "state")
             .expression_attribute_values(
                 ":p",
                 AttributeValue::L(vec![participant_to_av(&participant)]),
             )
-            .condition_expression("attribute_exists(txn_id)")
+            .expression_attribute_values(
+                ":active",
+                AttributeValue::S(state_to_str(&TransactionState::Active).to_string()),
+            )
+            .condition_expression("#s = :active")
             .send()
             .await;
 
@@ -251,10 +296,12 @@ impl TxnStore for DynamoTxnStore {
                 let is_condition_check = e
                     .as_service_error()
                     .is_some_and(|se| se.is_conditional_check_failed_exception());
-                if is_condition_check {
-                    Err(Error::TransactionNotFound(txn_id.to_string()))
-                } else {
-                    Err(Error::Storage(format!("update_item failed: {e}")))
+                if !is_condition_check {
+                    return Err(Error::Storage(format!("update_item failed: {e}")));
+                }
+                match self.get(txn_id).await? {
+                    Some(_) => Err(Error::TransactionTerminal(txn_id.to_string())),
+                    None => Err(Error::TransactionNotFound(txn_id.to_string())),
                 }
             }
         }
@@ -464,6 +511,93 @@ mod tests {
         let ids: Vec<&str> = all.iter().map(|r| r.txn_id.as_str()).collect();
         assert!(ids.contains(&"txn-a"));
         assert!(ids.contains(&"txn-b"));
+
+        teardown(&client, &table_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn update_state_if_cas() {
+        let (store, table_name, client) = setup().await;
+
+        store
+            .create(make_record("txn-cas", "lease-cas"))
+            .await
+            .unwrap();
+        assert!(!store
+            .update_state_if(
+                "txn-cas",
+                TransactionState::Voting,
+                TransactionState::Committed
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store.get("txn-cas").await.unwrap().unwrap().state,
+            TransactionState::Active
+        );
+        assert!(store
+            .update_state_if(
+                "txn-cas",
+                TransactionState::Active,
+                TransactionState::Voting
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store.get("txn-cas").await.unwrap().unwrap().state,
+            TransactionState::Voting
+        );
+        assert!(matches!(
+            store
+                .update_state_if(
+                    "missing",
+                    TransactionState::Active,
+                    TransactionState::Voting
+                )
+                .await,
+            Err(Error::TransactionNotFound(_))
+        ));
+
+        teardown(&client, &table_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn add_participant_rejected_when_not_active() {
+        let (store, table_name, client) = setup().await;
+
+        store
+            .create(make_record("txn-na", "lease-na"))
+            .await
+            .unwrap();
+        let p = || ParticipantRecord {
+            endpoint: "localhost:8080".to_string(),
+            crash_count: 0,
+        };
+        store.add_participant("txn-na", p()).await.unwrap();
+        store
+            .update_state("txn-na", TransactionState::Voting)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.add_participant("txn-na", p()).await,
+            Err(Error::TransactionTerminal(_))
+        ));
+        assert!(matches!(
+            store.add_participant("missing", p()).await,
+            Err(Error::TransactionNotFound(_))
+        ));
+        assert_eq!(
+            store
+                .get("txn-na")
+                .await
+                .unwrap()
+                .unwrap()
+                .participants
+                .len(),
+            1
+        );
 
         teardown(&client, &table_name).await;
     }
