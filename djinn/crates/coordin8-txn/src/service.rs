@@ -17,6 +17,8 @@ use crate::manager::TxnManager;
 fn map_err(e: coordin8_core::Error) -> Status {
     match e {
         coordin8_core::Error::Unavailable(_) => Status::unavailable(e.to_string()),
+        coordin8_core::Error::InvalidArgument(_) => Status::invalid_argument(e.to_string()),
+        coordin8_core::Error::PermissionDenied(_) => Status::permission_denied(e.to_string()),
         coordin8_core::Error::TransactionCommitInProgress(_) => {
             Status::failed_precondition(e.to_string())
         }

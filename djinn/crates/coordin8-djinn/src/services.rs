@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::broadcast;
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{info, warn};
 
 use coordin8_auth::AuthConfig;
 use coordin8_bootstrap::{self_register, RemoteCapabilityResolver, RemoteTxnEnlister};
@@ -42,12 +42,43 @@ use coordin8_proxy::{LocalCapabilityResolver, ProxyConfig, ProxyManager, ProxySe
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
 use coordin8_space::{SpaceManager, SpaceParticipantService, SpaceServiceImpl};
-use coordin8_txn::{LocalTxnEnlister, TxnManager, TxnServiceImpl};
+use coordin8_txn::{
+    LocalTxnEnlister, ParticipantAllowlist, TxnManager, TxnServiceImpl, ALLOW_ENV_VAR,
+};
 use tonic_health::ServingStatus;
 
 // ── Env var helpers (pub for tests) ──────────────────────────────────────────
 
 /// Read `COORDIN8_BIND_ADDR`, defaulting to `0.0.0.0:0` (OS-assigned port).
+/// Build TransactionMgr's participant-endpoint allowlist from
+/// `COORDIN8_TXN_PARTICIPANT_ALLOW` (fail-fast on invalid entries). Warns
+/// loudly when JWT auth is on and no allowlist is configured. In bundled mode
+/// pass the Djinn's own Space participant endpoint as `implicit` so Space's
+/// auto-enlist keeps working under any allowlist.
+fn txn_participant_allowlist(
+    auth_enabled: bool,
+    implicit: Option<&str>,
+) -> Result<ParticipantAllowlist> {
+    let allowlist = ParticipantAllowlist::from_env().map_err(|e| anyhow::anyhow!(e))?;
+    if auth_enabled && allowlist.is_allow_all() {
+        warn!(
+            "{ALLOW_ENV_VAR} is not set while JWT auth is enabled: TransactionMgr will dial \
+             ANY participant endpoint a caller enlists and attach a freshly minted service \
+             token to it. Any caller that can reach Enlist can use this to probe internal \
+             hosts (SSRF) or to capture a valid token by enlisting an endpoint it controls. \
+             Set {ALLOW_ENV_VAR} to a comma-separated list of hostnames, *.suffix wildcards, \
+             IPs or CIDRs (optional :port) covering your participants (including Space's \
+             advertised endpoint in split mode)."
+        );
+    }
+    match implicit {
+        Some(ep) => allowlist
+            .with_implicit_endpoint(ep)
+            .map_err(|e| anyhow::anyhow!(e)),
+        None => Ok(allowlist),
+    }
+}
+
 pub fn bind_addr() -> String {
     std::env::var("COORDIN8_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:0".to_string())
 }
@@ -611,11 +642,13 @@ pub async fn run_all() -> Result<()> {
     let (txn_lease_manager, lease_svc_for_txn) =
         embedded_landlord("txn", &host, 9004, &auth_config, &shutdown_sig).await?;
     let txn_leasing: Arc<dyn Leasing> = txn_lease_manager.clone();
-    let txn_manager = Arc::new(TxnManager::with_client_auth(
-        txn_store,
-        txn_leasing,
-        auth_config.client_config("txn"),
-    ));
+    // Bundled mode: Space's own participant endpoint is always allowed.
+    let txn_allowlist =
+        txn_participant_allowlist(auth_config.enabled(), Some(&format!("{host}:9006")))?;
+    let txn_manager = Arc::new(
+        TxnManager::with_client_auth(txn_store, txn_leasing, auth_config.client_config("txn"))
+            .with_participant_allowlist(txn_allowlist),
+    );
 
     {
         let txn_expiry_mgr = Arc::clone(&txn_manager);
@@ -1304,11 +1337,12 @@ pub async fn run_txn_on_listener_until(
     let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     let txn_store = txn_store_from_env().await?;
-    let txn_manager = Arc::new(TxnManager::with_client_auth(
-        txn_store,
-        leasing,
-        auth_config.client_config("txn"),
-    ));
+    // Split mode: Space's advertised endpoint must be covered by the allowlist.
+    let txn_allowlist = txn_participant_allowlist(auth_config.enabled(), None)?;
+    let txn_manager = Arc::new(
+        TxnManager::with_client_auth(txn_store, leasing, auth_config.client_config("txn"))
+            .with_participant_allowlist(txn_allowlist),
+    );
 
     {
         let expiry_txn_mgr = Arc::clone(&txn_manager);

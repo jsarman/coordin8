@@ -47,6 +47,12 @@ pub enum Error {
     #[error("internal error: {0}")]
     Internal(String),
 
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
     #[error("unavailable: {0}")]
     Unavailable(String),
 }

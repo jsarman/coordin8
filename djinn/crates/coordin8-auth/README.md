@@ -20,4 +20,6 @@ A service configured this way logs a `warn!` at startup naming this exact precon
 - **No mTLS, no transport encryption.** JWT auth protects integrity (a token can't be forged without the secret); without TLS, the token itself is visible on the wire and a captured token is replayable until it expires.
 - **Authentication only, no RBAC.** A valid token from any configured `sub` can call any RPC.
 
+- **TransactionMgr dials caller-supplied endpoints with a service token.** `Enlist` takes a `participant_endpoint` and the 2PC coordinator later connects to it with a self-minted service JWT. With auth on and no allowlist, anyone who can call `Enlist` can capture a valid token (or SSRF internal hosts). Set `COORDIN8_TXN_PARTICIPANT_ALLOW` (see the `coordin8-djinn` README); the Djinn warns at startup when auth is on and it is unset.
+
 See the PRD's Non-Goals section for why each of these is deferred rather than fixed here.
