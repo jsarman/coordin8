@@ -47,8 +47,20 @@ mise r djinn                           # equivalent to `cd djinn && cargo run`
 | `COORDIN8_LEASE_PREFERRED_TTL`   | (set in core) | default suggested TTL |
 | `PROXY_BIND_HOST`                | `127.0.0.1` | bind for forwarded ports — use `0.0.0.0` in containers |
 | `PROXY_PORT_MIN` / `PROXY_PORT_MAX` | unset | fixed forwarded-port range |
+| `COORDIN8_TXN_PARTICIPANT_ALLOW` | unset   | TransactionMgr participant-endpoint allowlist (see below) |
 | `COORDIN8_SHUTDOWN_GRACE_SECS`   | `20`    | graceful-shutdown budget (see below) |
 | `RUST_LOG`                       | `coordin8=info` | tracing filter |
+
+## TransactionMgr participant allowlist
+
+`Enlist` stores a caller-supplied `host:port` that TransactionMgr later dials during 2PC, attaching a freshly minted service JWT when auth is on. Unrestricted, that lets any caller probe internal hosts (SSRF) or capture a valid token by enlisting an endpoint it controls.
+
+`COORDIN8_TXN_PARTICIPANT_ALLOW` is a comma-separated list of: exact hostname (`space`), wildcard suffix (`*.internal`, matches `a.internal` but not `internal`), IPv4/IPv6 literal, or CIDR (`10.0.0.0/8`, `fd00::/8`). Non-CIDR entries may take a `:port` (`space:9006`, `[::1]:9006`); without one, any port matches. Unset/empty allows everything (the default; a loud startup warning is logged if JWT auth is enabled). An invalid entry fails startup.
+
+- Matching is on the literal host string; **no DNS resolution** is done. Allowing a hostname trusts whatever it resolves to; CIDR entries only match IP-literal endpoints.
+- A non-matching endpoint is rejected with `PERMISSION_DENIED` (never stored or dialed); a malformed endpoint with `INVALID_ARGUMENT` (always, even with no allowlist).
+- Bundled mode: the Djinn's own Space endpoint (`{advertise_host}:9006`) is implicitly allowed.
+- Split mode: Space enlists with its advertised `COORDIN8_ADVERTISE_HOST:<port>`; the allowlist must cover it, along with every application participant.
 
 ## Graceful shutdown
 

@@ -8,6 +8,7 @@ use futures::future::join_all;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
+use crate::allowlist::ParticipantAllowlist;
 use coordin8_core::{
     Error, LeaseRecord, Leasing, ParticipantRecord, PrepareVote, TransactionRecord,
     TransactionState, TxnStore,
@@ -20,6 +21,7 @@ pub struct TxnManager {
     store: Arc<dyn TxnStore>,
     lease_manager: Arc<dyn Leasing>,
     client_auth: ClientAuthConfig,
+    allowlist: ParticipantAllowlist,
 }
 
 impl TxnManager {
@@ -40,7 +42,15 @@ impl TxnManager {
             store,
             lease_manager,
             client_auth,
+            allowlist: ParticipantAllowlist::allow_all(),
         }
+    }
+
+    /// Restrict which `participant_endpoint`s `enlist` accepts (SSRF /
+    /// token-leak guard — see [`ParticipantAllowlist`]). Default is allow-all.
+    pub fn with_participant_allowlist(mut self, allowlist: ParticipantAllowlist) -> Self {
+        self.allowlist = allowlist;
+        self
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -69,6 +79,9 @@ impl TxnManager {
         endpoint: String,
         crash_count: u64,
     ) -> Result<(), Error> {
+        // Well-formedness + allowlist BEFORE anything is stored: a rejected
+        // endpoint is never persisted and therefore never dialed.
+        self.allowlist.check(&endpoint)?;
         let participant = ParticipantRecord {
             endpoint: endpoint.clone(),
             crash_count,

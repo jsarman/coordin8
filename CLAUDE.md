@@ -198,6 +198,7 @@ CI (`.github/workflows/ci.yml`) runs: Rust `cargo build --all`, `cargo test --al
 | `MAX_LEASE_TTL`, `PREFERRED_LEASE_TTL` | LeaseManager | Seconds (max may be `FOREVER`); defaults 3600 / 300; per-service override `<REGISTRY\|EVENT\|SPACE\|TXN>_MAX_LEASE_TTL` etc. |
 | `PROXY_BIND_HOST`, `PROXY_PORT_MIN/MAX` | Proxy | Forwarding bind address and fixed port range |
 | `COORDIN8_JWT_SECRET` | all services | Enables gRPC JWT (HS256) auth; unset = auth off. `COORDIN8_AUTH_VERIFY_SIGNATURE=false` skips signature checks |
+| `COORDIN8_TXN_PARTICIPANT_ALLOW` | TransactionMgr | Opt-in allowlist for `Enlist` participant endpoints (SSRF / token-leak guard). Comma-separated: hostname, `*.suffix`, IP literal, CIDR; optional `:port` on non-CIDR entries. No DNS resolution. Unset = allow all (warns if JWT auth is on). Invalid entry = startup error. Bundled mode always allows its own Space endpoint; split mode must list Space's advertised `host:port` |
 | `COORDIN8_TOKEN` | CLI | Bearer token (`coordin8 auth mint-token`; CLI also `--token`) |
 | `COORDIN8_LOG_FORMAT` | all services | `json` for one-object-per-line logs (default pretty); level via `RUST_LOG` |
 | `COORDIN8_OTEL_ENDPOINT`, `COORDIN8_OTEL_SAMPLE_RATIO` | all services | OTLP/gRPC trace export (unset = none); sample ratio default 1.0 |
