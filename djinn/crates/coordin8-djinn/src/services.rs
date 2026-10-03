@@ -1,6 +1,8 @@
 //! Djinn service boot functions.
 //!
-//! Each function binds a gRPC server and blocks until the listener closes.
+//! Each function binds a gRPC server and blocks until the listener closes or
+//! the process receives SIGTERM/SIGINT, then shuts down gracefully (see
+//! `shutdown_signal` / `COORDIN8_SHUTDOWN_GRACE_SECS`).
 //! Use `tokio::spawn` in tests to run multiple services concurrently.
 //!
 //! Leasing is distributed, not centralized: Registry, Space, EventMgr, and
@@ -68,9 +70,7 @@ pub fn advertise_host() -> String {
 async fn dial_registry_authed(
     registry_url: &str,
     client_auth: &coordin8_auth::ClientAuthConfig,
-) -> coordin8_proto::coordin8::registry_service_client::RegistryServiceClient<
-    coordin8_observability::TracedAuthedChannel,
-> {
+) -> coordin8_observability::TracedAuthedChannel {
     loop {
         match tonic::transport::Channel::from_shared(registry_url.to_string())
             .expect("registry_url is always a valid URL by this point")
@@ -78,9 +78,7 @@ async fn dial_registry_authed(
             .await
         {
             Ok(channel) => {
-                return coordin8_proto::coordin8::registry_service_client::RegistryServiceClient::new(
-                    coordin8_observability::wrap_traced_channel(channel, client_auth),
-                )
+                return coordin8_observability::wrap_traced_channel(channel, client_auth)
             }
             Err(e) => {
                 tracing::warn!("registry dial ({registry_url}) failed: {e}, retrying in 200ms");
@@ -106,9 +104,9 @@ async fn self_register_retrying(
     ttl_seconds: u64,
 ) -> coordin8_bootstrap::SelfRegistrationHandle {
     loop {
-        let registry_client = dial_registry_authed(registry_url, client_auth).await;
+        let registry_channel = dial_registry_authed(registry_url, client_auth).await;
         match self_register(
-            registry_client,
+            registry_channel,
             interface,
             attrs.clone(),
             host,
@@ -126,6 +124,158 @@ async fn self_register_retrying(
     }
 }
 
+/// A background self-registration: the task that dials Registry and
+/// registers (retrying until it succeeds), plus the slot its
+/// [`SelfRegistrationHandle`] lands in once it has. Kept reachable so
+/// graceful shutdown can [`deregister`](Registration::deregister) instead of
+/// leaving the entry to linger until its TTL.
+pub(crate) struct Registration {
+    interface: &'static str,
+    slot: Arc<std::sync::Mutex<Option<coordin8_bootstrap::SelfRegistrationHandle>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+fn spawn_registration(
+    registry_url: String,
+    client_auth: coordin8_auth::ClientAuthConfig,
+    interface: &'static str,
+    host: String,
+    port: u16,
+    ttl_seconds: u64,
+) -> Registration {
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let slot_for_task = Arc::clone(&slot);
+    let task = tokio::spawn(async move {
+        let handle = self_register_retrying(
+            &registry_url,
+            &client_auth,
+            interface,
+            std::collections::HashMap::new(),
+            &host,
+            port,
+            ttl_seconds,
+        )
+        .await;
+        info!(
+            "  ✓ {interface}: self-registered (capability: {}, lease: {})",
+            handle.initial_capability_id(),
+            handle.initial_lease_id()
+        );
+        *slot_for_task.lock().unwrap() = Some(handle);
+    });
+    Registration {
+        interface,
+        slot,
+        task,
+    }
+}
+
+impl Registration {
+    /// Stop (re-)registering and cancel the live Registry entry now, so
+    /// clients stop resolving this endpoint immediately. Best-effort: on
+    /// failure the entry still expires on its own TTL.
+    async fn deregister(self) {
+        self.task.abort();
+        let handle = self.slot.lock().unwrap().take();
+        if let Some(handle) = handle {
+            match handle.cancel().await {
+                Ok(()) => info!("  ✓ {}: deregistered from Registry", self.interface),
+                Err(e) => tracing::warn!("{}: deregistration failed: {e}", self.interface),
+            }
+        }
+    }
+}
+
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
+
+/// Default for `COORDIN8_SHUTDOWN_GRACE_SECS` — under the usual 30s
+/// Docker/k8s termination grace period.
+const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 20;
+
+/// Upper bound on the whole shutdown sequence (deregister + drain), from
+/// `COORDIN8_SHUTDOWN_GRACE_SECS`.
+pub fn shutdown_grace() -> Duration {
+    let secs = std::env::var("COORDIN8_SHUTDOWN_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SHUTDOWN_GRACE_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Returns a future that resolves on SIGTERM or SIGINT (ctrl-c only on
+/// non-unix). Signal handlers are installed *now*, when this is called — not
+/// on first poll — so a signal arriving during boot is not lost to the
+/// default disposition.
+pub fn shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {
+    #[cfg(unix)]
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+    async move {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => info!("SIGINT received, shutting down"),
+            _ = term.recv() => info!("SIGTERM received, shutting down"),
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("ctrl-c received, shutting down");
+        }
+    }
+}
+
+/// Run one split-mode server until it ends or `shutdown` fires. On shutdown:
+/// health -> NOT_SERVING, deregister from Registry, stop accepting and drain
+/// in-flight RPCs, all bounded by [`shutdown_grace`] (exceeding it is an
+/// `Err`, so the process exits non-zero).
+///
+/// `serve` receives a receiver that resolves when the server should begin
+/// draining, and must return the server future built with it (via
+/// `serve_with_incoming_shutdown`).
+async fn serve_split<S>(
+    name: &str,
+    shutdown: impl std::future::Future<Output = ()>,
+    mut health: tonic_health::server::HealthReporter,
+    registration: Option<Registration>,
+    serve: impl FnOnce(tokio::sync::oneshot::Receiver<()>) -> S,
+) -> Result<()>
+where
+    S: std::future::Future<Output = std::result::Result<(), tonic::transport::Error>>,
+{
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server_fut = serve(stop_rx);
+    tokio::pin!(server_fut);
+    tokio::pin!(shutdown);
+
+    tokio::select! {
+        res = &mut server_fut => return Ok(res?),
+        _ = &mut shutdown => {}
+    }
+
+    let grace = shutdown_grace();
+    info!("{name}: draining (grace {grace:?})");
+    let drain = async {
+        health
+            .set_service_status("", ServingStatus::NotServing)
+            .await;
+        if let Some(reg) = registration {
+            reg.deregister().await;
+        }
+        let _ = stop_tx.send(());
+        server_fut.await
+    };
+    match tokio::time::timeout(grace, drain).await {
+        Ok(res) => {
+            res?;
+            info!("{name}: shutdown complete");
+            Ok(())
+        }
+        Err(_) => Err(anyhow::anyhow!(
+            "{name}: shutdown grace period ({grace:?}) elapsed with RPCs still in flight"
+        )),
+    }
+}
+
 /// Self-register a bundled-mode service into the same process's Registry.
 ///
 /// Split mode already self-registers every service (see the `run_*_on_listener`
@@ -139,27 +289,21 @@ async fn self_register_retrying(
 /// Retries the initial dial (Registry's own server task may not have started
 /// accepting yet) and then holds the registration alive for the process
 /// lifetime — matching the split-mode self-registration futures' pattern.
-fn spawn_bundled_self_register(interface: &'static str, port: u16, client_auth: AuthConfig) {
+fn spawn_bundled_self_register(
+    interface: &'static str,
+    port: u16,
+    client_auth: AuthConfig,
+) -> Registration {
     let advertise = advertise_host();
     let client_auth = client_auth.client_config(interface);
-    tokio::spawn(async move {
-        let handle = self_register_retrying(
-            "http://localhost:9002",
-            &client_auth,
-            interface,
-            std::collections::HashMap::new(),
-            &advertise,
-            port,
-            30,
-        )
-        .await;
-        info!(
-            "  ✓ {interface}: self-registered (capability: {}, lease: {})",
-            handle.initial_capability_id(),
-            handle.initial_lease_id()
-        );
-        std::future::pending::<()>().await;
-    });
+    spawn_registration(
+        "http://localhost:9002".to_string(),
+        client_auth,
+        interface,
+        advertise,
+        port,
+        30,
+    )
 }
 
 // ── Provider selection (pub(crate) — shared by run_all() and every split-mode
@@ -352,6 +496,9 @@ fn spawn_cascade(
 
 /// Boot every service in a single process on fixed ports (the original monolith).
 pub async fn run_all() -> Result<()> {
+    // Install signal handlers before anything slow, so an early SIGTERM is
+    // handled rather than hitting the default disposition.
+    let shutdown = shutdown_signal();
     info!("Djinn starting...");
 
     // ── Layer 0: Provider ────────────────────────────────────────────────────
@@ -556,42 +703,81 @@ pub async fn run_all() -> Result<()> {
     // No "LeaseMgr" entry — leasing is distributed, there's no single
     // interface to look up; a holder renews via the grantor_host/port
     // already carried on the Lease it holds.
-    spawn_bundled_self_register("EventMgr", 9005, auth_config.clone());
-    spawn_bundled_self_register("Proxy", 9003, auth_config.clone());
-    spawn_bundled_self_register("TransactionMgr", 9004, auth_config.clone());
-    spawn_bundled_self_register("Space", 9006, auth_config.clone());
+    let registrations = vec![
+        spawn_bundled_self_register("EventMgr", 9005, auth_config.clone()),
+        spawn_bundled_self_register("Proxy", 9003, auth_config.clone()),
+        spawn_bundled_self_register("TransactionMgr", 9004, auth_config.clone()),
+        spawn_bundled_self_register("Space", 9006, auth_config.clone()),
+    ];
+
+    // One shared drain signal for all five servers.
+    let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+    let drain = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|stop| *stop).await;
+    };
 
     info!("Djinn ready.");
 
-    tokio::try_join!(
-        Server::builder()
-            .layer(coordin8_observability::server_layer())
-            .add_service(registry_svc)
-            .add_service(lease_svc_for_registry)
-            .serve(registry_addr),
-        Server::builder()
-            .layer(coordin8_observability::server_layer())
-            .add_service(proxy_svc)
-            .serve(proxy_addr),
-        Server::builder()
-            .layer(coordin8_observability::server_layer())
-            .add_service(txn_svc)
-            .add_service(lease_svc_for_txn)
-            .serve(txn_addr),
-        Server::builder()
-            .layer(coordin8_observability::server_layer())
-            .add_service(event_svc)
-            .add_service(lease_svc_for_event)
-            .serve(event_addr),
-        Server::builder()
-            .layer(coordin8_observability::server_layer())
-            .add_service(space_svc)
-            .add_service(space_participant_svc)
-            .add_service(lease_svc_for_space)
-            .serve(space_addr),
-    )?;
+    let servers = async {
+        tokio::try_join!(
+            Server::builder()
+                .layer(coordin8_observability::server_layer())
+                .add_service(registry_svc)
+                .add_service(lease_svc_for_registry)
+                .serve_with_shutdown(registry_addr, drain(drain_rx.clone())),
+            Server::builder()
+                .layer(coordin8_observability::server_layer())
+                .add_service(proxy_svc)
+                .serve_with_shutdown(proxy_addr, drain(drain_rx.clone())),
+            Server::builder()
+                .layer(coordin8_observability::server_layer())
+                .add_service(txn_svc)
+                .add_service(lease_svc_for_txn)
+                .serve_with_shutdown(txn_addr, drain(drain_rx.clone())),
+            Server::builder()
+                .layer(coordin8_observability::server_layer())
+                .add_service(event_svc)
+                .add_service(lease_svc_for_event)
+                .serve_with_shutdown(event_addr, drain(drain_rx.clone())),
+            Server::builder()
+                .layer(coordin8_observability::server_layer())
+                .add_service(space_svc)
+                .add_service(space_participant_svc)
+                .add_service(lease_svc_for_space)
+                .serve_with_shutdown(space_addr, drain(drain_rx.clone())),
+        )
+    };
+    tokio::pin!(servers);
 
-    Ok(())
+    tokio::select! {
+        res = &mut servers => {
+            res?;
+            return Ok(());
+        }
+        _ = shutdown => {}
+    }
+
+    // Deregister while Registry is still serving (it is the last to stop),
+    // then drain all five servers together.
+    let grace = shutdown_grace();
+    info!("Djinn: draining (grace {grace:?})");
+    let drained = async {
+        for reg in registrations {
+            reg.deregister().await;
+        }
+        let _ = drain_tx.send(true);
+        (&mut servers).await
+    };
+    match tokio::time::timeout(grace, drained).await {
+        Ok(res) => {
+            res?;
+            info!("Djinn: shutdown complete");
+            Ok(())
+        }
+        Err(_) => Err(anyhow::anyhow!(
+            "Djinn: shutdown grace period ({grace:?}) elapsed with RPCs still in flight"
+        )),
+    }
 }
 
 // ── Registry alone ────────────────────────────────────────────────────────────
@@ -610,7 +796,7 @@ pub async fn run_registry() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     let actual_addr = listener.local_addr()?;
     info!("Djinn registry starting on {actual_addr}...");
-    run_registry_on_listener(listener).await
+    run_registry_on_listener_until(listener, shutdown_signal()).await
 }
 
 /// Boot Registry on a pre-bound [`TcpListener`].
@@ -619,6 +805,16 @@ pub async fn run_registry() -> Result<()> {
 /// pass the listener here. The caller knows the exact address before the
 /// server starts accepting.
 pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Result<()> {
+    run_registry_on_listener_until(listener, std::future::pending()).await
+}
+
+/// Like [`run_registry_on_listener`], but shuts down gracefully when
+/// `shutdown` resolves (health NOT_SERVING, drain, return `Ok`). Registry
+/// itself has no self-registration to cancel.
+pub async fn run_registry_on_listener_until(
+    listener: tokio::net::TcpListener,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
     let actual_addr = listener.local_addr()?;
     let host = advertise_host();
 
@@ -679,15 +875,21 @@ pub async fn run_registry_on_listener(listener: tokio::net::TcpListener) -> Resu
 
     info!("  ✓ Registry (split): listening on {actual_addr} (+ LeaseService)");
 
-    Server::builder()
+    let server = Server::builder()
         .layer(coordin8_observability::server_layer())
         .add_service(health_service)
         .add_service(registry_svc)
-        .add_service(lease_svc)
-        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-        .await?;
+        .add_service(lease_svc);
 
-    Ok(())
+    serve_split("registry", shutdown, health_reporter, None, |stop| {
+        server.serve_with_incoming_shutdown(
+            tokio_stream::wrappers::TcpListenerStream::new(listener),
+            async move {
+                let _ = stop.await;
+            },
+        )
+    })
+    .await
 }
 
 // ── EventMgr alone ───────────────────────────────────────────────────────────
@@ -701,7 +903,7 @@ pub async fn run_event() -> Result<()> {
     let host = advertise_host();
     let registry_addr = std::env::var("COORDIN8_REGISTRY")
         .map_err(|_| anyhow::anyhow!("COORDIN8_REGISTRY must be set for split-mode EventMgr"))?;
-    run_event_on_listener(listener, &registry_addr, &host, 30).await
+    run_event_on_listener_until(listener, &registry_addr, &host, 30, shutdown_signal()).await
 }
 
 /// Boot EventMgr on a pre-bound [`TcpListener`], with its own embedded
@@ -717,6 +919,26 @@ pub async fn run_event_on_listener(
     registry_addr: &str,
     advertise_host: &str,
     self_lease_ttl: u64,
+) -> Result<()> {
+    run_event_on_listener_until(
+        listener,
+        registry_addr,
+        advertise_host,
+        self_lease_ttl,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// Like [`run_event_on_listener`], but shuts down gracefully when `shutdown`
+/// resolves (deregister, drain, return `Ok`). `run_event` passes the
+/// SIGTERM/SIGINT future.
+pub async fn run_event_on_listener_until(
+    listener: tokio::net::TcpListener,
+    registry_addr: &str,
+    advertise_host: &str,
+    self_lease_ttl: u64,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
@@ -763,40 +985,38 @@ pub async fn run_event_on_listener(
     let advertise_host_owned = advertise_host.to_string();
     let self_client_auth = auth_config.client_config("EventMgr");
 
-    let register_fut = async move {
-        let handle = self_register_retrying(
-            &registry_url,
-            &self_client_auth,
-            "EventMgr",
-            std::collections::HashMap::new(),
-            &advertise_host_owned,
-            advertise_port,
-            self_lease_ttl,
-        )
-        .await;
-        info!(
-            "  ✓ EventMgr: self-registered (capability: {}, lease: {})",
-            handle.initial_capability_id(),
-            handle.initial_lease_id()
-        );
-        std::future::pending::<()>().await;
-    };
+    let registration = spawn_registration(
+        registry_url,
+        self_client_auth,
+        "EventMgr",
+        advertise_host_owned,
+        advertise_port,
+        self_lease_ttl,
+    );
 
-    let server_fut = Server::builder()
+    let server = Server::builder()
         .layer(coordin8_observability::server_layer())
         .add_service(health_service)
         .add_service(event_svc)
-        .add_service(lease_svc)
-        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+        .add_service(lease_svc);
 
     info!("Djinn event ready.");
 
-    tokio::select! {
-        res = server_fut => res?,
-        _ = register_fut => unreachable!("register_fut awaits pending() forever"),
-    }
-
-    Ok(())
+    serve_split(
+        "event",
+        shutdown,
+        health_reporter,
+        Some(registration),
+        |stop| {
+            server.serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async move {
+                    let _ = stop.await;
+                },
+            )
+        },
+    )
+    .await
 }
 
 // ── Space alone ──────────────────────────────────────────────────────────────
@@ -811,7 +1031,7 @@ pub async fn run_space() -> Result<()> {
     let host = advertise_host();
     let registry_addr = std::env::var("COORDIN8_REGISTRY")
         .map_err(|_| anyhow::anyhow!("COORDIN8_REGISTRY must be set for split-mode Space"))?;
-    run_space_on_listener(listener, &registry_addr, &host, 30).await
+    run_space_on_listener_until(listener, &registry_addr, &host, 30, shutdown_signal()).await
 }
 
 /// Boot Space on a pre-bound [`TcpListener`], with its own embedded
@@ -828,6 +1048,26 @@ pub async fn run_space_on_listener(
     registry_addr: &str,
     advertise_host: &str,
     self_lease_ttl: u64,
+) -> Result<()> {
+    run_space_on_listener_until(
+        listener,
+        registry_addr,
+        advertise_host,
+        self_lease_ttl,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// Like [`run_space_on_listener`], but shuts down gracefully when `shutdown`
+/// resolves (deregister, drain, return `Ok`). `run_space` passes the
+/// SIGTERM/SIGINT future.
+pub async fn run_space_on_listener_until(
+    listener: tokio::net::TcpListener,
+    registry_addr: &str,
+    advertise_host: &str,
+    self_lease_ttl: u64,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
@@ -900,41 +1140,39 @@ pub async fn run_space_on_listener(
     let advertise_host_owned = advertise_host.to_string();
     let self_client_auth = auth_config.client_config("Space");
 
-    let register_fut = async move {
-        let handle = self_register_retrying(
-            &registry_url,
-            &self_client_auth,
-            "Space",
-            std::collections::HashMap::new(),
-            &advertise_host_owned,
-            advertise_port,
-            self_lease_ttl,
-        )
-        .await;
-        info!(
-            "  ✓ Space: self-registered (capability: {}, lease: {})",
-            handle.initial_capability_id(),
-            handle.initial_lease_id()
-        );
-        std::future::pending::<()>().await;
-    };
+    let registration = spawn_registration(
+        registry_url,
+        self_client_auth,
+        "Space",
+        advertise_host_owned,
+        advertise_port,
+        self_lease_ttl,
+    );
 
-    let server_fut = Server::builder()
+    let server = Server::builder()
         .layer(coordin8_observability::server_layer())
         .add_service(health_service)
         .add_service(space_svc)
         .add_service(space_participant_svc)
-        .add_service(lease_svc)
-        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+        .add_service(lease_svc);
 
     info!("Djinn space ready.");
 
-    tokio::select! {
-        res = server_fut => res?,
-        _ = register_fut => unreachable!("register_fut awaits pending() forever"),
-    }
-
-    Ok(())
+    serve_split(
+        "space",
+        shutdown,
+        health_reporter,
+        Some(registration),
+        |stop| {
+            server.serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async move {
+                    let _ = stop.await;
+                },
+            )
+        },
+    )
+    .await
 }
 
 // ── TransactionMgr alone ─────────────────────────────────────────────────────
@@ -949,7 +1187,7 @@ pub async fn run_txn() -> Result<()> {
     let registry_addr = std::env::var("COORDIN8_REGISTRY").map_err(|_| {
         anyhow::anyhow!("COORDIN8_REGISTRY must be set for split-mode TransactionMgr")
     })?;
-    run_txn_on_listener(listener, &registry_addr, &host, 30).await
+    run_txn_on_listener_until(listener, &registry_addr, &host, 30, shutdown_signal()).await
 }
 
 /// Boot TransactionMgr on a pre-bound [`TcpListener`], with its own embedded
@@ -963,6 +1201,26 @@ pub async fn run_txn_on_listener(
     registry_addr: &str,
     advertise_host: &str,
     self_lease_ttl: u64,
+) -> Result<()> {
+    run_txn_on_listener_until(
+        listener,
+        registry_addr,
+        advertise_host,
+        self_lease_ttl,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// Like [`run_txn_on_listener`], but shuts down gracefully when `shutdown`
+/// resolves (deregister, drain, return `Ok`). `run_txn` passes the
+/// SIGTERM/SIGINT future.
+pub async fn run_txn_on_listener_until(
+    listener: tokio::net::TcpListener,
+    registry_addr: &str,
+    advertise_host: &str,
+    self_lease_ttl: u64,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
@@ -1015,40 +1273,38 @@ pub async fn run_txn_on_listener(
     let advertise_host_owned = advertise_host.to_string();
     let self_client_auth = auth_config.client_config("TransactionMgr");
 
-    let register_fut = async move {
-        let handle = self_register_retrying(
-            &registry_url,
-            &self_client_auth,
-            "TransactionMgr",
-            std::collections::HashMap::new(),
-            &advertise_host_owned,
-            advertise_port,
-            self_lease_ttl,
-        )
-        .await;
-        info!(
-            "  ✓ TransactionMgr: self-registered (capability: {}, lease: {})",
-            handle.initial_capability_id(),
-            handle.initial_lease_id()
-        );
-        std::future::pending::<()>().await;
-    };
+    let registration = spawn_registration(
+        registry_url,
+        self_client_auth,
+        "TransactionMgr",
+        advertise_host_owned,
+        advertise_port,
+        self_lease_ttl,
+    );
 
-    let server_fut = Server::builder()
+    let server = Server::builder()
         .layer(coordin8_observability::server_layer())
         .add_service(health_service)
         .add_service(txn_svc)
-        .add_service(lease_svc)
-        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+        .add_service(lease_svc);
 
     info!("Djinn txn ready.");
 
-    tokio::select! {
-        res = server_fut => res?,
-        _ = register_fut => unreachable!("register_fut awaits pending() forever"),
-    }
-
-    Ok(())
+    serve_split(
+        "txn",
+        shutdown,
+        health_reporter,
+        Some(registration),
+        |stop| {
+            server.serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async move {
+                    let _ = stop.await;
+                },
+            )
+        },
+    )
+    .await
 }
 
 // ── Proxy alone ──────────────────────────────────────────────────────────────
@@ -1065,7 +1321,7 @@ pub async fn run_proxy() -> Result<()> {
     let host = advertise_host();
     let registry_addr = std::env::var("COORDIN8_REGISTRY")
         .map_err(|_| anyhow::anyhow!("COORDIN8_REGISTRY must be set for split-mode Proxy"))?;
-    run_proxy_on_listener(listener, &registry_addr, &host, 30).await
+    run_proxy_on_listener_until(listener, &registry_addr, &host, 30, shutdown_signal()).await
 }
 
 /// Boot Proxy on a pre-bound [`TcpListener`] against a remote Registry.
@@ -1080,6 +1336,26 @@ pub async fn run_proxy_on_listener(
     registry_addr: &str,
     advertise_host: &str,
     self_lease_ttl: u64,
+) -> Result<()> {
+    run_proxy_on_listener_until(
+        listener,
+        registry_addr,
+        advertise_host,
+        self_lease_ttl,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// Like [`run_proxy_on_listener`], but shuts down gracefully when `shutdown`
+/// resolves (deregister, drain, return `Ok`). `run_proxy` passes the
+/// SIGTERM/SIGINT future.
+pub async fn run_proxy_on_listener_until(
+    listener: tokio::net::TcpListener,
+    registry_addr: &str,
+    advertise_host: &str,
+    self_lease_ttl: u64,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
@@ -1131,39 +1407,37 @@ pub async fn run_proxy_on_listener(
     let advertise_host_owned = advertise_host.to_string();
     let self_client_auth = auth_config.client_config("Proxy");
 
-    let register_fut = async move {
-        let handle = self_register_retrying(
-            &registry_url,
-            &self_client_auth,
-            "Proxy",
-            std::collections::HashMap::new(),
-            &advertise_host_owned,
-            advertise_port,
-            self_lease_ttl,
-        )
-        .await;
-        info!(
-            "  ✓ Proxy: self-registered (capability: {}, lease: {})",
-            handle.initial_capability_id(),
-            handle.initial_lease_id()
-        );
-        std::future::pending::<()>().await;
-    };
+    let registration = spawn_registration(
+        registry_url,
+        self_client_auth,
+        "Proxy",
+        advertise_host_owned,
+        advertise_port,
+        self_lease_ttl,
+    );
 
-    let server_fut = Server::builder()
+    let server = Server::builder()
         .layer(coordin8_observability::server_layer())
         .add_service(health_service)
-        .add_service(proxy_svc)
-        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+        .add_service(proxy_svc);
 
     info!("Djinn proxy ready.");
 
-    tokio::select! {
-        res = server_fut => res?,
-        _ = register_fut => unreachable!("register_fut awaits pending() forever"),
-    }
-
-    Ok(())
+    serve_split(
+        "proxy",
+        shutdown,
+        health_reporter,
+        Some(registration),
+        |stop| {
+            server.serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async move {
+                    let _ = stop.await;
+                },
+            )
+        },
+    )
+    .await
 }
 
 // ── Healthcheck (CLI) ─────────────────────────────────────────────────────────
