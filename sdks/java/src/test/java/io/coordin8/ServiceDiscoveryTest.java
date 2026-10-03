@@ -151,37 +151,37 @@ class ServiceDiscoveryTest {
         assertEquals(2, proxy.opens.get());
     }
 
+    /** expired then registered: Proxy re-resolves per connection, so the live entry is untouched. */
     @Test
-    void expiredMarksStaleAndNextGetReopensAndRetainsOld() throws Exception {
-        ManagedChannel first = discovery.get(c -> c, TEMPLATE);
-        assertTrue(TestUtil.await(3000, () -> !registry.watchers.isEmpty()));
-
-        registry.push(RegistryEvent.EventType.EXPIRED);
-        // The event is handled asynchronously; keep asking until the cache notices.
-        ManagedChannel[] second = new ManagedChannel[1];
-        assertTrue(TestUtil.await(5000, () -> {
-            second[0] = discovery.get(c -> c, TEMPLATE);
-            return proxy.opens.get() == 2;
-        }));
-        assertNotSame(first, second[0]);
-        // A caller may still hold the old channel: it stays open until close().
-        assertTrue(proxy.released.isEmpty());
-        assertFalse(first.isShutdown(), "old channel must stay usable");
-        assertFalse(second[0].isShutdown());
-        discovery.close();
-        assertEquals(2, proxy.released.size());
-        assertTrue(first.isShutdown());
-    }
-
-    @Test
-    void registeredAfterExpiredEagerlyRefreshesWithoutGet() throws Exception {
-        discovery.get(c -> c, TEMPLATE);
+    void expiredThenRegisteredKeepsLiveProxy() throws Exception {
+        ManagedChannel held = discovery.get(c -> c, TEMPLATE);
         assertTrue(TestUtil.await(3000, () -> !registry.watchers.isEmpty()));
 
         registry.push(RegistryEvent.EventType.EXPIRED);
         registry.push(RegistryEvent.EventType.REGISTERED);
-        assertTrue(TestUtil.await(5000, () -> proxy.opens.get() == 2), "eager refresh on register");
-        assertTrue(proxy.released.isEmpty(), "old proxy is retained until close()");
+        Thread.sleep(300);
+
+        assertSame(held, discovery.get(c -> c, TEMPLATE));
+        assertFalse(held.isShutdown());
+        assertEquals(1, proxy.opens.get());
+        assertTrue(proxy.released.isEmpty());
+    }
+
+    /** Regression: expire/register cycles must not accumulate live proxies. */
+    @Test
+    void atMostOneLiveProxyAcrossExpireRegisterCycles() throws Exception {
+        ManagedChannel held = discovery.get(c -> c, TEMPLATE);
+        assertTrue(TestUtil.await(3000, () -> !registry.watchers.isEmpty()));
+        for (int i = 0; i < 6; i++) {
+            registry.push(RegistryEvent.EventType.EXPIRED);
+            registry.push(RegistryEvent.EventType.REGISTERED);
+            Thread.sleep(50);
+            discovery.get(c -> c, TEMPLATE);
+        }
+        Thread.sleep(200);
+        assertEquals(1, proxy.opens.get() - proxy.released.size(),
+                "live proxies: opens=" + proxy.opens.get() + " released=" + proxy.released);
+        assertFalse(held.isShutdown());
     }
 
     @Test

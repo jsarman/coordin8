@@ -122,40 +122,31 @@ describe("ServiceDiscovery", () => {
     assert.equal(proxy.opens, 2);
   });
 
-  it("expired marks the entry stale; next get re-opens and retains the old proxy until close", async () => {
+  it("expired then registered keeps the live proxy: no new open, same address", async () => {
     const { discovery, proxy, watchers, push } = await start();
-    const first = await discovery.get((addr) => addr, TEMPLATE);
-    assert.ok(await waitFor(() => watchers.length >= 1));
-
-    push(1 /* EXPIRED */);
-    let second = first;
-    // The event is handled asynchronously; keep asking until the cache notices.
-    assert.ok(
-      await waitFor(() => {
-        discovery.get((addr) => addr, TEMPLATE).then((a) => (second = a));
-        return proxy.opens >= 2;
-      })
-    );
-    await waitFor(() => second !== first);
-    assert.equal(second, "localhost:40002");
-    // A caller may still hold the old address: the proxy stays until close().
-    assert.deepEqual(proxy.released, []);
-    await discovery.close();
-    assert.deepEqual([...proxy.released].sort(), ["proxy-1", "proxy-2"]);
-  });
-
-  it("registered after expired eagerly refreshes without a get", async () => {
-    const { discovery, proxy, watchers, push } = await start();
-    await discovery.get((addr) => addr, TEMPLATE);
+    const held = await discovery.get((addr) => addr, TEMPLATE);
     assert.ok(await waitFor(() => watchers.length >= 1));
 
     push(1 /* EXPIRED */);
     push(0 /* REGISTERED */);
-    assert.ok(await waitFor(() => proxy.opens === 2), "eager refresh on register");
-    assert.deepEqual(proxy.released, [], "old proxy is retained until close()");
-    // And the cache now serves the refreshed port with no further opens.
-    assert.equal(await discovery.get((addr) => addr, TEMPLATE), "localhost:40002");
-    assert.equal(proxy.opens, 2);
+    await sleep(300);
+    assert.equal(await discovery.get((addr) => addr, TEMPLATE), held);
+    assert.equal(proxy.opens, 1);
+    assert.deepEqual(proxy.released, []);
+  });
+
+  it("at most one live proxy per template across expire/register cycles", async () => {
+    const { discovery, proxy, watchers, push } = await start();
+    await discovery.get((addr) => addr, TEMPLATE);
+    assert.ok(await waitFor(() => watchers.length >= 1));
+    for (let i = 0; i < 6; i++) {
+      push(1 /* EXPIRED */);
+      push(0 /* REGISTERED */);
+      await sleep(50);
+      await discovery.get((addr) => addr, TEMPLATE);
+    }
+    await sleep(200);
+    assert.equal(proxy.opens - proxy.released.length, 1, `opens=${proxy.opens} released=${proxy.released}`);
   });
 
   it("registered while fresh does nothing", async () => {

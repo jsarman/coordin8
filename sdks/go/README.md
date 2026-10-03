@@ -1,6 +1,6 @@
 # Coordin8 Go SDK
 
-The Go client SDK for the Coordin8 Djinn. Thin wrapper over the tonic-generated gRPC stubs in `gen/`, plus a `ServiceDiscovery` helper that caches proxy connections by template and refreshes on lease expiry.
+The Go client SDK for the Coordin8 Djinn. Thin wrapper over the tonic-generated gRPC stubs in `gen/`, plus a `ServiceDiscovery` helper that keeps one leased proxy per template (held connections survive the service restarting or moving; the proxy is reopened only if its own lease is lost).
 
 For project context see the [root README](../../README.md). This document covers the Go SDK directory only.
 
@@ -30,7 +30,7 @@ defer djinn.Close()
 leases   := djinn.RegistryLeases()
 registry := djinn.Registry()
 
-// One-liner discovery — caches by template, refreshes on lease expiry
+// One-liner discovery — one leased proxy per template, reopened only if its lease is lost
 discovery := coordin8.NewServiceDiscovery(djinn)
 defer discovery.Close()
 conn, _ := discovery.Get(context.Background(), coordin8.Template{"interface": "Greeter"})

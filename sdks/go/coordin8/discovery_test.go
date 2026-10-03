@@ -71,95 +71,61 @@ func TestDiscoveryGetCachesConnection(t *testing.T) {
 	}
 }
 
-func TestDiscoveryExpiredMarksStaleAndNextGetReopens(t *testing.T) {
-	sd, reg, px := newDiscovery(t)
-	ctx := context.Background()
-	tmpl := Template{"interface": "G"}
-
-	old, err := sd.Get(ctx, tmpl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "registry watch", func() bool { return reg.watches.Load() >= 1 })
-
-	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_EXPIRED, Capability: &pb.Capability{CapabilityId: "c"}}
-	key := templateKey(tmpl)
-	eventually(t, "entry stale", func() bool {
-		sd.mu.Lock()
-		defer sd.mu.Unlock()
-		return sd.cache[key].stale
-	})
-	// Expiry alone must not open anything new.
-	if px.openCount() != 1 {
-		t.Fatalf("opens = %d", px.openCount())
-	}
-
-	fresh, err := sd.Get(ctx, tmpl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fresh == old {
-		t.Fatal("stale entry should be replaced with a new connection")
-	}
-	if px.openCount() != 2 {
-		t.Fatalf("opens = %d, want 2", px.openCount())
-	}
-	// The caller may still hold the old conn: it must stay open, and its
-	// proxy must not be released until Close.
-	if got := px.released(); len(got) != 0 {
-		t.Fatalf("released = %v, want none", got)
-	}
-	if old.GetState() == connectivity.Shutdown {
-		t.Fatal("old conn was closed while a caller may hold it")
-	}
-	sd.mu.Lock()
-	stale := sd.cache[key].stale
-	sd.mu.Unlock()
-	if stale {
-		t.Fatal("refreshed entry should not be stale")
-	}
-
-	sd.Close()
-	if got := px.released(); len(got) != 2 {
-		t.Fatalf("released after Close = %v, want both proxies", got)
-	}
-	if old.GetState() != connectivity.Shutdown {
-		t.Fatalf("old conn state = %v, want Shutdown after Close", old.GetState())
-	}
-}
-
-func TestDiscoveryRegisteredAfterExpiredRefreshesEagerly(t *testing.T) {
+// expired then registered: the proxy re-resolves per connection, so the live
+// entry is untouched -- no new Open, same conn object, still usable.
+func TestDiscoveryExpiredThenRegisteredKeepsLiveProxy(t *testing.T) {
 	sd, reg, px := newDiscovery(t)
 	tmpl := Template{"interface": "G"}
-	if _, err := sd.Get(context.Background(), tmpl); err != nil {
+	held, err := sd.Get(context.Background(), tmpl)
+	if err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "registry watch", func() bool { return reg.watches.Load() >= 1 })
 
 	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_EXPIRED}
 	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_REGISTERED}
-	eventually(t, "eager re-open", func() bool { return px.openCount() == 2 })
-	if got := px.released(); len(got) != 0 {
-		t.Fatalf("released = %v, old proxy must stay until Close", got)
+	time.Sleep(100 * time.Millisecond)
+
+	again, err := sd.Get(context.Background(), tmpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != held {
+		t.Fatal("expected the same conn object")
+	}
+	if held.GetState() == connectivity.Shutdown {
+		t.Fatal("held conn was closed")
+	}
+	if px.openCount() != 1 || len(px.released()) != 0 {
+		t.Fatalf("opens=%d released=%v, want 1 / none", px.openCount(), px.released())
 	}
 }
 
-func TestDiscoveryRegisteredWhileFreshDoesNotReopen(t *testing.T) {
+// Regression: repeated service expire/register cycles must not accumulate
+// live proxies (each holds a Djinn port and renews a lease).
+func TestDiscoveryAtMostOneLiveProxyAcrossExpireRegisterCycles(t *testing.T) {
 	sd, reg, px := newDiscovery(t)
-	if _, err := sd.Get(context.Background(), Template{"interface": "G"}); err != nil {
+	tmpl := Template{"interface": "G"}
+	held, err := sd.Get(context.Background(), tmpl)
+	if err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "registry watch", func() bool { return reg.watches.Load() >= 1 })
-	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_REGISTERED}
-	// Barrier: a following expired event is processed strictly after.
-	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_EXPIRED}
-	eventually(t, "entry stale", func() bool {
-		sd.mu.Lock()
-		defer sd.mu.Unlock()
-		return sd.cache[templateKey(Template{"interface": "G"})].stale
-	})
-	if px.openCount() != 1 {
-		t.Fatalf("opens = %d, want 1", px.openCount())
+
+	for i := 0; i < 6; i++ {
+		reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_EXPIRED}
+		reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_REGISTERED}
+		time.Sleep(30 * time.Millisecond)
+		if _, err := sd.Get(context.Background(), tmpl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	if live := px.openCount() - len(px.released()); live != 1 {
+		t.Fatalf("live proxies = %d (opens=%d released=%v), want 1", live, px.openCount(), px.released())
+	}
+	if held.GetState() == connectivity.Shutdown {
+		t.Fatal("held conn was closed")
 	}
 }
 
@@ -216,13 +182,7 @@ func TestDiscoveryModifiedDoesNotCloseHeldConnection(t *testing.T) {
 	}
 	eventually(t, "registry watch", func() bool { return reg.watches.Load() >= 1 })
 	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_MODIFIED}
-	// Barrier: the following expired event is processed strictly after.
-	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_EXPIRED}
-	eventually(t, "entry stale", func() bool {
-		sd.mu.Lock()
-		defer sd.mu.Unlock()
-		return sd.cache[templateKey(tmpl)].stale
-	})
+	time.Sleep(200 * time.Millisecond) // let the watcher process the event
 	if held.GetState() == connectivity.Shutdown {
 		t.Fatal("held connection was closed by a modified event")
 	}

@@ -25,6 +25,12 @@ type cachedConn struct {
 // for service changes. Repeated calls with the same template return a cached
 // connection without any additional Djinn round-trips.
 //
+// One leased proxy is kept per template. Proxy re-resolves the upstream on
+// every new TCP connection, so a held conn survives the service expiring,
+// restarting or moving: while the service is absent, RPCs fail at connect
+// time and succeed again once it re-registers, with no client action. The
+// cache entry is replaced only if the proxy's own lease is lost.
+//
 // Usage:
 //
 //	discovery := coordin8.NewServiceDiscovery(djinn)
@@ -37,10 +43,6 @@ type ServiceDiscovery struct {
 	mu      sync.Mutex
 	cache   map[string]*cachedConn
 	cancels map[string]context.CancelFunc
-	// retired holds entries replaced by a refresh while their proxy was still
-	// alive. A caller may still hold the old conn (and the proxy re-resolves
-	// per connection, so it keeps working); they are released on Close.
-	retired []*cachedConn
 }
 
 // NewServiceDiscovery creates a ServiceDiscovery manager backed by djinn.
@@ -60,7 +62,7 @@ func (sd *ServiceDiscovery) Get(ctx context.Context, tmpl Template) (*grpc.Clien
 	key := templateKey(tmpl)
 
 	sd.mu.Lock()
-	if entry, ok := sd.cache[key]; ok && !entry.stale {
+	if entry, ok := sd.cache[key]; ok && !entry.stale && !handleLost(entry.handle) {
 		conn := entry.conn
 		sd.mu.Unlock()
 		return conn, nil
@@ -93,17 +95,12 @@ func (sd *ServiceDiscovery) refresh(ctx context.Context, key string, tmpl Templa
 	}
 
 	sd.mu.Lock()
-	// Replace any previously stale entry. A caller may still hold its conn,
-	// so only tear it down if its proxy lease is gone (the conn is dead
-	// anyway); otherwise retire it until Close.
+	// Replace the previous entry. It is only ever replaced because its proxy
+	// lease was lost, so the proxy (and any conn a caller holds on it) is
+	// already dead; tearing it down cannot hurt anyone.
 	if old, exists := sd.cache[key]; exists {
-		select {
-		case <-old.handle.Lost():
-			old.conn.Close()
-			_ = old.handle.Release(context.Background())
-		default:
-			sd.retired = append(sd.retired, old)
-		}
+		old.conn.Close()
+		_ = old.handle.Release(context.Background())
 	}
 	sd.cache[key] = &cachedConn{proxyID: handle.ProxyID, handle: handle, conn: conn}
 	go sd.watchLease(key, handle)
@@ -157,33 +154,14 @@ func (sd *ServiceDiscovery) watch(ctx context.Context, key string, tmpl Template
 func (sd *ServiceDiscovery) consumeWatch(ctx context.Context, ch <-chan RegistryEvent, key string, tmpl Template) {
 	for {
 		select {
-		case evt, ok := <-ch:
+		case _, ok := <-ch:
 			if !ok {
 				return
 			}
-			switch evt.Type {
-			case "expired":
-				sd.mu.Lock()
-				if entry, exists := sd.cache[key]; exists {
-					entry.stale = true
-				}
-				sd.mu.Unlock()
-			case "registered":
-				sd.mu.Lock()
-				stale := false
-				if entry, exists := sd.cache[key]; exists {
-					stale = entry.stale
-				}
-				sd.mu.Unlock()
-				if stale {
-					_, _ = sd.refresh(ctx, key, tmpl)
-				}
-			case "modified":
-				// Nothing to do: Proxy re-resolves the upstream on every new
-				// TCP connection, so the existing proxy port already reaches
-				// the modified service. Reopening would only risk breaking
-				// the connection callers hold.
-			}
+			// "expired" / "registered" / "modified": nothing to do. Proxy
+			// re-resolves the upstream on every new TCP connection, so the
+			// existing proxy stays valid while the service restarts or moves.
+			// Only a lost proxy lease replaces an entry (see watchLease).
 		case <-ctx.Done():
 			return
 		}
@@ -202,11 +180,6 @@ func (sd *ServiceDiscovery) Close() {
 		entry.conn.Close()
 		_ = entry.handle.Release(context.Background())
 	}
-	for _, entry := range sd.retired {
-		entry.conn.Close()
-		_ = entry.handle.Release(context.Background())
-	}
-	sd.retired = nil
 	sd.cache = make(map[string]*cachedConn)
 	sd.cancels = make(map[string]context.CancelFunc)
 }
@@ -222,4 +195,13 @@ func templateKey(tmpl Template) string {
 		parts = append(parts, k+"="+tmpl[k])
 	}
 	return strings.Join(parts, ",")
+}
+
+func handleLost(h *ProxyHandle) bool {
+	select {
+	case <-h.Lost():
+		return true
+	default:
+		return false
+	}
 }

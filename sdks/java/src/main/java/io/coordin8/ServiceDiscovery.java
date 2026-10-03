@@ -16,9 +16,13 @@ import java.util.stream.Collectors;
 /**
  * Jini-inspired service discovery manager.
  *
- * <p>Caches proxies by template. Repeated calls with the same template return
- * a cached stub without any additional Djinn round-trips. Watches the Registry
- * for changes and invalidates/refreshes cached connections automatically.
+ * <p>Keeps one leased proxy per template. Repeated calls with the same
+ * template return a cached stub without any additional Djinn round-trips.
+ * Proxy re-resolves the upstream on every new TCP connection, so a held
+ * channel survives the service expiring, restarting or moving: while the
+ * service is absent, RPCs fail at connect time and succeed again once it
+ * re-registers, with no client action. The cache entry is replaced only if
+ * the proxy's own lease is lost.
  *
  * <pre>{@code
  * var discovery = ServiceDiscovery.watch(djinn);
@@ -34,27 +38,21 @@ import java.util.stream.Collectors;
  */
 public class ServiceDiscovery implements AutoCloseable {
 
-    private record CachedEntry(String proxyId, ManagedChannel channel, AtomicBoolean stale,
+    private record CachedEntry(String proxyId, ManagedChannel channel,
                                ProxyClient.ProxyHandleRecord handle) {
         CachedEntry(ProxyClient.ProxyHandleRecord handle, ManagedChannel channel) {
-            this(handle.proxyId(), channel, new AtomicBoolean(false), handle);
+            this(handle.proxyId(), channel, handle);
         }
 
-        /** Stale by registry event, or the Djinn reclaimed the proxy's lease. */
+        /** Only stale when the Djinn reclaimed the proxy's own lease. */
         boolean isStale() {
-            return stale.get() || handle.lost().get();
+            return handle.lost().get();
         }
     }
 
     private final DjinnClient djinn;
     private final ConcurrentHashMap<String, CachedEntry> cache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> watching = new ConcurrentHashMap<>();
-    /**
-     * Entries replaced by a refresh while their proxy was still alive. A
-     * caller may still hold the old channel (the proxy re-resolves per
-     * connection, so it keeps working); they are released on {@link #close()}.
-     */
-    private final List<CachedEntry> retired = new java.util.concurrent.CopyOnWriteArrayList<>();
     private volatile boolean closed = false;
 
     private ServiceDiscovery(DjinnClient djinn) {
@@ -71,7 +69,8 @@ public class ServiceDiscovery implements AutoCloseable {
     /**
      * Return a ready stub for the first capability matching template.
      * Subsequent calls with the same template return a cached stub unless
-     * the entry has been invalidated by a Registry Watch event.
+     * the proxy's own lease was lost (the Djinn reclaimed it), in which case a
+     * new proxy is opened and the dead one released.
      *
      * @param factory  method reference or lambda — e.g. {@code GreeterServiceGrpc::newBlockingStub}
      * @param template attribute map to match against the Registry
@@ -93,15 +92,10 @@ public class ServiceDiscovery implements AutoCloseable {
             return existing;
         }
 
-        // Replace the stale entry. A caller may still hold its channel, so
-        // only tear it down if the proxy lease is gone (the channel is dead
-        // anyway); otherwise retire it until close().
+        // The entry is only ever replaced because its proxy lease was lost, so
+        // the proxy (and any channel a caller holds on it) is already dead.
         if (existing != null) {
-            if (existing.handle().lost().get()) {
-                closeEntry(existing);
-            } else {
-                retired.add(existing);
-            }
+            closeEntry(existing);
         }
 
         CachedEntry entry = openEntry(template);
@@ -129,26 +123,10 @@ public class ServiceDiscovery implements AutoCloseable {
         djinn.registry().watch(template,
                 evt -> {
                     if (closed) return;
-                    switch (evt.type()) {
-                        case "expired" -> {
-                            CachedEntry entry = cache.get(key);
-                            if (entry != null) {
-                                entry.stale().set(true);
-                            }
-                        }
-                        case "registered" -> {
-                            CachedEntry entry = cache.get(key);
-                            if (entry != null && entry.stale().get()) {
-                                refresh(key, template);
-                            }
-                        }
-                        case "modified" -> {
-                            // Nothing to do: Proxy re-resolves the upstream on
-                            // every new TCP connection, so the existing proxy
-                            // port already reaches the modified service.
-                            // Reopening would risk breaking channels callers hold.
-                        }
-                    }
+                    // "expired" / "registered" / "modified": nothing to do. Proxy
+                    // re-resolves the upstream on every new TCP connection, so the
+                    // existing proxy stays valid while the service restarts or
+                    // moves. Only a lost proxy lease replaces an entry.
                 },
                 err -> {
                     if (closed) return;
@@ -188,8 +166,6 @@ public class ServiceDiscovery implements AutoCloseable {
         List<CachedEntry> entries = new ArrayList<>(cache.values());
         cache.clear();
         watching.clear();
-        entries.addAll(retired);
-        retired.clear();
         for (CachedEntry entry : entries) {
             entry.channel().shutdown().awaitTermination(5, TimeUnit.SECONDS);
             entry.handle().close();
