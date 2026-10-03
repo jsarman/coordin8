@@ -93,7 +93,7 @@ Once ready (or timed out), report:
 
 ## Important
 
-- **Boot order matters:** MiniStack first (compose's `cfn-init` creates the 12 DynamoDB tables), then Djinn, then application services. In the compose files this is enforced with `depends_on`.
+- **Boot order matters:** MiniStack first (compose's `cfn-init` creates the 13 DynamoDB tables), then Djinn, then application services. In the compose files this is enforced with `depends_on`.
 - Read `docker-compose.yml` / `docker-compose.split.yml` if needed to confirm service names and ports
 - Don't run any compose Djinn stack and `cargo run` Djinn simultaneously — they port-conflict on 9002-9006. Likewise bundled and split compose stacks conflict with each other.
 - There is no LeaseMgr service and no port 9001; each service mounts its own LeaseService on its own port.

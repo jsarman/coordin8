@@ -37,7 +37,7 @@ Provider selection is a **runtime** choice, not compile-time and not hard-coded 
 | `COORDIN8_AUTO_CREATE_TABLES` | `true`/`1` makes every store's `init()` create its tables (dev/tests). Unset = assume tables exist (production: CloudFormation) |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` | Standard AWS config; MiniStack accepts `test`/`test`/`us-east-1` |
 
-Tables are defined in `djinn/providers/dynamo/src/table.rs` (names as consts) and, for production/compose, `infra/dynamodb-tables.cfn.yml` (12 tables; `docker-compose.yml`'s `cfn-init` deploys them to MiniStack before Djinn starts, regardless of provider). Table names: `coordin8_registry`, `coordin8_txn`, `coordin8_event_subscriptions`, `coordin8_event_mailbox`, `coordin8_space`, `coordin8_space_uncommitted`, `coordin8_space_txn_taken`, `coordin8_space_watches`, plus the four `coordin8_leases_*`. **If you add or rename a table, update `table.rs`, the CFN template, and the `init()` of the store.**
+Tables are defined in `djinn/providers/dynamo/src/table.rs` (names as consts) and, for production/compose, `infra/dynamodb-tables.cfn.yml` (13 tables; `docker-compose.yml`'s `cfn-init` deploys them to MiniStack before Djinn starts, regardless of provider). Table names: `coordin8_registry`, `coordin8_txn`, `coordin8_event_subscriptions`, `coordin8_event_mailbox`, `coordin8_space`, `coordin8_space_uncommitted`, `coordin8_space_txn_taken`, `coordin8_space_watches`, plus the five `coordin8_leases_*` (registry, event, space, txn, proxy). **If you add or rename a table, update `table.rs`, the CFN template, and the `init()` of the store.**
 
 ## Adding a New Store or Backend
 

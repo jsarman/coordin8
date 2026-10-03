@@ -5,7 +5,7 @@ CloudFormation provisioning for the Coordin8 DynamoDB provider.
 ## What's Here
 
 ```
-dynamodb-tables.cfn.yml      defines all 12 DynamoDB tables used by coordin8-provider-dynamo
+dynamodb-tables.cfn.yml      defines all 13 DynamoDB tables used by coordin8-provider-dynamo
 ```
 
 This template is the **authoritative schema** for the DynamoDB provider in production. The matching `ensure_*_table` helpers in [`../djinn/providers/dynamo/`](../djinn/providers/dynamo/README.md) only run when `COORDIN8_AUTO_CREATE_TABLES=true` and exist for local dev / integration tests; in any environment that ships to AWS, deploy this template instead.

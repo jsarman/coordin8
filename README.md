@@ -205,7 +205,7 @@ No cleanup. No stale entries. The lease expired — that's the signal.
 COORDIN8_PROVIDER=dynamo docker compose up --build
 ```
 
-All 12 DynamoDB tables are created automatically. State survives container restarts.
+All 13 DynamoDB tables are created automatically. State survives container restarts.
 
 ### Demos
 
