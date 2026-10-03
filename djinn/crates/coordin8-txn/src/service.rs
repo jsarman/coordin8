@@ -17,6 +17,10 @@ use crate::manager::TxnManager;
 fn map_err(e: coordin8_core::Error) -> Status {
     match e {
         coordin8_core::Error::Unavailable(_) => Status::unavailable(e.to_string()),
+        coordin8_core::Error::TransactionCommitInProgress(_) => {
+            Status::failed_precondition(e.to_string())
+        }
+        coordin8_core::Error::TransactionOutcomeUnknown(_) => Status::unknown(e.to_string()),
         _ => Status::internal(e.to_string()),
     }
 }
@@ -115,10 +119,11 @@ impl TransactionService for TxnServiceImpl {
     async fn commit(&self, req: Request<CommitRequest>) -> Result<Response<()>, Status> {
         let r = req.into_inner();
         // v1: wait_millis ignored — all commits are synchronous
-        self.manager
-            .commit(&r.txn_id)
-            .await
-            .map_err(|e| Status::aborted(e.to_string()))?;
+        self.manager.commit(&r.txn_id).await.map_err(|e| match e {
+            coordin8_core::Error::TransactionAborted(_) => Status::aborted(e.to_string()),
+            coordin8_core::Error::TransactionNotFound(_) => Status::not_found(e.to_string()),
+            other => map_err(other),
+        })?;
         Ok(Response::new(()))
     }
 

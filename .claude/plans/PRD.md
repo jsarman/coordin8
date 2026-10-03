@@ -5,6 +5,14 @@
 
 ---
 
+## Active initiatives
+
+| Topic | Status | Notes |
+|-------|--------|-------|
+| [review-2026-10-03](review-2026-10-03/PRD.md) | In progress | Fixes from a full-repo review (2PC races, Dynamo lease/event bugs, Space txn leases, security), plus Claude tooling + docs refresh |
+
+---
+
 ## Leasing (distributed — no more "LeaseMgr")
 
 > **Architecture change landed 2026-09-06:** `.claude/plans/distributed-leasing/PRD.md`. There is no more centralized LeaseMgr service. Registry, EventMgr, Space, and TransactionMgr each embed their own `LeaseManager` and mount `LeaseService` on their own port — Jini/Apache River's `Landlord` pattern. A lease is self-describing (`grantor_host`/`grantor_port` on the `Lease` message), so a holder always knows where to renew.
