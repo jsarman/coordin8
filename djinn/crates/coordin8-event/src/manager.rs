@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use dashmap::DashMap;
 use tokio::sync::broadcast;
-use tracing::debug;
+use tracing::{debug, error};
 use uuid::Uuid;
 
 use coordin8_core::{
@@ -13,6 +13,17 @@ use coordin8_core::{
 };
 use coordin8_registry::matcher::{matches, parse_template};
 
+/// # Delivery contract
+///
+/// * **Durable** subscriptions are *at-least-once*. Every matching event is
+///   persisted into the subscription's mailbox with a per-registration,
+///   monotonically increasing sequence number (the `seq_num` the client sees),
+///   and `Receive` removes (acks) an entry only after it has been handed to the
+///   gRPC stream. A crash or disconnect between send and ack may redeliver, so
+///   clients de-duplicate on the per-registration `seq_num`.
+/// * **BestEffort** subscriptions get only the live broadcast, stamped with the
+///   per `source::event_type` counter (in-memory; resets on restart). A
+///   subscriber that falls behind is terminated with `DATA_LOSS`.
 pub struct EventManager {
     store: Arc<dyn EventStore>,
     lease_manager: Arc<dyn Leasing>,
@@ -48,14 +59,18 @@ impl EventManager {
         let resource_id = format!("event:{}", registration_id);
         let lease = self.lease_manager.grant(&resource_id, ttl_secs).await?;
 
-        // Snapshot the current global seq for this source at subscribe time.
-        let initial_seq_num = self
-            .seq_counters
-            .iter()
-            .filter(|r| r.key().starts_with(&format!("{}::", source)))
-            .map(|r| r.value().load(Ordering::SeqCst))
-            .max()
-            .unwrap_or(0);
+        // Durable seqs are per-registration and start at 1, so the baseline is
+        // 0. BestEffort snapshots the current source+type counter.
+        let initial_seq_num = if delivery == DeliveryMode::Durable {
+            0
+        } else {
+            self.seq_counters
+                .iter()
+                .filter(|r| r.key().starts_with(&format!("{}::", source)))
+                .map(|r| r.value().load(Ordering::SeqCst))
+                .max()
+                .unwrap_or(0)
+        };
 
         let sub = SubscriptionRecord {
             registration_id: registration_id.clone(),
@@ -115,11 +130,15 @@ impl EventManager {
             "event emitted"
         );
 
-        // Broadcast to all active receivers (best-effort and durable alike).
-        let _ = self.event_tx.send(event.clone());
-
-        // Enqueue into durable mailboxes for matching subscriptions.
+        // Persist into durable mailboxes FIRST, then broadcast, so a durable
+        // receiver woken by the broadcast always finds the entry in its mailbox.
+        //
+        // A failed enqueue must not be silent: the producer is told (Err) so it
+        // can retry. We still attempt every subscription and still broadcast,
+        // so one bad mailbox doesn't starve the others; a retry may therefore
+        // duplicate to subscriptions that already succeeded (at-least-once).
         let subs = self.store.list_subscriptions().await?;
+        let mut failures: Vec<String> = Vec::new();
         for sub in subs {
             if sub.source != source || sub.delivery != DeliveryMode::Durable {
                 continue;
@@ -128,11 +147,36 @@ impl EventManager {
             let mut check_attrs = attrs.clone();
             check_attrs.insert("event_type".to_string(), event_type.clone());
             if ops.is_empty() || matches(&ops, &check_attrs) {
-                let _ = self
+                if let Err(e) = self
                     .store
                     .enqueue(&sub.registration_id, event.clone())
-                    .await;
+                    .await
+                {
+                    // A subscription removed between list and enqueue is not a failure.
+                    if matches!(e, Error::SubscriptionNotFound(_)) {
+                        continue;
+                    }
+                    error!(
+                        registration_id = %sub.registration_id,
+                        event_id = %event.event_id,
+                        error = %e,
+                        "durable enqueue failed"
+                    );
+                    failures.push(format!("{}: {e}", sub.registration_id));
+                }
             }
+        }
+
+        // Live receivers: BestEffort get the event itself; Durable receivers
+        // treat it as a wake-up to re-read their mailbox.
+        let _ = self.event_tx.send(event.clone());
+
+        if !failures.is_empty() {
+            return Err(Error::Storage(format!(
+                "durable enqueue failed for {} subscription(s): {}",
+                failures.len(),
+                failures.join("; ")
+            )));
         }
 
         Ok(event)
@@ -145,9 +189,20 @@ impl EventManager {
         self.store.get_subscription(registration_id).await
     }
 
-    /// Drain all queued events from a durable mailbox.
-    pub async fn drain_mailbox(&self, registration_id: &str) -> Result<Vec<EventRecord>, Error> {
-        self.store.dequeue(registration_id).await
+    /// Read (without removing) up to `limit` queued events with
+    /// per-registration seq greater than `after_seq`.
+    pub async fn peek_mailbox(
+        &self,
+        registration_id: &str,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, Error> {
+        self.store.peek(registration_id, after_seq, limit).await
+    }
+
+    /// Acknowledge (delete) delivered mailbox entries.
+    pub async fn ack_mailbox(&self, registration_id: &str, seq_nums: &[u64]) -> Result<(), Error> {
+        self.store.ack(registration_id, seq_nums).await
     }
 
     /// Subscribe to the live broadcast channel.

@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use aws_sdk_dynamodb::{types::AttributeValue, Client};
+use aws_sdk_dynamodb::{
+    types::{AttributeValue, DeleteRequest, ReturnValue, WriteRequest},
+    Client,
+};
 use chrono::{DateTime, Utc};
 
 use coordin8_core::{DeliveryMode, Error, EventRecord, EventStore, SubscriptionRecord};
@@ -348,7 +351,48 @@ impl EventStore for DynamoEventStore {
         Ok(subs)
     }
 
-    async fn enqueue(&self, registration_id: &str, event: EventRecord) -> Result<(), Error> {
+    async fn enqueue(&self, registration_id: &str, event: EventRecord) -> Result<u64, Error> {
+        // 1. Atomically allocate the next per-registration seq on the
+        //    subscription item. The condition stops UpdateItem from upserting
+        //    a phantom subscription row for an unknown/removed registration.
+        let result = self
+            .client
+            .update_item()
+            .table_name(&self.sub_table)
+            .key(
+                "registration_id",
+                AttributeValue::S(registration_id.to_string()),
+            )
+            .update_expression("ADD mailbox_seq :one")
+            .condition_expression("attribute_exists(registration_id)")
+            .expression_attribute_values(":one", AttributeValue::N("1".into()))
+            .return_values(ReturnValue::UpdatedNew)
+            .send()
+            .await;
+
+        let resp = match result {
+            Ok(r) => r,
+            Err(e) => {
+                let is_condition_check = e
+                    .as_service_error()
+                    .is_some_and(|se| se.is_conditional_check_failed_exception());
+                return Err(if is_condition_check {
+                    Error::SubscriptionNotFound(registration_id.to_string())
+                } else {
+                    Error::Storage(format!("update_item (mailbox_seq) failed: {e}"))
+                });
+            }
+        };
+
+        let seq = resp
+            .attributes
+            .as_ref()
+            .and_then(|a| a.get("mailbox_seq"))
+            .and_then(|v| v.as_n().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| Error::Storage("update_item returned no mailbox_seq".into()))?;
+
+        // 2. Write the mailbox entry. Never overwrite an existing entry.
         let attrs_map: HashMap<String, AttributeValue> = event
             .attrs
             .iter()
@@ -359,11 +403,12 @@ impl EventStore for DynamoEventStore {
             .client
             .put_item()
             .table_name(&self.mailbox_table)
+            .condition_expression("attribute_not_exists(seq_num)")
             .item(
                 "registration_id",
                 AttributeValue::S(registration_id.to_string()),
             )
-            .item("seq_num", AttributeValue::N(event.seq_num.to_string()))
+            .item("seq_num", AttributeValue::N(seq.to_string()))
             .item("event_id", AttributeValue::S(event.event_id))
             .item("source", AttributeValue::S(event.source))
             .item("event_type", AttributeValue::S(event.event_type))
@@ -382,69 +427,129 @@ impl EventStore for DynamoEventStore {
 
         req.send()
             .await
-            .map_err(|e| Error::Storage(format!("put_item failed: {e}")))?;
+            .map_err(|e| Error::Storage(format!("put_item (mailbox seq {seq}) failed: {e}")))?;
 
-        Ok(())
+        Ok(seq)
     }
 
-    async fn dequeue(&self, registration_id: &str) -> Result<Vec<EventRecord>, Error> {
-        // Query all mailbox items ordered by seq_num (sort key)
-        let resp = self
-            .client
-            .query()
-            .table_name(&self.mailbox_table)
-            .key_condition_expression("registration_id = :rid")
-            .expression_attribute_values(":rid", AttributeValue::S(registration_id.to_string()))
-            .send()
-            .await
-            .map_err(|e| Error::Storage(format!("query failed: {e}")))?;
+    async fn peek(
+        &self,
+        registration_id: &str,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, Error> {
+        let mut events = Vec::new();
+        let mut last_key: Option<HashMap<String, AttributeValue>> = None;
 
-        let items = resp.items.unwrap_or_default();
-        let mut events = Vec::with_capacity(items.len());
+        while events.len() < limit {
+            let remaining = (limit - events.len()).min(i32::MAX as usize) as i32;
+            let resp = self
+                .client
+                .query()
+                .table_name(&self.mailbox_table)
+                .key_condition_expression("registration_id = :rid AND seq_num > :after")
+                .expression_attribute_values(":rid", AttributeValue::S(registration_id.to_string()))
+                .expression_attribute_values(":after", AttributeValue::N(after_seq.to_string()))
+                .scan_index_forward(true)
+                .limit(remaining)
+                .set_exclusive_start_key(last_key.take())
+                .send()
+                .await
+                .map_err(|e| Error::Storage(format!("query failed: {e}")))?;
 
-        // Parse and batch-delete
-        for item in &items {
-            events.push(event_from_item(item)?);
+            for item in resp.items.unwrap_or_default() {
+                events.push(event_from_item(&item)?);
+            }
+
+            last_key = resp.last_evaluated_key;
+            if last_key.is_none() {
+                break;
+            }
         }
 
-        // Delete all items we just read (batch delete, 25 at a time)
-        for chunk in items.chunks(25) {
-            let mut batch = self.client.batch_write_item();
+        events.truncate(limit);
+        Ok(events)
+    }
 
-            let delete_requests: Vec<_> = chunk
+    async fn ack(&self, registration_id: &str, seq_nums: &[u64]) -> Result<(), Error> {
+        let keys: Vec<HashMap<String, AttributeValue>> = seq_nums
+            .iter()
+            .map(|seq| mailbox_key(registration_id, &seq.to_string()))
+            .collect();
+        self.batch_delete(keys).await
+    }
+}
+
+fn mailbox_key(registration_id: &str, seq_num: &str) -> HashMap<String, AttributeValue> {
+    let mut key = HashMap::new();
+    key.insert(
+        "registration_id".to_string(),
+        AttributeValue::S(registration_id.to_string()),
+    );
+    key.insert(
+        "seq_num".to_string(),
+        AttributeValue::N(seq_num.to_string()),
+    );
+    key
+}
+
+/// Maximum attempts to flush a batch_write_item whose response still carries
+/// `UnprocessedItems` (throttling / partial failure).
+const BATCH_DELETE_MAX_ATTEMPTS: u32 = 6;
+
+impl DynamoEventStore {
+    /// Batch-delete mailbox items by key (25 per request), retrying any
+    /// `UnprocessedItems` with bounded exponential backoff. Errors if items
+    /// remain unprocessed after the final attempt.
+    async fn batch_delete(&self, keys: Vec<HashMap<String, AttributeValue>>) -> Result<(), Error> {
+        for chunk in keys.chunks(25) {
+            let mut pending: Vec<WriteRequest> = chunk
                 .iter()
-                .map(|item| {
-                    let mut key = HashMap::new();
-                    key.insert(
-                        "registration_id".to_string(),
-                        item.get("registration_id").unwrap().clone(),
-                    );
-                    key.insert("seq_num".to_string(), item.get("seq_num").unwrap().clone());
-                    aws_sdk_dynamodb::types::WriteRequest::builder()
+                .map(|key| {
+                    WriteRequest::builder()
                         .delete_request(
-                            aws_sdk_dynamodb::types::DeleteRequest::builder()
-                                .set_key(Some(key))
+                            DeleteRequest::builder()
+                                .set_key(Some(key.clone()))
                                 .build()
-                                .unwrap(),
+                                .expect("delete request key is set"),
                         )
                         .build()
                 })
                 .collect();
 
-            batch = batch.request_items(&self.mailbox_table, delete_requests);
-            batch
-                .send()
-                .await
-                .map_err(|e| Error::Storage(format!("batch_write_item failed: {e}")))?;
+            let mut attempt = 0;
+            while !pending.is_empty() {
+                if attempt >= BATCH_DELETE_MAX_ATTEMPTS {
+                    return Err(Error::Storage(format!(
+                        "batch_write_item: {} mailbox deletes still unprocessed after {attempt} attempts",
+                        pending.len()
+                    )));
+                }
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(25u64 << attempt)).await;
+                }
+                attempt += 1;
+
+                let resp = self
+                    .client
+                    .batch_write_item()
+                    .request_items(&self.mailbox_table, pending)
+                    .send()
+                    .await
+                    .map_err(|e| Error::Storage(format!("batch_write_item failed: {e}")))?;
+
+                pending = resp
+                    .unprocessed_items
+                    .and_then(|mut m| m.remove(&self.mailbox_table))
+                    .unwrap_or_default();
+            }
         }
-
-        Ok(events)
+        Ok(())
     }
-}
 
-impl DynamoEventStore {
-    /// Delete all mailbox items for a registration_id.
+    /// Delete all mailbox items for a registration_id (paginated).
     async fn drain_mailbox(&self, registration_id: &str) -> Result<(), Error> {
+        let mut last_key: Option<HashMap<String, AttributeValue>> = None;
         loop {
             let resp = self
                 .client
@@ -452,48 +557,27 @@ impl DynamoEventStore {
                 .table_name(&self.mailbox_table)
                 .key_condition_expression("registration_id = :rid")
                 .expression_attribute_values(":rid", AttributeValue::S(registration_id.to_string()))
-                .limit(25)
+                .set_exclusive_start_key(last_key.take())
                 .send()
                 .await
                 .map_err(|e| Error::Storage(format!("query failed: {e}")))?;
 
-            let items = resp.items.unwrap_or_default();
-            if items.is_empty() {
-                break;
-            }
-
-            let delete_requests: Vec<_> = items
+            let keys: Vec<_> = resp
+                .items
+                .unwrap_or_default()
                 .iter()
-                .map(|item| {
-                    let mut key = HashMap::new();
-                    key.insert(
-                        "registration_id".to_string(),
-                        item.get("registration_id").unwrap().clone(),
-                    );
-                    key.insert("seq_num".to_string(), item.get("seq_num").unwrap().clone());
-                    aws_sdk_dynamodb::types::WriteRequest::builder()
-                        .delete_request(
-                            aws_sdk_dynamodb::types::DeleteRequest::builder()
-                                .set_key(Some(key))
-                                .build()
-                                .unwrap(),
-                        )
-                        .build()
+                .filter_map(|item| {
+                    let seq = item.get("seq_num")?.as_n().ok()?;
+                    Some(mailbox_key(registration_id, seq))
                 })
                 .collect();
+            self.batch_delete(keys).await?;
 
-            self.client
-                .batch_write_item()
-                .request_items(&self.mailbox_table, delete_requests)
-                .send()
-                .await
-                .map_err(|e| Error::Storage(format!("batch_write_item failed: {e}")))?;
-
-            if items.len() < 25 {
+            last_key = resp.last_evaluated_key;
+            if last_key.is_none() {
                 break;
             }
         }
-
         Ok(())
     }
 }
@@ -613,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires MiniStack on localhost:4566"]
-    async fn enqueue_and_dequeue() {
+    async fn enqueue_peek_ack() {
         let (store, sub_table, mailbox_table, client) = setup().await;
 
         store
@@ -621,19 +705,100 @@ mod tests {
             .await
             .unwrap();
 
-        store.enqueue("reg-q", make_event("e1", 1)).await.unwrap();
-        store.enqueue("reg-q", make_event("e2", 2)).await.unwrap();
-        store.enqueue("reg-q", make_event("e3", 3)).await.unwrap();
+        // Same caller-supplied seq_num on every event: the store must assign
+        // its own per-registration seq so nothing overwrites.
+        assert_eq!(
+            store.enqueue("reg-q", make_event("e1", 1)).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            store.enqueue("reg-q", make_event("e2", 1)).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            store.enqueue("reg-q", make_event("e3", 1)).await.unwrap(),
+            3
+        );
 
-        let events = store.dequeue("reg-q").await.unwrap();
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[0].seq_num, 1);
-        assert_eq!(events[1].seq_num, 2);
-        assert_eq!(events[2].seq_num, 3);
+        let events = store.peek("reg-q", 0, 100).await.unwrap();
+        let ids: Vec<_> = events.iter().map(|e| e.event_id.as_str()).collect();
+        assert_eq!(ids, ["e1", "e2", "e3"]);
+        assert_eq!(
+            events.iter().map(|e| e.seq_num).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
 
-        // Second dequeue should be empty — events were consumed
-        let events = store.dequeue("reg-q").await.unwrap();
-        assert!(events.is_empty());
+        // peek does not consume; limit and after_seq are honored.
+        assert_eq!(store.peek("reg-q", 0, 2).await.unwrap().len(), 2);
+        let tail = store.peek("reg-q", 1, 100).await.unwrap();
+        assert_eq!(tail.iter().map(|e| e.seq_num).collect::<Vec<_>>(), [2, 3]);
+
+        store.ack("reg-q", &[1, 2]).await.unwrap();
+        let left = store.peek("reg-q", 0, 100).await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].event_id, "e3");
+
+        // Seq keeps increasing after acks; never reused.
+        assert_eq!(
+            store.enqueue("reg-q", make_event("e4", 1)).await.unwrap(),
+            4
+        );
+
+        teardown(&client, &sub_table, &mailbox_table).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn enqueue_unknown_registration_fails_without_phantom_row() {
+        let (store, sub_table, mailbox_table, client) = setup().await;
+
+        let err = store
+            .enqueue("nope", make_event("e1", 1))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::SubscriptionNotFound(_)));
+        assert!(store.list_subscriptions().await.unwrap().is_empty());
+
+        teardown(&client, &sub_table, &mailbox_table).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn seq_survives_new_store_instance_and_large_mailbox_paginates() {
+        let (store, sub_table, mailbox_table, client) = setup().await;
+        store
+            .create_subscription(make_sub("reg-big", "lease-big"))
+            .await
+            .unwrap();
+        for i in 0..60 {
+            store
+                .enqueue("reg-big", make_event(&format!("e{i}"), 7))
+                .await
+                .unwrap();
+        }
+
+        // "Restart": a fresh store over the same tables continues the seq.
+        let store2 = DynamoEventStore::with_tables(client.clone(), &sub_table, &mailbox_table);
+        assert_eq!(
+            store2
+                .enqueue("reg-big", make_event("late", 7))
+                .await
+                .unwrap(),
+            61
+        );
+
+        let all = store2.peek("reg-big", 0, 1000).await.unwrap();
+        assert_eq!(all.len(), 61);
+        assert!(all.windows(2).all(|w| w[0].seq_num < w[1].seq_num));
+
+        let seqs: Vec<u64> = all.iter().map(|e| e.seq_num).collect();
+        store2.ack("reg-big", &seqs).await.unwrap(); // > 25: multiple batches
+        assert!(store2.peek("reg-big", 0, 1000).await.unwrap().is_empty());
+
+        // remove_subscription drains whatever is left.
+        store2.enqueue("reg-big", make_event("x", 7)).await.unwrap();
+        store2.remove_subscription("reg-big").await.unwrap();
+        assert!(store2.peek("reg-big", 0, 1000).await.unwrap().is_empty());
 
         teardown(&client, &sub_table, &mailbox_table).await;
     }

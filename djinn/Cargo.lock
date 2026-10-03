@@ -850,6 +850,7 @@ dependencies = [
  "coordin8-core",
  "coordin8-lease",
  "coordin8-proto",
+ "coordin8-provider-dynamo",
  "coordin8-provider-local",
  "coordin8-registry",
  "dashmap",

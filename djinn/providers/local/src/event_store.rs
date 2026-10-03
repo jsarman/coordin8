@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -7,7 +7,15 @@ use coordin8_core::{Error, EventRecord, EventStore, SubscriptionRecord};
 
 pub struct InMemoryEventStore {
     subscriptions: DashMap<String, SubscriptionRecord>,
-    mailboxes: DashMap<String, VecDeque<EventRecord>>,
+    mailboxes: DashMap<String, Mailbox>,
+}
+
+/// Per-registration mailbox: entries keyed by a monotonic per-registration
+/// sequence. `last_seq` only grows, so seqs are never reused after an ack.
+#[derive(Default)]
+struct Mailbox {
+    last_seq: u64,
+    entries: BTreeMap<u64, EventRecord>,
 }
 
 impl InMemoryEventStore {
@@ -30,7 +38,7 @@ impl EventStore for InMemoryEventStore {
     async fn create_subscription(&self, sub: SubscriptionRecord) -> Result<(), Error> {
         let id = sub.registration_id.clone();
         self.subscriptions.insert(id.clone(), sub);
-        self.mailboxes.insert(id, VecDeque::new());
+        self.mailboxes.insert(id, Mailbox::default());
         Ok(())
     }
 
@@ -68,20 +76,45 @@ impl EventStore for InMemoryEventStore {
         Ok(self.subscriptions.iter().map(|r| r.clone()).collect())
     }
 
-    async fn enqueue(&self, registration_id: &str, event: EventRecord) -> Result<(), Error> {
+    async fn enqueue(&self, registration_id: &str, mut event: EventRecord) -> Result<u64, Error> {
         match self.mailboxes.get_mut(registration_id) {
-            Some(mut queue) => {
-                queue.push_back(event);
-                Ok(())
+            Some(mut mailbox) => {
+                mailbox.last_seq += 1;
+                let seq = mailbox.last_seq;
+                event.seq_num = seq;
+                mailbox.entries.insert(seq, event);
+                Ok(seq)
             }
             None => Err(Error::SubscriptionNotFound(registration_id.to_string())),
         }
     }
 
-    async fn dequeue(&self, registration_id: &str) -> Result<Vec<EventRecord>, Error> {
-        match self.mailboxes.get_mut(registration_id) {
-            Some(mut queue) => Ok(queue.drain(..).collect()),
-            None => Err(Error::SubscriptionNotFound(registration_id.to_string())),
+    async fn peek(
+        &self,
+        registration_id: &str,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, Error> {
+        Ok(match self.mailboxes.get(registration_id) {
+            Some(mailbox) => mailbox
+                .entries
+                .range((
+                    std::ops::Bound::Excluded(after_seq),
+                    std::ops::Bound::Unbounded,
+                ))
+                .take(limit)
+                .map(|(_, e)| e.clone())
+                .collect(),
+            None => vec![],
+        })
+    }
+
+    async fn ack(&self, registration_id: &str, seq_nums: &[u64]) -> Result<(), Error> {
+        if let Some(mut mailbox) = self.mailboxes.get_mut(registration_id) {
+            for seq in seq_nums {
+                mailbox.entries.remove(seq);
+            }
         }
+        Ok(())
     }
 }

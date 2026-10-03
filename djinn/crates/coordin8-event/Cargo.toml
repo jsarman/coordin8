@@ -22,3 +22,4 @@ futures-core = "0.3"
 
 [dev-dependencies]
 coordin8-provider-local = { workspace = true }
+coordin8-provider-dynamo = { workspace = true }
