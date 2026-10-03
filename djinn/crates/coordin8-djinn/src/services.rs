@@ -237,6 +237,7 @@ async fn serve_split<S>(
     shutdown: impl std::future::Future<Output = ()>,
     mut health: tonic_health::server::HealthReporter,
     registration: Option<Registration>,
+    stream_trigger: coordin8_core::shutdown::ShutdownTrigger,
     serve: impl FnOnce(tokio::sync::oneshot::Receiver<()>) -> S,
 ) -> Result<()>
 where
@@ -261,6 +262,9 @@ where
         if let Some(reg) = registration {
             reg.deregister().await;
         }
+        // End long-lived streams (Watch/Receive/...) so the drain doesn't
+        // wait on them; clients see UNAVAILABLE and reconnect elsewhere.
+        stream_trigger.trigger();
         let _ = stop_tx.send(());
         server_fut.await
     };
@@ -424,6 +428,7 @@ async fn embedded_landlord(
     grantor_host: &str,
     grantor_port: u16,
     auth_config: &AuthConfig,
+    shutdown: &coordin8_core::shutdown::ShutdownSignal,
 ) -> Result<(
     Arc<LeaseManager>,
     Authed<LeaseServiceServer<LeaseServiceImpl>>,
@@ -448,7 +453,8 @@ async fn embedded_landlord(
     });
 
     let svc = LeaseServiceServer::with_interceptor(
-        LeaseServiceImpl::new(Arc::clone(&manager), expiry_tx, grantor_host, grantor_port),
+        LeaseServiceImpl::new(Arc::clone(&manager), expiry_tx, grantor_host, grantor_port)
+            .with_shutdown(shutdown.clone()),
         auth_config.clone(),
     );
 
@@ -513,13 +519,14 @@ pub async fn run_all() -> Result<()> {
     // .claude/plans/grpc-security/PRD.md Decision 6. One shared config for
     // the whole bundled process.
     let auth_config = AuthConfig::from_env();
+    let (shutdown_trigger, shutdown_sig) = coordin8_core::shutdown::channel();
     if auth_config.enabled() {
         info!("  gRPC auth: enabled");
     }
 
     // ── Registry ─────────────────────────────────────────────────────────────
     let (registry_lease_manager, lease_svc_for_registry) =
-        embedded_landlord("registry", &host, 9002, &auth_config).await?;
+        embedded_landlord("registry", &host, 9002, &auth_config, &shutdown_sig).await?;
     let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
     let registry_index = Arc::new(RegistryIndex::new(registry_store.clone()));
 
@@ -553,7 +560,7 @@ pub async fn run_all() -> Result<()> {
 
     // ── EventMgr ─────────────────────────────────────────────────────────────
     let (event_lease_manager, lease_svc_for_event) =
-        embedded_landlord("event", &host, 9005, &auth_config).await?;
+        embedded_landlord("event", &host, 9005, &auth_config, &shutdown_sig).await?;
     let event_leasing: Arc<dyn Leasing> = event_lease_manager.clone();
     let (event_tx, _) = broadcast::channel::<coordin8_core::EventRecord>(256);
     let event_manager = Arc::new(EventManager::new(event_store, event_leasing, event_tx));
@@ -583,7 +590,7 @@ pub async fn run_all() -> Result<()> {
 
     // ── TransactionMgr ───────────────────────────────────────────────────────
     let (txn_lease_manager, lease_svc_for_txn) =
-        embedded_landlord("txn", &host, 9004, &auth_config).await?;
+        embedded_landlord("txn", &host, 9004, &auth_config, &shutdown_sig).await?;
     let txn_leasing: Arc<dyn Leasing> = txn_lease_manager.clone();
     let txn_manager = Arc::new(TxnManager::with_client_auth(
         txn_store,
@@ -611,7 +618,7 @@ pub async fn run_all() -> Result<()> {
 
     // ── Space ────────────────────────────────────────────────────────────────
     let (space_lease_manager, lease_svc_for_space) =
-        embedded_landlord("space", &host, 9006, &auth_config).await?;
+        embedded_landlord("space", &host, 9006, &auth_config, &shutdown_sig).await?;
     let space_leasing: Arc<dyn Leasing> = space_lease_manager.clone();
     let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
@@ -656,7 +663,8 @@ pub async fn run_all() -> Result<()> {
 
     let registry_leasing: Arc<dyn Leasing> = registry_lease_manager;
     let registry_svc = RegistryServiceServer::with_interceptor(
-        RegistryServiceImpl::new(registry_index, registry_leasing, registry_tx, &host, 9002),
+        RegistryServiceImpl::new(registry_index, registry_leasing, registry_tx, &host, 9002)
+            .with_shutdown(shutdown_sig.clone()),
         auth_config.clone(),
     );
     let proxy_svc = ProxyServiceServer::with_interceptor(
@@ -668,11 +676,12 @@ pub async fn run_all() -> Result<()> {
         auth_config.clone(),
     );
     let event_svc = EventServiceServer::with_interceptor(
-        EventServiceImpl::new(event_manager, &host, 9005),
+        EventServiceImpl::new(event_manager, &host, 9005).with_shutdown(shutdown_sig.clone()),
         auth_config.clone(),
     );
     let space_svc = SpaceServiceServer::with_interceptor(
-        SpaceServiceImpl::new(Arc::clone(&space_manager), &host, 9006),
+        SpaceServiceImpl::new(Arc::clone(&space_manager), &host, 9006)
+            .with_shutdown(shutdown_sig.clone()),
         auth_config.clone(),
     );
     let space_participant_svc = ParticipantServiceServer::with_interceptor(
@@ -765,6 +774,7 @@ pub async fn run_all() -> Result<()> {
         for reg in registrations {
             reg.deregister().await;
         }
+        shutdown_trigger.trigger();
         let _ = drain_tx.send(true);
         (&mut servers).await
     };
@@ -819,12 +829,19 @@ pub async fn run_registry_on_listener_until(
     let host = advertise_host();
 
     let auth_config = AuthConfig::from_env();
+    let (shutdown_trigger, shutdown_sig) = coordin8_core::shutdown::channel();
 
     let registry_store = registry_store_from_env().await?;
     let registry_index = Arc::new(RegistryIndex::new(registry_store));
 
-    let (lease_manager, lease_svc) =
-        embedded_landlord("registry", &host, actual_addr.port(), &auth_config).await?;
+    let (lease_manager, lease_svc) = embedded_landlord(
+        "registry",
+        &host,
+        actual_addr.port(),
+        &auth_config,
+        &shutdown_sig,
+    )
+    .await?;
     let (registry_tx, _): (RegistryBroadcast, _) = broadcast::channel(256);
 
     {
@@ -862,7 +879,8 @@ pub async fn run_registry_on_listener_until(
             registry_tx,
             &host,
             actual_addr.port(),
-        ),
+        )
+        .with_shutdown(shutdown_sig.clone()),
         auth_config.clone(),
     );
 
@@ -881,14 +899,21 @@ pub async fn run_registry_on_listener_until(
         .add_service(registry_svc)
         .add_service(lease_svc);
 
-    serve_split("registry", shutdown, health_reporter, None, |stop| {
-        server.serve_with_incoming_shutdown(
-            tokio_stream::wrappers::TcpListenerStream::new(listener),
-            async move {
-                let _ = stop.await;
-            },
-        )
-    })
+    serve_split(
+        "registry",
+        shutdown,
+        health_reporter,
+        None,
+        shutdown_trigger,
+        |stop| {
+            server.serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async move {
+                    let _ = stop.await;
+                },
+            )
+        },
+    )
     .await
 }
 
@@ -943,9 +968,16 @@ pub async fn run_event_on_listener_until(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
     let auth_config = AuthConfig::from_env();
+    let (shutdown_trigger, shutdown_sig) = coordin8_core::shutdown::channel();
 
-    let (lease_manager, lease_svc) =
-        embedded_landlord("event", advertise_host, advertise_port, &auth_config).await?;
+    let (lease_manager, lease_svc) = embedded_landlord(
+        "event",
+        advertise_host,
+        advertise_port,
+        &auth_config,
+        &shutdown_sig,
+    )
+    .await?;
     let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     let event_store = event_store_from_env().await?;
@@ -967,7 +999,8 @@ pub async fn run_event_on_listener_until(
     }
 
     let event_svc = EventServiceServer::with_interceptor(
-        EventServiceImpl::new(Arc::clone(&event_manager), advertise_host, advertise_port),
+        EventServiceImpl::new(Arc::clone(&event_manager), advertise_host, advertise_port)
+            .with_shutdown(shutdown_sig.clone()),
         auth_config.clone(),
     );
 
@@ -1007,6 +1040,7 @@ pub async fn run_event_on_listener_until(
         shutdown,
         health_reporter,
         Some(registration),
+        shutdown_trigger,
         |stop| {
             server.serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
@@ -1072,9 +1106,16 @@ pub async fn run_space_on_listener_until(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
     let auth_config = AuthConfig::from_env();
+    let (shutdown_trigger, shutdown_sig) = coordin8_core::shutdown::channel();
 
-    let (lease_manager, lease_svc) =
-        embedded_landlord("space", advertise_host, advertise_port, &auth_config).await?;
+    let (lease_manager, lease_svc) = embedded_landlord(
+        "space",
+        advertise_host,
+        advertise_port,
+        &auth_config,
+        &shutdown_sig,
+    )
+    .await?;
     let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     // Split mode: auto-enlist dials TxnMgr over Registry lazily — no I/O
@@ -1118,7 +1159,8 @@ pub async fn run_space_on_listener_until(
     }
 
     let space_svc = SpaceServiceServer::with_interceptor(
-        SpaceServiceImpl::new(Arc::clone(&space_manager), advertise_host, advertise_port),
+        SpaceServiceImpl::new(Arc::clone(&space_manager), advertise_host, advertise_port)
+            .with_shutdown(shutdown_sig.clone()),
         auth_config.clone(),
     );
     let space_participant_svc = ParticipantServiceServer::with_interceptor(
@@ -1163,6 +1205,7 @@ pub async fn run_space_on_listener_until(
         shutdown,
         health_reporter,
         Some(registration),
+        shutdown_trigger,
         |stop| {
             server.serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
@@ -1225,9 +1268,16 @@ pub async fn run_txn_on_listener_until(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
     let auth_config = AuthConfig::from_env();
+    let (shutdown_trigger, shutdown_sig) = coordin8_core::shutdown::channel();
 
-    let (lease_manager, lease_svc) =
-        embedded_landlord("txn", advertise_host, advertise_port, &auth_config).await?;
+    let (lease_manager, lease_svc) = embedded_landlord(
+        "txn",
+        advertise_host,
+        advertise_port,
+        &auth_config,
+        &shutdown_sig,
+    )
+    .await?;
     let leasing: Arc<dyn Leasing> = lease_manager.clone();
 
     let txn_store = txn_store_from_env().await?;
@@ -1295,6 +1345,7 @@ pub async fn run_txn_on_listener_until(
         shutdown,
         health_reporter,
         Some(registration),
+        shutdown_trigger,
         |stop| {
             server.serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
@@ -1360,6 +1411,7 @@ pub async fn run_proxy_on_listener_until(
     let actual_addr = listener.local_addr()?;
     let advertise_port = actual_addr.port();
     let auth_config = AuthConfig::from_env();
+    let (shutdown_trigger, _shutdown_sig) = coordin8_core::shutdown::channel();
 
     // Construct immediately against a not-yet-resolved Registry — see
     // PendingCapabilityResolver. Discovery happens in the background task
@@ -1428,6 +1480,7 @@ pub async fn run_proxy_on_listener_until(
         shutdown,
         health_reporter,
         Some(registration),
+        shutdown_trigger,
         |stop| {
             server.serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),

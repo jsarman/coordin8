@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use coordin8_bootstrap::self_register;
 use coordin8_proto::coordin8::registry_service_client::RegistryServiceClient;
-use coordin8_proto::coordin8::LookupRequest;
+use coordin8_proto::coordin8::{LookupRequest, RegistryWatchRequest};
 
 /// Kills the wrapped child on drop so a failing assertion doesn't leak it.
 struct KillOnDrop(Child);
@@ -212,4 +212,52 @@ async fn cancel_uses_post_recovery_lease_id() {
         !is_registered(&url, "CancelRecoveryTest").await,
         "cancel left the post-recovery entry in Registry"
     );
+}
+
+/// A client holding an open Registry `Watch` (every SDK `ServiceDiscovery`
+/// does) must not stall the drain: on SIGTERM the stream ends with
+/// UNAVAILABLE (so the client's reconnect loop kicks in rather than seeing a
+/// clean EOF) and the process exits 0 far inside the grace period.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_watch_stream_ends_unavailable_and_exit_is_prompt() {
+    let port = free_port().await;
+    let hp = format!("127.0.0.1:{port}");
+    let url = format!("http://{hp}");
+    let mut registry = djinn(
+        &["registry"],
+        &[
+            ("COORDIN8_BIND_ADDR", hp.clone()),
+            ("COORDIN8_SHUTDOWN_GRACE_SECS", "15".to_string()),
+        ],
+    );
+    wait_until_accepting(&hp, Duration::from_secs(10)).await;
+
+    let channel = tonic::transport::Channel::from_shared(url)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut stream = RegistryServiceClient::new(channel)
+        .watch(RegistryWatchRequest {
+            template: HashMap::new(),
+        })
+        .await
+        .expect("open Watch")
+        .into_inner();
+
+    let started = Instant::now();
+    registry.sigterm();
+
+    let end = tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .expect("Watch stream still open 5s after SIGTERM");
+    let status = end.expect_err("expected the stream to end with an error, not a clean EOF");
+    assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+
+    let exit = registry
+        .wait_exit(Duration::from_secs(5))
+        .await
+        .expect("registry did not exit promptly");
+    assert!(exit.success(), "expected exit 0, got {exit:?}");
+    assert!(started.elapsed() < Duration::from_secs(8));
 }
