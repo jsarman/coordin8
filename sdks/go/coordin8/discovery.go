@@ -25,6 +25,12 @@ type cachedConn struct {
 // for service changes. Repeated calls with the same template return a cached
 // connection without any additional Djinn round-trips.
 //
+// One leased proxy is kept per template. Proxy re-resolves the upstream on
+// every new TCP connection, so a held conn survives the service expiring,
+// restarting or moving: while the service is absent, RPCs fail at connect
+// time and succeed again once it re-registers, with no client action. The
+// cache entry is replaced only if the proxy's own lease is lost.
+//
 // Usage:
 //
 //	discovery := coordin8.NewServiceDiscovery(djinn)
@@ -56,7 +62,7 @@ func (sd *ServiceDiscovery) Get(ctx context.Context, tmpl Template) (*grpc.Clien
 	key := templateKey(tmpl)
 
 	sd.mu.Lock()
-	if entry, ok := sd.cache[key]; ok && !entry.stale {
+	if entry, ok := sd.cache[key]; ok && !entry.stale && !handleLost(entry.handle) {
 		conn := entry.conn
 		sd.mu.Unlock()
 		return conn, nil
@@ -89,7 +95,9 @@ func (sd *ServiceDiscovery) refresh(ctx context.Context, key string, tmpl Templa
 	}
 
 	sd.mu.Lock()
-	// Close any previously stale entry
+	// Replace the previous entry. It is only ever replaced because its proxy
+	// lease was lost, so the proxy (and any conn a caller holds on it) is
+	// already dead; tearing it down cannot hurt anyone.
 	if old, exists := sd.cache[key]; exists {
 		old.conn.Close()
 		_ = old.handle.Release(context.Background())
@@ -146,38 +154,14 @@ func (sd *ServiceDiscovery) watch(ctx context.Context, key string, tmpl Template
 func (sd *ServiceDiscovery) consumeWatch(ctx context.Context, ch <-chan RegistryEvent, key string, tmpl Template) {
 	for {
 		select {
-		case evt, ok := <-ch:
+		case _, ok := <-ch:
 			if !ok {
 				return
 			}
-			switch evt.Type {
-			case "expired":
-				sd.mu.Lock()
-				if entry, exists := sd.cache[key]; exists {
-					entry.stale = true
-				}
-				sd.mu.Unlock()
-			case "registered":
-				sd.mu.Lock()
-				stale := false
-				if entry, exists := sd.cache[key]; exists {
-					stale = entry.stale
-				}
-				sd.mu.Unlock()
-				if stale {
-					_, _ = sd.refresh(ctx, key, tmpl)
-				}
-			case "modified":
-				// Service changed (attrs, transport, re-registration).
-				// Mark stale so the next Get() or a follow-up registered
-				// event triggers a refresh through a fresh proxy.
-				sd.mu.Lock()
-				if entry, exists := sd.cache[key]; exists {
-					entry.stale = true
-				}
-				sd.mu.Unlock()
-				_, _ = sd.refresh(ctx, key, tmpl)
-			}
+			// "expired" / "registered" / "modified": nothing to do. Proxy
+			// re-resolves the upstream on every new TCP connection, so the
+			// existing proxy stays valid while the service restarts or moves.
+			// Only a lost proxy lease replaces an entry (see watchLease).
 		case <-ctx.Done():
 			return
 		}
@@ -211,4 +195,13 @@ func templateKey(tmpl Template) string {
 		parts = append(parts, k+"="+tmpl[k])
 	}
 	return strings.Join(parts, ",")
+}
+
+func handleLost(h *ProxyHandle) bool {
+	select {
+	case <-h.Lost():
+		return true
+	default:
+		return false
+	}
 }

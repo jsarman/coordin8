@@ -7,16 +7,19 @@ import type { ProxyHandle } from "./proxy-client";
 interface CachedEntry {
   proxyId: string;
   localPort: number;
-  stale: boolean;
   handle: ProxyHandle;
 }
 
 /**
  * Jini-inspired service discovery manager.
  *
- * Caches proxies by template. Repeated calls with the same template return
- * a cached address without any additional Djinn round-trips. Watches the
- * Registry for changes and invalidates/refreshes cached connections.
+ * Keeps one leased proxy per template. Repeated calls with the same template
+ * return a cached address without any additional Djinn round-trips. Proxy
+ * re-resolves the upstream on every new TCP connection, so a client held on
+ * the address survives the service expiring, restarting or moving: while the
+ * service is absent, RPCs fail at connect time and succeed again once it
+ * re-registers, with no client action. The cache entry is replaced only if
+ * the proxy's own lease is lost.
  *
  * ```typescript
  * const discovery = ServiceDiscovery.watch(djinn);
@@ -47,7 +50,7 @@ export class ServiceDiscovery {
   /**
    * Return a ready client for the first capability matching template.
    * Subsequent calls with the same template reuse a cached proxy port
-   * unless invalidated by a Registry Watch event.
+   * unless the proxy's own lease was lost.
    *
    * @param factory  creates the client from a `"localhost:<port>"` address
    * @param template attribute map to match against the Registry
@@ -56,8 +59,8 @@ export class ServiceDiscovery {
     const key = templateKey(template);
 
     const entry = this.cache.get(key);
-    // A lost lease (Djinn reclaimed the proxy) counts as stale: reopen.
-    if (entry && !entry.stale && !entry.handle.isLost()) {
+    // Only a lost proxy lease (Djinn reclaimed the proxy) forces a reopen.
+    if (entry && !entry.handle.isLost()) {
       return factory(`localhost:${entry.localPort}`);
     }
 
@@ -66,7 +69,8 @@ export class ServiceDiscovery {
   }
 
   private async refresh(key: string, template: Template): Promise<CachedEntry> {
-    // Close old entry if stale
+    // The entry is only ever replaced because its proxy lease was lost, so
+    // the proxy is already dead; release it best-effort.
     const old = this.cache.get(key);
     if (old) {
       await this.djinn.proxy().release(old.proxyId).catch(() => {});
@@ -76,7 +80,6 @@ export class ServiceDiscovery {
     const entry: CachedEntry = {
       proxyId: handle.proxyId,
       localPort: handle.localPort,
-      stale: false,
       handle,
     };
     this.cache.set(key, entry);
@@ -92,25 +95,11 @@ export class ServiceDiscovery {
   private startWatch(key: string, template: Template): void {
     const stream = this.djinn.registry().watch(
       template,
-      (evt: RegistryEventRecord) => {
-        if (this.closed) return;
-        const entry = this.cache.get(key);
-        if (!entry) return;
-
-        switch (evt.type) {
-          case "expired":
-            entry.stale = true;
-            break;
-          case "registered":
-            if (entry.stale) {
-              this.refresh(key, template).catch(() => {});
-            }
-            break;
-          case "modified":
-            entry.stale = true;
-            this.refresh(key, template).catch(() => {});
-            break;
-        }
+      (_evt: RegistryEventRecord) => {
+        // "expired" / "registered" / "modified": nothing to do. Proxy
+        // re-resolves the upstream on every new TCP connection, so the
+        // existing proxy stays valid while the service restarts or moves.
+        // Only a lost proxy lease replaces an entry (see get()).
       },
       (_err: Error) => {
         if (this.closed) return;
@@ -133,9 +122,9 @@ export class ServiceDiscovery {
       stream.cancel();
     }
     this.watches.clear();
-    const entries = [...this.cache.values()];
+    const ids = [...this.cache.values()].map(e => e.proxyId);
     this.cache.clear();
-    await Promise.all(entries.map(e => this.djinn.proxy().release(e.proxyId)));
+    await Promise.all(ids.map(id => this.djinn.proxy().release(id)));
   }
 }
 

@@ -84,7 +84,7 @@ All three SDKs have the same surface area:
 | **Java** | `sdks/java/` | `./gradlew build` |
 | **Node.js/TypeScript** | `sdks/node/` | `npm run build` |
 
-Each SDK provides: `DjinnClient`, `LeaseClient`, `RegistryClient`, `ProxyClient`, `SpaceClient`, and **`ServiceDiscovery`** — a Jini-inspired one-liner client that caches proxy connections by template and refreshes on lease expiry:
+Each SDK provides: `DjinnClient`, `LeaseClient`, `RegistryClient`, `ProxyClient`, `SpaceClient`, and **`ServiceDiscovery`** — a Jini-inspired one-liner client that keeps one leased proxy per template (held connections survive the service restarting or moving; the proxy is reopened only if its own lease is lost):
 
 ```go
 // Go — one line to get a typed stub

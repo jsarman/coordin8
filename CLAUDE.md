@@ -62,7 +62,7 @@ Configuration via env vars:
 
 ### ServiceDiscovery
 
-Wraps the proxy layer with a cache keyed by template. Stale-on-lease-expire, eager-refresh-on-register. The one-liner pattern:
+Wraps the proxy layer with a cache keyed by template. One leased proxy per template; the proxy re-resolves the upstream per connection, so held connections survive the service moving or restarting; the entry is replaced only if the proxy's own lease is lost. The one-liner pattern:
 
 ```go
 // Go
