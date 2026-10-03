@@ -19,7 +19,7 @@ A subsection README is **not** a duplicate of the root README. It is the answer 
 Every subsection README must include:
 
 1. **Title + one-sentence purpose** — what this subsection is, in plain language
-2. **Where it fits** — one paragraph linking it to the larger Coordin8 architecture (LeaseMgr, Registry, Proxy, EventMgr, TransactionMgr, Space) and naming the upstream/downstream components
+2. **Where it fits** — one paragraph linking it to the larger Coordin8 architecture (Registry, EventMgr, Space, Proxy, TransactionMgr — leasing is distributed: each of Registry/EventMgr/Space/TransactionMgr embeds its own LeaseManager, there is no LeaseMgr service) and naming the upstream/downstream components
 3. **Layout** — brief tree or bullet list of the notable files/dirs and what each does
 4. **Build / test / run** — exact commands, copy-pasteable, run from this directory
 5. **Gotchas** — only the non-obvious ones specific to this subsection (proto naming quirks, env vars, port bindings, etc.). Skip generic advice.
@@ -32,7 +32,9 @@ Optional sections when relevant:
 ## What to Avoid
 
 - Do not restate the root `README.md` or `CLAUDE.md`. Link to them instead.
-- Do not invent commands you haven't verified work. Read `Cargo.toml`, `package.json`, `go.mod`, `Makefile`, `.mise.toml` to find real commands.
+- Do not mention a LeaseMgr service or port 9001 — they no longer exist. Current ports: Registry 9002, Proxy 9003, TransactionMgr 9004, EventMgr 9005, Space 9006.
+- Do not claim the Go/Java/Node SDKs or CLI have tests — they currently have none, and CI covers Rust plus Go build/vet only.
+- Do not invent commands you haven't verified work. Read `Cargo.toml`, `package.json`, `go.mod`, `Makefile`, `.mise.toml`, `.github/workflows/ci.yml` to find real commands. Crate package names live under `djinn/crates/*` and `djinn/providers/{local,dynamo}` (`coordin8-provider-local`, `coordin8-provider-dynamo`).
 - Do not document private internals at length — that's what code comments are for.
 - No emojis unless the existing project docs use them.
 - No marketing fluff. No "blazingly fast", no "production-ready", no "robust".

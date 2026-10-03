@@ -69,73 +69,73 @@ impl TxnManager {
         endpoint: String,
         crash_count: u64,
     ) -> Result<(), Error> {
-        let txn = self
-            .store
-            .get(txn_id)
-            .await?
-            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
-
-        if txn.state != TransactionState::Active {
-            return Err(Error::TransactionTerminal(txn_id.to_string()));
-        }
-
         let participant = ParticipantRecord {
             endpoint: endpoint.clone(),
             crash_count,
         };
+        // Atomic with the Active check inside the store: an enlist that loses
+        // the race against commit()/abort() is rejected with TransactionTerminal.
         self.store.add_participant(txn_id, participant).await?;
         debug!(txn_id, endpoint, crash_count, "participant enlisted");
         Ok(())
     }
 
     pub async fn get_state(&self, txn_id: &str) -> Result<TransactionState, Error> {
-        let txn = self
-            .store
+        Ok(self.fetch(txn_id).await?.state)
+    }
+
+    async fn fetch(&self, txn_id: &str) -> Result<TransactionRecord, Error> {
+        self.store
             .get(txn_id)
             .await?
-            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
-        Ok(txn.state)
+            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))
     }
 
     /// Abort a transaction due to lease expiry. Does not cancel the lease
     /// (it's already expired). Called by the lease expiry cascade.
+    ///
+    /// Only an `Active` transaction can be aborted this way. If a commit is in
+    /// flight (`Voting`/`Prepared`) it owns the outcome and this is a no-op.
     pub async fn abort_expired(&self, txn_id: &str) -> Result<(), Error> {
-        let txn = match self.store.get(txn_id).await? {
-            Some(t) => t,
-            None => return Ok(()), // already cleaned up
-        };
-
-        match txn.state {
-            TransactionState::Committed | TransactionState::Aborted => return Ok(()),
-            _ => {}
+        match self
+            .store
+            .update_state_if(txn_id, TransactionState::Active, TransactionState::Aborted)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(
+                    txn_id,
+                    "lease expired but transaction not Active — ignoring"
+                );
+                return Ok(());
+            }
+            Err(Error::TransactionNotFound(_)) => return Ok(()), // already cleaned up
+            Err(e) => return Err(e),
         }
 
-        self.store
-            .update_state(txn_id, TransactionState::Aborted)
-            .await?;
-        Self::do_abort_participants(txn_id, &txn.participants, &self.client_auth).await;
+        // Enlists are rejected from here on, so this list is final.
+        if let Some(txn) = self.store.get(txn_id).await? {
+            Self::do_abort_participants(txn_id, &txn.participants, &self.client_auth).await;
+        }
         debug!(txn_id, "transaction aborted (lease expired)");
         Ok(())
     }
 
     pub async fn abort(&self, txn_id: &str) -> Result<(), Error> {
-        let txn = self
+        if !self
             .store
-            .get(txn_id)
+            .update_state_if(txn_id, TransactionState::Active, TransactionState::Aborted)
             .await?
-            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
-
-        match txn.state {
-            TransactionState::Committed => {
-                return Err(Error::TransactionTerminal(txn_id.to_string()));
-            }
-            TransactionState::Aborted => return Ok(()), // idempotent
-            _ => {}
+        {
+            return match self.fetch(txn_id).await?.state {
+                TransactionState::Committed => Err(Error::TransactionTerminal(txn_id.to_string())),
+                TransactionState::Aborted => Ok(()), // idempotent
+                _ => Err(Error::TransactionCommitInProgress(txn_id.to_string())),
+            };
         }
 
-        self.store
-            .update_state(txn_id, TransactionState::Aborted)
-            .await?;
+        let txn = self.fetch(txn_id).await?;
         Self::do_abort_participants(txn_id, &txn.participants, &self.client_auth).await;
         self.lease_manager.cancel(&txn.lease_id).await.ok();
         debug!(txn_id, "transaction aborted");
@@ -143,26 +143,32 @@ impl TxnManager {
     }
 
     pub async fn commit(&self, txn_id: &str) -> Result<(), Error> {
-        let txn = self
+        // Claim the commit: only one caller can move Active -> Voting.
+        if !self
             .store
-            .get(txn_id)
+            .update_state_if(txn_id, TransactionState::Active, TransactionState::Voting)
             .await?
-            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
-
-        // ── Terminal state guards ─────────────────────────────────────────────
-        match txn.state {
-            TransactionState::Committed => return Ok(()), // idempotent
-            TransactionState::Aborted => return Err(Error::TransactionAborted(txn_id.to_string())),
-            _ => {}
+        {
+            return match self.fetch(txn_id).await?.state {
+                TransactionState::Committed => Ok(()), // idempotent
+                TransactionState::Aborted => Err(Error::TransactionAborted(txn_id.to_string())),
+                _ => Err(Error::TransactionCommitInProgress(txn_id.to_string())),
+            };
         }
 
+        // Re-read after the CAS: enlists are now rejected, so this participant
+        // list is final.
+        let txn = self.fetch(txn_id).await?;
         let participants = txn.participants.clone();
 
         // ── Zero participants: trivially committed ────────────────────────────
         if participants.is_empty() {
-            self.store
-                .update_state(txn_id, TransactionState::Committed)
-                .await?;
+            self.transition(
+                txn_id,
+                TransactionState::Voting,
+                TransactionState::Committed,
+            )
+            .await?;
             self.lease_manager.cancel(&txn.lease_id).await.ok();
             debug!(txn_id, "zero-participant commit");
             return Ok(());
@@ -171,34 +177,40 @@ impl TxnManager {
         // ── Single-participant optimization: PrepareAndCommit ─────────────────
         if participants.len() == 1 {
             let ep = &participants[0].endpoint;
-            self.store
-                .update_state(txn_id, TransactionState::Voting)
-                .await?;
             match Self::call_prepare_and_commit(ep, txn_id, &self.client_auth).await {
                 Ok(PrepareVote::Prepared) | Ok(PrepareVote::NotChanged) => {
-                    self.store
-                        .update_state(txn_id, TransactionState::Committed)
-                        .await?;
+                    self.transition(
+                        txn_id,
+                        TransactionState::Voting,
+                        TransactionState::Committed,
+                    )
+                    .await?;
                     self.lease_manager.cancel(&txn.lease_id).await.ok();
                     debug!(txn_id, "single-participant commit via PrepareAndCommit");
                     return Ok(());
                 }
-                Ok(PrepareVote::Aborted) | Err(_) => {
-                    self.store
-                        .update_state(txn_id, TransactionState::Aborted)
+                Ok(PrepareVote::Aborted) => {
+                    self.transition(txn_id, TransactionState::Voting, TransactionState::Aborted)
                         .await?;
                     self.lease_manager.cancel(&txn.lease_id).await.ok();
-                    warn!(txn_id, endpoint = %ep, "single participant voted ABORTED or failed");
+                    warn!(txn_id, endpoint = %ep, "single participant voted ABORTED");
                     return Err(Error::TransactionAborted(txn_id.to_string()));
+                }
+                Err(e) => {
+                    // Transport error: the participant may or may not have
+                    // committed. Do NOT record Aborted; leave the txn in Voting.
+                    error!(
+                        txn_id,
+                        endpoint = %ep,
+                        error = %e,
+                        "PrepareAndCommit failed — commit outcome unknown"
+                    );
+                    return Err(Error::TransactionOutcomeUnknown(txn_id.to_string()));
                 }
             }
         }
 
         // ── Phase 1: Prepare (parallel) ───────────────────────────────────────
-        self.store
-            .update_state(txn_id, TransactionState::Voting)
-            .await?;
-
         let prepare_futs: Vec<_> = participants
             .iter()
             .map(|p| {
@@ -234,8 +246,7 @@ impl TxnManager {
 
         if let Some(reason) = abort_reason {
             warn!(txn_id, reason, "prepare phase failed — aborting all");
-            self.store
-                .update_state(txn_id, TransactionState::Aborted)
+            self.transition(txn_id, TransactionState::Voting, TransactionState::Aborted)
                 .await?;
             Self::do_abort_participants(txn_id, &participants, &self.client_auth).await;
             self.lease_manager.cancel(&txn.lease_id).await.ok();
@@ -243,8 +254,7 @@ impl TxnManager {
         }
 
         // ── Phase 2: Commit (parallel, PREPARED voters only) ─────────────────
-        self.store
-            .update_state(txn_id, TransactionState::Prepared)
+        self.transition(txn_id, TransactionState::Voting, TransactionState::Prepared)
             .await?;
 
         let commit_futs: Vec<_> = prepared_eps
@@ -272,9 +282,12 @@ impl TxnManager {
             }
         }
 
-        self.store
-            .update_state(txn_id, TransactionState::Committed)
-            .await?;
+        self.transition(
+            txn_id,
+            TransactionState::Prepared,
+            TransactionState::Committed,
+        )
+        .await?;
         self.lease_manager.cancel(&txn.lease_id).await.ok();
         debug!(
             txn_id,
@@ -282,6 +295,33 @@ impl TxnManager {
             "transaction committed"
         );
         Ok(())
+    }
+
+    /// CAS a state transition owned by the in-flight commit. Failure means
+    /// some other actor changed the state under us — an invariant violation.
+    async fn transition(
+        &self,
+        txn_id: &str,
+        from: TransactionState,
+        to: TransactionState,
+    ) -> Result<(), Error> {
+        if self
+            .store
+            .update_state_if(txn_id, from.clone(), to.clone())
+            .await?
+        {
+            Ok(())
+        } else {
+            error!(
+                txn_id,
+                ?from,
+                ?to,
+                "unexpected state during commit transition"
+            );
+            Err(Error::Internal(format!(
+                "transaction {txn_id}: expected state {from:?} during commit"
+            )))
+        }
     }
 
     // ── Outbound gRPC helpers (static — no self needed) ───────────────────────
