@@ -40,7 +40,7 @@ public class RegistryClient {
      */
     public RegisterResult register(String interfaceName, Map<String, String> attrs,
                                    long ttlSeconds, TransportDescriptor transport) {
-        return register(interfaceName, attrs, ttlSeconds, transport, null);
+        return register(interfaceName, attrs, ttlSeconds, transport, null, null);
     }
 
     /**
@@ -51,11 +51,13 @@ public class RegistryClient {
      * @param ttlSeconds    requested lease TTL in seconds
      * @param transport     optional transport descriptor
      * @param capabilityId  if non-null, updates an existing registration in-place
+     * @param leaseId       the lease ID from the original registration; required
+     *                      (ownership proof) when capabilityId is non-null
      * @return the registration result with capability ID and lease
      */
     public RegisterResult register(String interfaceName, Map<String, String> attrs,
                                    long ttlSeconds, TransportDescriptor transport,
-                                   String capabilityId) {
+                                   String capabilityId, String leaseId) {
         RegisterRequest.Builder req = RegisterRequest.newBuilder()
                 .setInterface(interfaceName)
                 .setTtlSeconds(ttlSeconds);
@@ -71,11 +73,14 @@ public class RegistryClient {
         if (capabilityId != null) {
             req.setCapabilityId(capabilityId);
         }
+        if (leaseId != null) {
+            req.setLeaseId(leaseId);
+        }
 
         RegisterResponse resp = stub.register(req.build());
-        String leaseId = resp.hasLease() ? resp.getLease().getLeaseId() : null;
+        String grantedLeaseId = resp.hasLease() ? resp.getLease().getLeaseId() : null;
         long grantedTtl = resp.hasLease() ? resp.getLease().getTtlSeconds() : 0;
-        return new RegisterResult(resp.getCapabilityId(), leaseId, grantedTtl);
+        return new RegisterResult(resp.getCapabilityId(), grantedLeaseId, grantedTtl);
     }
 
     /**
@@ -84,13 +89,16 @@ public class RegistryClient {
      * @param capabilityId the capability to modify
      * @param addAttrs     attributes to add or update (null to skip)
      * @param removeAttrs  attribute keys to remove (null to skip)
+     * @param leaseId      the entry's lease ID from registration (ownership proof)
      * @return the updated capability
      */
     public CapabilityRecord modifyAttrs(String capabilityId,
                                         Map<String, String> addAttrs,
-                                        List<String> removeAttrs) {
+                                        List<String> removeAttrs,
+                                        String leaseId) {
         ModifyAttrsRequest.Builder req = ModifyAttrsRequest.newBuilder()
-                .setCapabilityId(capabilityId);
+                .setCapabilityId(capabilityId)
+                .setLeaseId(leaseId == null ? "" : leaseId);
         if (addAttrs != null) {
             req.putAllAddAttrs(addAttrs);
         }

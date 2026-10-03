@@ -251,6 +251,7 @@ pub async fn self_register(
             config: transport_config.clone(),
         }),
         capability_id: String::new(),
+        lease_id: String::new(),
     };
 
     let resp = registry_client.register(initial).await?.into_inner();
@@ -282,6 +283,9 @@ pub async fn self_register(
             config: transport_config,
         }),
         capability_id: capability_id.clone(),
+        // Ownership proof: the lease_id Registry granted us. A renewal keeps
+        // the same lease_id; a fresh re-registration below replaces it.
+        lease_id: lease_id.clone(),
     };
 
     let renewal_interval = Duration::from_secs(ttl_seconds.max(3) / 3);
@@ -313,9 +317,15 @@ pub async fn self_register(
                                 "registry entry unusable (gone, or its lease expired) — re-registering fresh"
                             );
                             current_request.capability_id = String::new();
+                            current_request.lease_id = String::new();
                             match registry_client.register(current_request.clone()).await {
                                 Ok(resp) => {
-                                    let new_cap_id = resp.into_inner().capability_id;
+                                    let resp = resp.into_inner();
+                                    let new_cap_id = resp.capability_id;
+                                    current_request.lease_id = resp
+                                        .lease
+                                        .map(|l| l.lease_id)
+                                        .unwrap_or_default();
                                     info!(
                                         old_capability_id = %log_cap_id,
                                         new_capability_id = %new_cap_id,

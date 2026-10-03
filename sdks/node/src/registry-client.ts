@@ -63,14 +63,16 @@ export class RegistryClient {
 
   /**
    * Register a service capability. Returns capability ID and lease info.
-   * Pass capabilityId to update an existing registration in-place.
+   * Pass capabilityId and leaseId (ownership proof, from the original
+   * registration) to update an existing registration in-place.
    */
   register(
     interfaceName: string,
     attrs: Record<string, string>,
     transport: TransportDescriptor | undefined,
     ttlSeconds: number,
-    capabilityId?: string
+    capabilityId?: string,
+    leaseId?: string
   ): Promise<RegisterResult> {
     return new Promise((resolve, reject) => {
       this.stub.register(
@@ -80,6 +82,7 @@ export class RegistryClient {
           transport,
           ttlSeconds,
           capabilityId: capabilityId ?? "",
+          leaseId: leaseId ?? "",
         },
         (err, res) => {
           if (err || !res) return reject(err);
@@ -99,7 +102,8 @@ export class RegistryClient {
   modifyAttrs(
     capabilityId: string,
     addAttrs?: Record<string, string>,
-    removeAttrs?: string[]
+    removeAttrs?: string[],
+    leaseId?: string
   ): Promise<CapabilityRecord> {
     return new Promise((resolve, reject) => {
       this.stub.modifyAttrs(
@@ -107,6 +111,7 @@ export class RegistryClient {
           capabilityId,
           addAttrs: addAttrs ?? {},
           removeAttrs: removeAttrs ?? [],
+          leaseId: leaseId ?? "",
         },
         (err, res) => {
           if (err || !res) return reject(err);

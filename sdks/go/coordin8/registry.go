@@ -27,6 +27,9 @@ type Registration struct {
 	// Set to update an existing registration in-place (re-registration).
 	// Leave empty for a new registration.
 	CapabilityID string
+	// Ownership proof for re-registration: the LeaseID returned by the
+	// original Register call. Required when CapabilityID is set.
+	LeaseID string
 }
 
 // TransportDescriptor describes how to reach a service.
@@ -70,14 +73,16 @@ type RegisterResult struct {
 }
 
 // Register registers a service with the Djinn. Returns the server-assigned
-// capability ID and lease ID. Pass the capability ID back on subsequent
-// Register calls to update an existing registration in-place.
+// capability ID and lease ID. Pass the capability ID and lease ID back on
+// subsequent Register calls (Registration.CapabilityID / LeaseID) to update an
+// existing registration in-place; the lease ID proves ownership.
 func (c *RegistryClient) Register(ctx context.Context, reg Registration) (RegisterResult, error) {
 	req := &pb.RegisterRequest{
 		Interface:    reg.Interface,
 		Attrs:        reg.Attrs,
 		TtlSeconds:   uint64(reg.TTL.Seconds()),
 		CapabilityId: reg.CapabilityID,
+		LeaseId:      reg.LeaseID,
 	}
 	if reg.Transport != nil {
 		req.Transport = &pb.TransportDescriptor{

@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
@@ -204,7 +205,14 @@ impl SpaceService for SpaceServiceImpl {
             while let Some(result) = stream.next().await {
                 let tuple = match result {
                     Ok(t) => t,
-                    Err(_) => continue, // lagged — skip
+                    Err(BroadcastStreamRecvError::Lagged(_)) => {
+                        let _ = tx
+                            .send(Err(Status::data_loss(
+                                "watcher lagged; resubscribe and re-snapshot",
+                            )))
+                            .await;
+                        return;
+                    }
                 };
 
                 if !ops.is_empty() && !matches(&ops, &tuple.attrs) {
@@ -272,5 +280,66 @@ impl SpaceService for SpaceServiceImpl {
         self.manager.cancel(&tuple_id).await.map_err(map_err)?;
 
         Ok(Response::new(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coordin8_core::{Leasing, TupleRecord};
+    use coordin8_lease::LeaseManager;
+    use coordin8_provider_local::{InMemoryLeaseStore, InMemorySpaceStore};
+    use tokio::sync::broadcast;
+
+    /// A Notify watcher that falls behind the broadcast must be told
+    /// (DATA_LOSS), not silently handed a stream with a gap in it.
+    #[tokio::test]
+    async fn notify_stream_that_lags_ends_with_data_loss() {
+        let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
+            Arc::new(InMemoryLeaseStore::new()),
+            coordin8_core::LeaseConfig::default(),
+            broadcast::channel(16).0,
+        ));
+        let (tuple_tx, _) = broadcast::channel::<TupleRecord>(2);
+        let (expiry_tx, _) = broadcast::channel::<TupleRecord>(2);
+        let manager = Arc::new(SpaceManager::new(
+            Arc::new(InMemorySpaceStore::new()),
+            lease_manager,
+            tuple_tx,
+            expiry_tx,
+        ));
+        let svc = SpaceServiceImpl::new(manager.clone(), "127.0.0.1", 9006);
+
+        let mut stream = svc
+            .notify(Request::new(NotifyRequest {
+                template: Default::default(),
+                on: SpaceEventType::Appearance as i32,
+                ttl_seconds: 60,
+                handback: vec![],
+                txn_id: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Single-threaded runtime: the forwarding task has not polled yet, so
+        // these overflow the 2-slot broadcast before it drains anything.
+        for _ in 0..10 {
+            manager
+                .write(Default::default(), vec![], 60, "t".into(), None, None)
+                .await
+                .unwrap();
+        }
+
+        let mut saw_loss = false;
+        while let Some(item) = stream.next().await {
+            if let Err(status) = item {
+                assert_eq!(status.code(), tonic::Code::DataLoss);
+                saw_loss = true;
+                break;
+            }
+        }
+        assert!(saw_loss, "lagged watcher must receive DATA_LOSS");
+        assert!(stream.next().await.is_none(), "stream ends after DATA_LOSS");
     }
 }
