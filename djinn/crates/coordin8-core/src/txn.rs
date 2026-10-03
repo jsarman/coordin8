@@ -59,6 +59,18 @@ pub trait TxnStore: Send + Sync {
     async fn create(&self, record: TransactionRecord) -> Result<(), Error>;
     async fn get(&self, txn_id: &str) -> Result<Option<TransactionRecord>, Error>;
     async fn update_state(&self, txn_id: &str, state: TransactionState) -> Result<(), Error>;
+    /// Atomic compare-and-set on the transaction state. Returns `Ok(true)` if
+    /// the state was `expected` and is now `new`; `Ok(false)` if the state
+    /// differed (nothing written). `TransactionNotFound` if the txn is missing.
+    async fn update_state_if(
+        &self,
+        txn_id: &str,
+        expected: TransactionState,
+        new: TransactionState,
+    ) -> Result<bool, Error>;
+    /// Append a participant, atomically with a check that the txn is `Active`.
+    /// Returns `TransactionTerminal` if the state is anything else, and
+    /// `TransactionNotFound` if the txn is missing.
     async fn add_participant(
         &self,
         txn_id: &str,
