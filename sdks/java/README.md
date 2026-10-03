@@ -26,7 +26,7 @@ var greeter = discovery.get(GreeterGrpc::newBlockingStub, Map.of("interface", "G
 
 ```bash
 ./gradlew build
-./gradlew test
+./gradlew test        # JUnit 5 suite against fake gRPC servers (also runs as part of `build`)
 ./gradlew clean
 ```
 
