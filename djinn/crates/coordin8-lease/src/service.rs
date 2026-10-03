@@ -1,6 +1,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
@@ -181,7 +182,9 @@ impl LeaseService for LeaseServiceImpl {
                         None
                     }
                 }
-                Err(_) => None, // lagged — skip
+                Err(BroadcastStreamRecvError::Lagged(_)) => Some(Err(Status::data_loss(
+                    "watcher lagged; resubscribe and re-snapshot",
+                ))),
             }
         });
 
@@ -258,5 +261,45 @@ mod tests {
 
         assert_eq!(resp.results.len(), RENEW_ALL_MAX_ITEMS);
         assert!(resp.results.iter().all(|r| r.lease.is_none()));
+    }
+
+    /// A WatchExpiry subscriber that falls behind the broadcast must get
+    /// DATA_LOSS rather than silently missing expiry events.
+    #[tokio::test]
+    async fn watch_expiry_that_lags_ends_with_data_loss() {
+        let store: Arc<dyn coordin8_core::LeaseStore> = Arc::new(InMemoryLeaseStore::default());
+        let manager = Arc::new(LeaseManager::new(
+            store,
+            LeaseConfig::default(),
+            tokio::sync::broadcast::channel(16).0,
+        ));
+        let record = manager.grant("res", 60).await.unwrap();
+        let expiry_tx = tokio::sync::broadcast::channel(2).0;
+        let svc = LeaseServiceImpl::new(manager, expiry_tx.clone(), "127.0.0.1", 9002);
+
+        let mut stream = svc
+            .watch_expiry(Request::new(WatchExpiryRequest {
+                resource_id: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        for _ in 0..10 {
+            let _ = expiry_tx.send(LeaseReclaimed {
+                record: record.clone(),
+                reason: ReclaimReason::Expired,
+            });
+        }
+
+        let mut saw_loss = false;
+        while let Some(item) = stream.next().await {
+            if let Err(status) = item {
+                assert_eq!(status.code(), tonic::Code::DataLoss);
+                saw_loss = true;
+                break;
+            }
+        }
+        assert!(saw_loss, "lagged watcher must receive DATA_LOSS");
     }
 }

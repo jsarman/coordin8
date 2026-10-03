@@ -110,7 +110,7 @@ class RegistryClientTest {
     @Test
     void registerSendsAllFieldsAndMapsResult() {
         var transport = new RegistryClient.TransportDescriptor("grpc", Map.of("host", "x", "port", "9"));
-        RegisterResult r = client.register("Greeter", Map.of("a", "b"), 20, transport, "cap-7");
+        RegisterResult r = client.register("Greeter", Map.of("a", "b"), 20, transport, "cap-7", "lease-7");
         RegisterRequest req = fake.lastRegister;
         assertEquals("Greeter", req.getInterface());
         assertEquals(Map.of("a", "b"), req.getAttrsMap());
@@ -118,6 +118,7 @@ class RegistryClientTest {
         assertEquals("grpc", req.getTransport().getType());
         assertEquals(Map.of("host", "x", "port", "9"), req.getTransport().getConfigMap());
         assertEquals("cap-7", req.getCapabilityId());
+        assertEquals("lease-7", req.getLeaseId()); // ownership proof for re-registration
         assertEquals("cap-7", r.capabilityId());
         assertEquals("lease-1", r.leaseId());
         assertEquals(10, r.grantedTtlSeconds());
@@ -129,6 +130,7 @@ class RegistryClientTest {
         RegisterRequest req = fake.lastRegister;
         assertFalse(req.hasTransport());
         assertEquals("", req.getCapabilityId());
+        assertEquals("", req.getLeaseId());
         assertTrue(req.getAttrsMap().isEmpty());
         assertEquals("cap-new", r.capabilityId());
     }
@@ -143,8 +145,9 @@ class RegistryClientTest {
 
     @Test
     void modifyAttrsSendsAddAndRemove() {
-        CapabilityRecord rec = client.modifyAttrs("c1", Map.of("k", "v"), List.of("gone"));
+        CapabilityRecord rec = client.modifyAttrs("c1", Map.of("k", "v"), List.of("gone"), "lease-c1");
         assertEquals("c1", fake.lastModify.getCapabilityId());
+        assertEquals("lease-c1", fake.lastModify.getLeaseId()); // ownership proof
         assertEquals(Map.of("k", "v"), fake.lastModify.getAddAttrsMap());
         assertEquals(List.of("gone"), fake.lastModify.getRemoveAttrsList());
         assertEquals("c1", rec.capabilityId());
@@ -153,7 +156,7 @@ class RegistryClientTest {
 
     @Test
     void modifyAttrsAcceptsNulls() {
-        client.modifyAttrs("c1", null, null);
+        client.modifyAttrs("c1", null, null, null);
         assertTrue(fake.lastModify.getAddAttrsMap().isEmpty());
         assertEquals(0, fake.lastModify.getRemoveAttrsCount());
     }

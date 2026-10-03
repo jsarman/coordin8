@@ -312,6 +312,7 @@ pub async fn self_register(
             config: transport_config.clone(),
         }),
         capability_id: String::new(),
+        lease_id: String::new(),
     };
 
     let resp = registry_client.register(initial).await?.into_inner();
@@ -343,6 +344,9 @@ pub async fn self_register(
             config: transport_config,
         }),
         capability_id: capability_id.clone(),
+        // Ownership proof: the lease_id Registry granted us. A renewal keeps
+        // the same lease_id; a fresh re-registration below replaces it.
+        lease_id: lease_id.clone(),
     };
 
     let renewal_interval = Duration::from_secs(ttl_seconds.max(3) / 3);
@@ -384,16 +388,21 @@ pub async fn self_register(
                                 "registry entry unusable (gone, or its lease expired) — re-registering fresh"
                             );
                             current_request.capability_id = String::new();
+                            current_request.lease_id = String::new();
                             // Nothing live to cancel until re-registration succeeds.
                             current_for_task.lock().unwrap().lease_id = String::new();
                             match registry_client.register(current_request.clone()).await {
                                 Ok(resp) => {
                                     let resp = resp.into_inner();
                                     let new_cap_id = resp.capability_id;
+                                    let new_lease_id =
+                                        resp.lease.map(|l| l.lease_id).unwrap_or_default();
+                                    // The request proves ownership on the next renewal;
+                                    // the shared state lets shutdown cancel this lease.
+                                    current_request.lease_id = new_lease_id.clone();
                                     {
                                         let mut cur = current_for_task.lock().unwrap();
-                                        cur.lease_id =
-                                            resp.lease.map(|l| l.lease_id).unwrap_or_default();
+                                        cur.lease_id = new_lease_id;
                                         cur.capability_id = new_cap_id.clone();
                                     }
                                     info!(

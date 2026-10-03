@@ -28,6 +28,10 @@ message RegisterRequest {
     TransportDescriptor transport = 4;
     // Set to update an existing entry (re-registration). Leave empty for new.
     string capability_id = 5;
+    // Ownership proof for re-registration: the entry's current lease_id, as
+    // returned to the original registrant. Required when capability_id is set;
+    // mismatch or missing yields PERMISSION_DENIED. Ignored for new entries.
+    string lease_id = 6;
 }
 
 message RegisterResponse {
@@ -41,6 +45,9 @@ message ModifyAttrsRequest {
     map<string, string> add_attrs = 2;
     // Attribute keys to remove.
     repeated string remove_attrs = 3;
+    // Ownership proof: the entry's current lease_id (from RegisterResponse).
+    // Mismatch or missing yields PERMISSION_DENIED.
+    string lease_id = 4;
 }
 
 message LookupRequest {

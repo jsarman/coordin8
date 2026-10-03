@@ -34,6 +34,12 @@ export interface RegisterRequest {
     | undefined;
   /** Set to update an existing entry (re-registration). Leave empty for new. */
   capabilityId: string;
+  /**
+   * Ownership proof for re-registration: the entry's current lease_id, as
+   * returned to the original registrant. Required when capability_id is set;
+   * mismatch or missing yields PERMISSION_DENIED. Ignored for new entries.
+   */
+  leaseId: string;
 }
 
 export interface RegisterRequest_AttrsEntry {
@@ -52,6 +58,11 @@ export interface ModifyAttrsRequest {
   addAttrs: { [key: string]: string };
   /** Attribute keys to remove. */
   removeAttrs: string[];
+  /**
+   * Ownership proof: the entry's current lease_id (from RegisterResponse).
+   * Mismatch or missing yields PERMISSION_DENIED.
+   */
+  leaseId: string;
 }
 
 export interface ModifyAttrsRequest_AddAttrsEntry {
@@ -150,7 +161,7 @@ export function registryEvent_EventTypeToJSON(object: RegistryEvent_EventType): 
 }
 
 function createBaseRegisterRequest(): RegisterRequest {
-  return { interface: "", attrs: {}, ttlSeconds: 0, transport: undefined, capabilityId: "" };
+  return { interface: "", attrs: {}, ttlSeconds: 0, transport: undefined, capabilityId: "", leaseId: "" };
 }
 
 export const RegisterRequest = {
@@ -169,6 +180,9 @@ export const RegisterRequest = {
     }
     if (message.capabilityId !== "") {
       writer.uint32(42).string(message.capabilityId);
+    }
+    if (message.leaseId !== "") {
+      writer.uint32(50).string(message.leaseId);
     }
     return writer;
   },
@@ -218,6 +232,13 @@ export const RegisterRequest = {
 
           message.capabilityId = reader.string();
           continue;
+        case 6:
+          if (tag !== 50) {
+            break;
+          }
+
+          message.leaseId = reader.string();
+          continue;
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -239,6 +260,7 @@ export const RegisterRequest = {
       ttlSeconds: isSet(object.ttlSeconds) ? globalThis.Number(object.ttlSeconds) : 0,
       transport: isSet(object.transport) ? TransportDescriptor.fromJSON(object.transport) : undefined,
       capabilityId: isSet(object.capabilityId) ? globalThis.String(object.capabilityId) : "",
+      leaseId: isSet(object.leaseId) ? globalThis.String(object.leaseId) : "",
     };
   },
 
@@ -265,6 +287,9 @@ export const RegisterRequest = {
     if (message.capabilityId !== "") {
       obj.capabilityId = message.capabilityId;
     }
+    if (message.leaseId !== "") {
+      obj.leaseId = message.leaseId;
+    }
     return obj;
   },
 
@@ -285,6 +310,7 @@ export const RegisterRequest = {
       ? TransportDescriptor.fromPartial(object.transport)
       : undefined;
     message.capabilityId = object.capabilityId ?? "";
+    message.leaseId = object.leaseId ?? "";
     return message;
   },
 };
@@ -438,7 +464,7 @@ export const RegisterResponse = {
 };
 
 function createBaseModifyAttrsRequest(): ModifyAttrsRequest {
-  return { capabilityId: "", addAttrs: {}, removeAttrs: [] };
+  return { capabilityId: "", addAttrs: {}, removeAttrs: [], leaseId: "" };
 }
 
 export const ModifyAttrsRequest = {
@@ -451,6 +477,9 @@ export const ModifyAttrsRequest = {
     });
     for (const v of message.removeAttrs) {
       writer.uint32(26).string(v!);
+    }
+    if (message.leaseId !== "") {
+      writer.uint32(34).string(message.leaseId);
     }
     return writer;
   },
@@ -486,6 +515,13 @@ export const ModifyAttrsRequest = {
 
           message.removeAttrs.push(reader.string());
           continue;
+        case 4:
+          if (tag !== 34) {
+            break;
+          }
+
+          message.leaseId = reader.string();
+          continue;
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -507,6 +543,7 @@ export const ModifyAttrsRequest = {
       removeAttrs: globalThis.Array.isArray(object?.removeAttrs)
         ? object.removeAttrs.map((e: any) => globalThis.String(e))
         : [],
+      leaseId: isSet(object.leaseId) ? globalThis.String(object.leaseId) : "",
     };
   },
 
@@ -527,6 +564,9 @@ export const ModifyAttrsRequest = {
     if (message.removeAttrs?.length) {
       obj.removeAttrs = message.removeAttrs;
     }
+    if (message.leaseId !== "") {
+      obj.leaseId = message.leaseId;
+    }
     return obj;
   },
 
@@ -543,6 +583,7 @@ export const ModifyAttrsRequest = {
       return acc;
     }, {});
     message.removeAttrs = object.removeAttrs?.map((e) => e) || [];
+    message.leaseId = object.leaseId ?? "";
     return message;
   },
 };
