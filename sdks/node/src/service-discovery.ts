@@ -2,11 +2,13 @@ import type { ClientReadableStream } from "@grpc/grpc-js";
 import { DjinnClient } from "./djinn-client";
 import type { Template, RegistryEventRecord } from "./registry-client";
 import type { RegistryEvent } from "../gen/coordin8/registry";
+import type { ProxyHandle } from "./proxy-client";
 
 interface CachedEntry {
   proxyId: string;
   localPort: number;
   stale: boolean;
+  handle: ProxyHandle;
 }
 
 /**
@@ -54,7 +56,8 @@ export class ServiceDiscovery {
     const key = templateKey(template);
 
     const entry = this.cache.get(key);
-    if (entry && !entry.stale) {
+    // A lost lease (Djinn reclaimed the proxy) counts as stale: reopen.
+    if (entry && !entry.stale && !entry.handle.isLost()) {
       return factory(`localhost:${entry.localPort}`);
     }
 
@@ -74,6 +77,7 @@ export class ServiceDiscovery {
       proxyId: handle.proxyId,
       localPort: handle.localPort,
       stale: false,
+      handle,
     };
     this.cache.set(key, entry);
 

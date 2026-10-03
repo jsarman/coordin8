@@ -12,9 +12,9 @@ This template is the **authoritative schema** for the DynamoDB provider in produ
 
 ## Tables
 
-All `PAY_PER_REQUEST`. The four `coordin8_leases_*` tables have DynamoDB TTL enabled.
+All `PAY_PER_REQUEST`. The five `coordin8_leases_*` tables have DynamoDB TTL enabled.
 
-Leasing is distributed — there's no standalone LeaseMgr, so there's no single shared leases table either. Registry, EventMgr, Space, and TransactionMgr each own their own lease table, namespaced by service (`coordin8-djinn/src/services.rs`'s `lease_store_from_env()` builds `coordin8_leases_{namespace}` at runtime — keep this list in sync with that function if a new leasing service is ever added).
+Leasing is distributed — there's no standalone LeaseMgr, so there's no single shared leases table either. Registry, EventMgr, Space, TransactionMgr, and Proxy each own their own lease table, namespaced by service (`coordin8-djinn/src/services.rs`'s `lease_store_from_env()` builds `coordin8_leases_{namespace}` at runtime — keep this list in sync with that function if a new leasing service is ever added).
 
 | Table                          | Owner          |
 |--------------------------------|----------------|
@@ -22,6 +22,7 @@ Leasing is distributed — there's no standalone LeaseMgr, so there's no single 
 | `coordin8_leases_event`        | EventMgr       |
 | `coordin8_leases_space`        | Space          |
 | `coordin8_leases_txn`          | TransactionMgr |
+| `coordin8_leases_proxy`        | Proxy          |
 | `coordin8_registry`            | Registry       |
 | `coordin8_txn`                 | TransactionMgr |
 | `coordin8_event_subscriptions` | EventMgr       |

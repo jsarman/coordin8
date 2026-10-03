@@ -17,13 +17,21 @@ import {
   type ServiceError,
   type UntypedServiceImplementation,
 } from "@grpc/grpc-js";
+import Long from "long";
 import _m0 from "protobufjs/minimal";
 import { Empty } from "../google/protobuf/empty";
+import { Lease } from "./lease";
 
 export const protobufPackage = "coordin8";
 
 export interface OpenRequest {
   template: { [key: string]: string };
+  /**
+   * Requested lease TTL in seconds. 0 = LEASE_ANY (server's preferred TTL),
+   * u64::MAX = LEASE_FOREVER. The proxy is reclaimed (listener closed) when
+   * the lease expires or is cancelled — renew via the returned Lease's grantor.
+   */
+  ttlSeconds: number;
 }
 
 export interface OpenRequest_TemplateEntry {
@@ -34,6 +42,11 @@ export interface OpenRequest_TemplateEntry {
 export interface ProxyHandle {
   proxyId: string;
   localPort: number;
+  /**
+   * Lease governing this proxy's lifetime. resource_id is "proxy:<proxy_id>".
+   * Carries grantor_host/grantor_port — the Proxy's own LeaseService.
+   */
+  lease: Lease | undefined;
 }
 
 export interface ReleaseRequest {
@@ -41,7 +54,7 @@ export interface ReleaseRequest {
 }
 
 function createBaseOpenRequest(): OpenRequest {
-  return { template: {} };
+  return { template: {}, ttlSeconds: 0 };
 }
 
 export const OpenRequest = {
@@ -49,6 +62,9 @@ export const OpenRequest = {
     Object.entries(message.template).forEach(([key, value]) => {
       OpenRequest_TemplateEntry.encode({ key: key as any, value }, writer.uint32(10).fork()).ldelim();
     });
+    if (message.ttlSeconds !== 0) {
+      writer.uint32(16).uint64(message.ttlSeconds);
+    }
     return writer;
   },
 
@@ -69,6 +85,13 @@ export const OpenRequest = {
             message.template[entry1.key] = entry1.value;
           }
           continue;
+        case 2:
+          if (tag !== 16) {
+            break;
+          }
+
+          message.ttlSeconds = longToNumber(reader.uint64() as Long);
+          continue;
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -86,6 +109,7 @@ export const OpenRequest = {
           return acc;
         }, {})
         : {},
+      ttlSeconds: isSet(object.ttlSeconds) ? globalThis.Number(object.ttlSeconds) : 0,
     };
   },
 
@@ -99,6 +123,9 @@ export const OpenRequest = {
           obj.template[k] = v;
         });
       }
+    }
+    if (message.ttlSeconds !== 0) {
+      obj.ttlSeconds = Math.round(message.ttlSeconds);
     }
     return obj;
   },
@@ -114,6 +141,7 @@ export const OpenRequest = {
       }
       return acc;
     }, {});
+    message.ttlSeconds = object.ttlSeconds ?? 0;
     return message;
   },
 };
@@ -193,7 +221,7 @@ export const OpenRequest_TemplateEntry = {
 };
 
 function createBaseProxyHandle(): ProxyHandle {
-  return { proxyId: "", localPort: 0 };
+  return { proxyId: "", localPort: 0, lease: undefined };
 }
 
 export const ProxyHandle = {
@@ -203,6 +231,9 @@ export const ProxyHandle = {
     }
     if (message.localPort !== 0) {
       writer.uint32(16).int32(message.localPort);
+    }
+    if (message.lease !== undefined) {
+      Lease.encode(message.lease, writer.uint32(26).fork()).ldelim();
     }
     return writer;
   },
@@ -228,6 +259,13 @@ export const ProxyHandle = {
 
           message.localPort = reader.int32();
           continue;
+        case 3:
+          if (tag !== 26) {
+            break;
+          }
+
+          message.lease = Lease.decode(reader, reader.uint32());
+          continue;
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -241,6 +279,7 @@ export const ProxyHandle = {
     return {
       proxyId: isSet(object.proxyId) ? globalThis.String(object.proxyId) : "",
       localPort: isSet(object.localPort) ? globalThis.Number(object.localPort) : 0,
+      lease: isSet(object.lease) ? Lease.fromJSON(object.lease) : undefined,
     };
   },
 
@@ -252,6 +291,9 @@ export const ProxyHandle = {
     if (message.localPort !== 0) {
       obj.localPort = Math.round(message.localPort);
     }
+    if (message.lease !== undefined) {
+      obj.lease = Lease.toJSON(message.lease);
+    }
     return obj;
   },
 
@@ -262,6 +304,7 @@ export const ProxyHandle = {
     const message = createBaseProxyHandle();
     message.proxyId = object.proxyId ?? "";
     message.localPort = object.localPort ?? 0;
+    message.lease = (object.lease !== undefined && object.lease !== null) ? Lease.fromPartial(object.lease) : undefined;
     return message;
   },
 };
@@ -397,6 +440,21 @@ export type DeepPartial<T> = T extends Builtin ? T
 type KeysOfUnion<T> = T extends T ? keyof T : never;
 export type Exact<P, I extends P> = P extends Builtin ? P
   : P & { [K in keyof P]: Exact<P[K], I[K]> } & { [K in Exclude<keyof I, KeysOfUnion<P>>]: never };
+
+function longToNumber(long: Long): number {
+  if (long.gt(globalThis.Number.MAX_SAFE_INTEGER)) {
+    throw new globalThis.Error("Value is larger than Number.MAX_SAFE_INTEGER");
+  }
+  if (long.lt(globalThis.Number.MIN_SAFE_INTEGER)) {
+    throw new globalThis.Error("Value is smaller than Number.MIN_SAFE_INTEGER");
+  }
+  return long.toNumber();
+}
+
+if (_m0.util.Long !== Long) {
+  _m0.util.Long = Long as any;
+  _m0.configure();
+}
 
 function isObject(value: any): boolean {
   return typeof value === "object" && value !== null;
