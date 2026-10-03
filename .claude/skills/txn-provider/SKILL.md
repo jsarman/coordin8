@@ -1,3 +1,8 @@
+---
+name: txn-provider
+description: Domain knowledge for the TxnStore trait and its InMemory/DynamoDB providers (2PC transaction records, participants, state transitions). Use when implementing or modifying TxnStore, TransactionMgr storage, the coordin8_txn table, or 2PC state-transition logic.
+---
+
 # txn-provider
 
 Domain knowledge for implementing and modifying TxnStore providers. Load this skill when working on transaction-related storage backends.
@@ -63,6 +68,7 @@ The InMemory implementation (`providers/local/src/txn_store.rs`) is the referenc
 ### update_state
 - MUST return `Error::TransactionNotFound` if txn doesn't exist
 - Update only the `state` field, preserve everything else
+- **It is an unconditional overwrite of `state`** in both providers: the store does not validate the transition (e.g. it will happily set `Committed` -> `Active`, or overwrite a concurrent `Aborted`). The trait has no compare-and-set. Any caller that needs a guarded transition (lease-expiry abort racing a commit) must guard it above the store (TxnManager) or the trait needs a CAS variant implemented in BOTH providers (Dynamo: `ConditionExpression: #s = :expected`). Don't build a read-then-`update_state` state machine and call it atomic.
 
 ### add_participant
 - MUST return `Error::TransactionNotFound` if txn doesn't exist
@@ -86,7 +92,7 @@ The InMemory implementation (`providers/local/src/txn_store.rs`) is the referenc
 
 ## DynamoDB Table Schema
 
-Table: `coordin8_txn`
+Table: `coordin8_txn` (`TXN_TABLE`; `DynamoTxnStore::new` / `with_table`; created by `init()` only when `COORDIN8_AUTO_CREATE_TABLES=true|1`, otherwise via `infra/dynamodb-tables.cfn.yml`)
 
 | Attribute | Type | Role |
 |-----------|------|------|
@@ -109,10 +115,11 @@ No GSI needed — transactions are always looked up by `txn_id`.
 
 ## How Transactions Wire Into the System
 
-- Each transaction has a `lease_id`. The resource_id convention is `txn:{txn_id}`.
-- Lease expires → `TxnManager::abort_expired(txn_id)` is called from the expiry cascade in `main.rs`.
+- Each transaction has a `lease_id` granted by TransactionMgr's OWN embedded `LeaseManager` (namespace `txn`; Dynamo lease table `coordin8_leases_txn`; port 9004). The resource_id convention is `txn:{txn_id}`.
+- Lease reclaimed → `TxnManager::abort_expired(txn_id)` is called from the cascade in `coordin8-djinn/src/services.rs` (`run_all` / `run_txn_on_listener`).
 - The TxnManager orchestrates 2PC: begin → enlist participants → prepare → commit/abort.
-- Participants expose `ParticipantService` gRPC — the TxnManager calls them back during prepare/commit/abort.
+- Participants expose `ParticipantService` gRPC — the TxnManager calls them back during prepare/commit/abort. Space is one (auto-enlists via the `TxnEnlister` trait in `coordin8-core`: `LocalTxnEnlister` in bundled mode, `RemoteTxnEnlister` discovering TxnMgr lazily through Registry in split mode).
+- `participants` is read-modify-append: concurrent `add_participant` on InMemory is a `push` under the map lock, on Dynamo an atomic `list_append`. Both are safe; duplicates are NOT de-duplicated by either.
 
 ## File Locations
 
@@ -121,7 +128,8 @@ No GSI needed — transactions are always looked up by `txn_id`.
 | `djinn/crates/coordin8-core/src/txn.rs` | Trait + records + enums |
 | `djinn/crates/coordin8-txn/` | TxnManager + 2PC orchestration |
 | `djinn/providers/local/src/txn_store.rs` | InMemory reference |
-| `djinn/providers/dynamo/src/txn_store.rs` | DynamoDB implementation (to be created) |
+| `djinn/providers/dynamo/src/txn_store.rs` | DynamoDB implementation |
+| `djinn/crates/coordin8-djinn/src/services.rs` | `txn_store_from_env()` + expiry cascade |
 
 ## Test Expectations
 
@@ -133,3 +141,5 @@ No GSI needed — transactions are always looked up by `txn_id`.
 6. **remove** — remove, verify get returns None
 7. **remove non-existent** — silent, no error
 8. **list_all** — multiple txns, verify all returned
+
+Dynamo tests are `#[ignore]` (need MiniStack) and never run in CI: `cd djinn && cargo test -p coordin8-provider-dynamo txn_store -- --ignored`.
