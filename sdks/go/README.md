@@ -41,11 +41,9 @@ greeter := pb.NewGreeterClient(conn)
 
 ```bash
 go build ./...
-go test  ./...
-
-# from the repo root
-mise r test-go     # equivalent
 ```
+
+The Go SDK has no tests yet. `go test ./...` (and `mise r test-go`) compiles the packages and passes with "no test files".
 
 ## Regenerating Stubs
 
