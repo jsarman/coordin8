@@ -41,13 +41,18 @@ impl LeaseManager {
         self.store.get(lease_id).await
     }
 
-    /// Called by the reaper. Returns expired leases and removes them from the store.
+    /// Called by the reaper. Removes expired leases from the store and returns
+    /// only those actually removed (a lease renewed or cancelled since it was
+    /// listed is skipped).
     pub async fn drain_expired(&self) -> Result<Vec<LeaseRecord>, Error> {
         let expired = self.store.list_expired().await?;
-        for record in &expired {
-            self.store.remove(&record.lease_id).await?;
+        let mut removed = Vec::with_capacity(expired.len());
+        for record in expired {
+            if self.store.remove_if_unchanged(&record).await? {
+                removed.push(record);
+            }
         }
-        Ok(expired)
+        Ok(removed)
     }
 
     /// The broadcast channel this manager's reaper (and `cancel()`) publish

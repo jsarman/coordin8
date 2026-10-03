@@ -32,6 +32,12 @@ pub enum Error {
     #[error("transaction aborted: {0}")]
     TransactionAborted(String),
 
+    #[error("transaction commit already in progress: {0}")]
+    TransactionCommitInProgress(String),
+
+    #[error("transaction commit outcome unknown: {0}")]
+    TransactionOutcomeUnknown(String),
+
     #[error("tuple not found: {0}")]
     TupleNotFound(String),
 

@@ -1,3 +1,8 @@
+---
+name: event-provider
+description: Domain knowledge for the EventStore trait and its InMemory/DynamoDB providers (leased subscriptions, durable mailboxes, sequence numbers). Use when implementing or modifying EventStore, EventMgr storage, the event subscription/mailbox tables, or durable event delivery.
+---
+
 # event-provider
 
 Domain knowledge for implementing and modifying EventStore providers. Load this skill when working on event subscription and mailbox storage backends.
@@ -92,21 +97,21 @@ The InMemory implementation (`providers/local/src/event_store.rs`) is the refere
 
 ## DynamoDB Table Schema
 
-### Subscriptions table: `coordin8_events`
+### Subscriptions table: `coordin8_event_subscriptions` (`EVENT_SUB_TABLE`)
 
 | Attribute | Type | Role |
 |-----------|------|------|
 | `registration_id` | S | Hash key (PK) |
 | `source` | S | Event source filter |
 | `template` | M | HashMap<String, String> as DynamoDB Map |
-| `delivery_mode` | S | "Durable" or "BestEffort" |
+| `delivery` | S | "Durable" or "BestEffort" |
 | `lease_id` | S | |
 | `handback` | B | Binary blob |
 | `initial_seq_num` | N | Starting sequence number |
 
 GSI: `lease_id-index` (PK: `lease_id`) for `remove_by_lease`
 
-### Mailbox table: `coordin8_event_mailbox`
+### Mailbox table: `coordin8_event_mailbox` (`EVENT_MAILBOX_TABLE`)
 
 | Attribute | Type | Role |
 |-----------|------|------|
@@ -131,12 +136,22 @@ GSI: `lease_id-index` (PK: `lease_id`) for `remove_by_lease`
 - **AWS SDK error matching**: always use typed `SdkError::ServiceError` patterns. Never string-match.
 - Paginate `list_subscriptions` with `LastEvaluatedKey`.
 
+## InMemory vs Dynamo: known divergence traps
+
+Check these whenever you touch either provider; each has bitten (or would bite) this store:
+
+- **Mailbox shape.** InMemory is a `VecDeque` (append, keeps duplicates, order = arrival). Dynamo's mailbox is keyed `(registration_id, seq_num)`, so a second event with the same `seq_num` silently OVERWRITES the first. Sequence numbers must therefore be unique per registration, and the EventManager's seq counter is in-process memory — after a restart with a durable store it restarts from its initial value and can collide with rows still in the mailbox.
+- **`enqueue`/`dequeue` on a missing subscription** must return `Error::SubscriptionNotFound` (InMemory does, via the mailbox map). A Dynamo `enqueue` that is a bare `put_item` with no existence check would succeed and orphan the row; verify the subscription exists (or use a conditional/transactional write).
+- **`dequeue` is read-then-delete, not atomic**, and must paginate the query (`LastEvaluatedKey`) and retry `UnprocessedItems` from `batch_write_item`; otherwise large mailboxes are partially returned or events are lost/duplicated.
+- **Subscription removal must also clear the mailbox** (`drain_mailbox`) on both `remove_subscription` and `remove_by_lease`.
+
 ## How Events Wire Into the System
 
-- Each subscription has a `lease_id`. The resource_id convention is `event:{registration_id}`.
-- Lease expires → `EventManager::unsubscribe_by_lease(lease_id)` called from expiry cascade.
+- Each subscription has a `lease_id`, granted by EventMgr's OWN embedded `LeaseManager` (namespace `event`; Dynamo lease table `coordin8_leases_event`). The resource_id convention is `event:{registration_id}`.
+- Lease reclaimed (expiry or cancel) → `EventManager::unsubscribe_by_lease(lease_id)` called from the cascade in `coordin8-djinn/src/services.rs`.
 - The EventManager wraps the store and adds broadcast delivery for live streams.
 - Durable subscriptions get mailboxed events; BestEffort subscriptions only get live broadcast.
+- Client-facing streams read a `tokio::sync::broadcast` channel: handle `RecvError::Lagged` explicitly (resync from the mailbox for Durable) rather than ending the stream.
 
 ## File Locations
 
@@ -145,7 +160,8 @@ GSI: `lease_id-index` (PK: `lease_id`) for `remove_by_lease`
 | `djinn/crates/coordin8-core/src/event.rs` | Trait + records + enums |
 | `djinn/crates/coordin8-event/` | EventManager + broadcast delivery |
 | `djinn/providers/local/src/event_store.rs` | InMemory reference |
-| `djinn/providers/dynamo/src/event_store.rs` | DynamoDB implementation (to be created) |
+| `djinn/providers/dynamo/src/event_store.rs` | DynamoDB implementation (`DynamoEventStore::new` / `with_tables`) |
+| `djinn/crates/coordin8-djinn/src/services.rs` | `event_store_from_env()` + expiry cascade |
 
 ## Test Expectations
 
@@ -160,3 +176,5 @@ GSI: `lease_id-index` (PK: `lease_id`) for `remove_by_lease`
 9. **enqueue non-existent subscription** — returns SubscriptionNotFound
 10. **dequeue non-existent subscription** — returns SubscriptionNotFound
 11. **remove_subscription cleans mailbox** — enqueue events, remove sub, verify mailbox gone
+
+DynamoDB tests are `#[ignore]` (need MiniStack), so CI never runs them: `cd djinn && cargo test -p coordin8-provider-dynamo event_store -- --ignored`.
