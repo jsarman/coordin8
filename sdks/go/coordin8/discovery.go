@@ -37,6 +37,10 @@ type ServiceDiscovery struct {
 	mu      sync.Mutex
 	cache   map[string]*cachedConn
 	cancels map[string]context.CancelFunc
+	// retired holds entries replaced by a refresh while their proxy was still
+	// alive. A caller may still hold the old conn (and the proxy re-resolves
+	// per connection, so it keeps working); they are released on Close.
+	retired []*cachedConn
 }
 
 // NewServiceDiscovery creates a ServiceDiscovery manager backed by djinn.
@@ -89,10 +93,17 @@ func (sd *ServiceDiscovery) refresh(ctx context.Context, key string, tmpl Templa
 	}
 
 	sd.mu.Lock()
-	// Close any previously stale entry
+	// Replace any previously stale entry. A caller may still hold its conn,
+	// so only tear it down if its proxy lease is gone (the conn is dead
+	// anyway); otherwise retire it until Close.
 	if old, exists := sd.cache[key]; exists {
-		old.conn.Close()
-		_ = old.handle.Release(context.Background())
+		select {
+		case <-old.handle.Lost():
+			old.conn.Close()
+			_ = old.handle.Release(context.Background())
+		default:
+			sd.retired = append(sd.retired, old)
+		}
 	}
 	sd.cache[key] = &cachedConn{proxyID: handle.ProxyID, handle: handle, conn: conn}
 	go sd.watchLease(key, handle)
@@ -168,15 +179,10 @@ func (sd *ServiceDiscovery) consumeWatch(ctx context.Context, ch <-chan Registry
 					_, _ = sd.refresh(ctx, key, tmpl)
 				}
 			case "modified":
-				// Service changed (attrs, transport, re-registration).
-				// Mark stale so the next Get() or a follow-up registered
-				// event triggers a refresh through a fresh proxy.
-				sd.mu.Lock()
-				if entry, exists := sd.cache[key]; exists {
-					entry.stale = true
-				}
-				sd.mu.Unlock()
-				_, _ = sd.refresh(ctx, key, tmpl)
+				// Nothing to do: Proxy re-resolves the upstream on every new
+				// TCP connection, so the existing proxy port already reaches
+				// the modified service. Reopening would only risk breaking
+				// the connection callers hold.
 			}
 		case <-ctx.Done():
 			return
@@ -196,6 +202,11 @@ func (sd *ServiceDiscovery) Close() {
 		entry.conn.Close()
 		_ = entry.handle.Release(context.Background())
 	}
+	for _, entry := range sd.retired {
+		entry.conn.Close()
+		_ = entry.handle.Release(context.Background())
+	}
+	sd.retired = nil
 	sd.cache = make(map[string]*cachedConn)
 	sd.cancels = make(map[string]context.CancelFunc)
 }

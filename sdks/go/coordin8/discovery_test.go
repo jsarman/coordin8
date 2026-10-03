@@ -2,7 +2,6 @@ package coordin8
 
 import (
 	"context"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -105,17 +104,27 @@ func TestDiscoveryExpiredMarksStaleAndNextGetReopens(t *testing.T) {
 	if px.openCount() != 2 {
 		t.Fatalf("opens = %d, want 2", px.openCount())
 	}
-	if got := px.released(); !reflect.DeepEqual(got, []string{"proxy-1"}) {
-		t.Fatalf("released = %v, want the old proxy", got)
+	// The caller may still hold the old conn: it must stay open, and its
+	// proxy must not be released until Close.
+	if got := px.released(); len(got) != 0 {
+		t.Fatalf("released = %v, want none", got)
 	}
-	if old.GetState() != connectivity.Shutdown {
-		t.Fatalf("old conn state = %v, want Shutdown", old.GetState())
+	if old.GetState() == connectivity.Shutdown {
+		t.Fatal("old conn was closed while a caller may hold it")
 	}
 	sd.mu.Lock()
 	stale := sd.cache[key].stale
 	sd.mu.Unlock()
 	if stale {
 		t.Fatal("refreshed entry should not be stale")
+	}
+
+	sd.Close()
+	if got := px.released(); len(got) != 2 {
+		t.Fatalf("released after Close = %v, want both proxies", got)
+	}
+	if old.GetState() != connectivity.Shutdown {
+		t.Fatalf("old conn state = %v, want Shutdown after Close", old.GetState())
 	}
 }
 
@@ -130,7 +139,9 @@ func TestDiscoveryRegisteredAfterExpiredRefreshesEagerly(t *testing.T) {
 	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_EXPIRED}
 	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_REGISTERED}
 	eventually(t, "eager re-open", func() bool { return px.openCount() == 2 })
-	eventually(t, "old proxy released", func() bool { return len(px.released()) == 1 })
+	if got := px.released(); len(got) != 0 {
+		t.Fatalf("released = %v, old proxy must stay until Close", got)
+	}
 }
 
 func TestDiscoveryRegisteredWhileFreshDoesNotReopen(t *testing.T) {
@@ -194,22 +205,42 @@ func TestDiscoveryGetPropagatesProxyOpenError(t *testing.T) {
 	}
 }
 
-// Desired behavior (NOT current): a "modified" registry event should mark the
-// entry stale and re-open through a fresh proxy WITHOUT closing the
-// ClientConn the caller is still holding. Today refresh() closes the old conn
-// out from under callers that obtained it from Get. Tracked as a separate fix.
+// A "modified" event must not close the ClientConn the caller holds, nor
+// reopen: Proxy re-resolves per connection so the existing port stays correct.
 func TestDiscoveryModifiedDoesNotCloseHeldConnection(t *testing.T) {
-	t.Skip("known bug: consumeWatch 'modified' -> refresh() closes the caller's held ClientConn")
-
-	sd, reg, _ := newDiscovery(t)
-	held, err := sd.Get(context.Background(), Template{"interface": "G"})
+	sd, reg, px := newDiscovery(t)
+	tmpl := Template{"interface": "G"}
+	held, err := sd.Get(context.Background(), tmpl)
 	if err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "registry watch", func() bool { return reg.watches.Load() >= 1 })
 	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_MODIFIED}
-	time.Sleep(200 * time.Millisecond) // let the watcher process the event
+	// Barrier: the following expired event is processed strictly after.
+	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_EXPIRED}
+	eventually(t, "entry stale", func() bool {
+		sd.mu.Lock()
+		defer sd.mu.Unlock()
+		return sd.cache[templateKey(tmpl)].stale
+	})
 	if held.GetState() == connectivity.Shutdown {
 		t.Fatal("held connection was closed by a modified event")
+	}
+	if px.openCount() != 1 || len(px.released()) != 0 {
+		t.Fatalf("modified must not reopen/release (opens=%d released=%v)", px.openCount(), px.released())
+	}
+}
+
+func TestDiscoveryModifiedLeavesFreshEntryUntouched(t *testing.T) {
+	sd, reg, px := newDiscovery(t)
+	tmpl := Template{"interface": "G"}
+	c1, _ := sd.Get(context.Background(), tmpl)
+	eventually(t, "registry watch", func() bool { return reg.watches.Load() >= 1 })
+	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_MODIFIED}
+	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_REGISTERED} // barrier
+	time.Sleep(50 * time.Millisecond)
+	c2, _ := sd.Get(context.Background(), tmpl)
+	if c1 != c2 || px.openCount() != 1 {
+		t.Fatalf("modified should keep the cached entry (opens=%d)", px.openCount())
 	}
 }

@@ -82,17 +82,51 @@ func (f *fakeRegistry) Watch(_ *pb.RegistryWatchRequest, s pb.RegistryService_Wa
 // fakeProxy implements ProxyService, handing out sequential proxy IDs.
 type fakeProxy struct {
 	pb.UnimplementedProxyServiceServer
+	pb.UnimplementedLeaseServiceServer
 	mu       sync.Mutex
 	opens    []map[string]string
+	ttls     []uint64
 	releases []string
+	renewIDs []string
+	// renewErr, if set, decides the Renew result for the nth (1-based) call.
+	renewErr func(n int) error
+}
+
+func (f *fakeProxy) Renew(_ context.Context, r *pb.RenewRequest) (*pb.Lease, error) {
+	f.mu.Lock()
+	f.renewIDs = append(f.renewIDs, r.LeaseId)
+	n := len(f.renewIDs)
+	hook := f.renewErr
+	f.mu.Unlock()
+	if hook != nil {
+		if err := hook(n); err != nil {
+			return nil, err
+		}
+	}
+	return &pb.Lease{LeaseId: r.LeaseId, TtlSeconds: r.TtlSeconds}, nil
+}
+
+func (f *fakeProxy) renewCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.renewIDs)
+}
+
+func (f *fakeProxy) requestedTTLs() []uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uint64(nil), f.ttls...)
 }
 
 func (f *fakeProxy) Open(_ context.Context, r *pb.OpenRequest) (*pb.ProxyHandle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.opens = append(f.opens, r.Template)
+	f.ttls = append(f.ttls, r.TtlSeconds)
 	n := len(f.opens)
-	return &pb.ProxyHandle{ProxyId: fmt.Sprintf("proxy-%d", n), LocalPort: int32(40000 + n)}, nil
+	// The server negotiates a short 1s TTL so the SDK renews every 500ms.
+	return &pb.ProxyHandle{ProxyId: fmt.Sprintf("proxy-%d", n), LocalPort: int32(40000 + n),
+		Lease: &pb.Lease{LeaseId: fmt.Sprintf("please-%d", n), ResourceId: fmt.Sprintf("proxy-%d", n), TtlSeconds: 1}}, nil
 }
 
 func (f *fakeProxy) Release(_ context.Context, r *pb.ReleaseRequest) (*emptypb.Empty, error) {
@@ -122,6 +156,7 @@ func newRegistryClient(t *testing.T, reg *fakeRegistry, px *fakeProxy, opts ...C
 		pb.RegisterRegistryServiceServer(s, reg)
 		if px != nil {
 			pb.RegisterProxyServiceServer(s, px)
+			pb.RegisterLeaseServiceServer(s, px)
 		}
 	})
 	opts = append([]ConnectOption{WithProxyAddr(addr), WithSpaceAddr(addr), WithEventAddr(addr)}, opts...)

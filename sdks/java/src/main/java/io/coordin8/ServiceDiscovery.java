@@ -49,6 +49,12 @@ public class ServiceDiscovery implements AutoCloseable {
     private final DjinnClient djinn;
     private final ConcurrentHashMap<String, CachedEntry> cache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> watching = new ConcurrentHashMap<>();
+    /**
+     * Entries replaced by a refresh while their proxy was still alive. A
+     * caller may still hold the old channel (the proxy re-resolves per
+     * connection, so it keeps working); they are released on {@link #close()}.
+     */
+    private final List<CachedEntry> retired = new java.util.concurrent.CopyOnWriteArrayList<>();
     private volatile boolean closed = false;
 
     private ServiceDiscovery(DjinnClient djinn) {
@@ -87,9 +93,15 @@ public class ServiceDiscovery implements AutoCloseable {
             return existing;
         }
 
-        // Close old entry if stale
+        // Replace the stale entry. A caller may still hold its channel, so
+        // only tear it down if the proxy lease is gone (the channel is dead
+        // anyway); otherwise retire it until close().
         if (existing != null) {
-            closeEntry(existing);
+            if (existing.handle().lost().get()) {
+                closeEntry(existing);
+            } else {
+                retired.add(existing);
+            }
         }
 
         CachedEntry entry = openEntry(template);
@@ -131,11 +143,10 @@ public class ServiceDiscovery implements AutoCloseable {
                             }
                         }
                         case "modified" -> {
-                            CachedEntry entry = cache.get(key);
-                            if (entry != null) {
-                                entry.stale().set(true);
-                            }
-                            refresh(key, template);
+                            // Nothing to do: Proxy re-resolves the upstream on
+                            // every new TCP connection, so the existing proxy
+                            // port already reaches the modified service.
+                            // Reopening would risk breaking channels callers hold.
                         }
                     }
                 },
@@ -177,6 +188,8 @@ public class ServiceDiscovery implements AutoCloseable {
         List<CachedEntry> entries = new ArrayList<>(cache.values());
         cache.clear();
         watching.clear();
+        entries.addAll(retired);
+        retired.clear();
         for (CachedEntry entry : entries) {
             entry.channel().shutdown().awaitTermination(5, TimeUnit.SECONDS);
             entry.handle().close();

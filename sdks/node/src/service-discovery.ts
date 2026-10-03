@@ -33,6 +33,12 @@ export class ServiceDiscovery {
   private readonly djinn: DjinnClient;
   private readonly cache = new Map<string, CachedEntry>();
   private readonly watches = new Map<string, ClientReadableStream<RegistryEvent>>();
+  /**
+   * Proxies replaced by a refresh while still alive. A caller may still hold
+   * the old address (the proxy re-resolves per connection, so it keeps
+   * working); they are released on close().
+   */
+  private readonly retired: string[] = [];
   private closed = false;
 
   private constructor(djinn: DjinnClient) {
@@ -66,10 +72,16 @@ export class ServiceDiscovery {
   }
 
   private async refresh(key: string, template: Template): Promise<CachedEntry> {
-    // Close old entry if stale
+    // Replace the stale entry. A caller may still hold its address, so only
+    // release it now if the proxy lease is gone (it is dead anyway);
+    // otherwise retire it until close().
     const old = this.cache.get(key);
     if (old) {
-      await this.djinn.proxy().release(old.proxyId).catch(() => {});
+      if (old.handle.isLost()) {
+        await this.djinn.proxy().release(old.proxyId).catch(() => {});
+      } else {
+        this.retired.push(old.proxyId);
+      }
     }
 
     const handle = await this.djinn.proxy().open(template);
@@ -107,8 +119,9 @@ export class ServiceDiscovery {
             }
             break;
           case "modified":
-            entry.stale = true;
-            this.refresh(key, template).catch(() => {});
+            // Nothing to do: Proxy re-resolves the upstream on every new TCP
+            // connection, so the existing proxy port already reaches the
+            // modified service. Reopening would risk breaking clients callers hold.
             break;
         }
       },
@@ -133,9 +146,10 @@ export class ServiceDiscovery {
       stream.cancel();
     }
     this.watches.clear();
-    const entries = [...this.cache.values()];
+    const ids = [...this.cache.values()].map(e => e.proxyId).concat(this.retired);
     this.cache.clear();
-    await Promise.all(entries.map(e => this.djinn.proxy().release(e.proxyId)));
+    this.retired.length = 0;
+    await Promise.all(ids.map(id => this.djinn.proxy().release(id)));
   }
 }
 
