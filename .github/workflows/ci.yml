@@ -86,3 +86,48 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+  dynamo-provider:
+    name: Dynamo provider (MiniStack)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: djinn
+    services:
+      ministack:
+        image: nahuelnucera/ministack
+        ports:
+          - 4566:4566
+        env:
+          DEFAULT_REGION: us-east-1
+        options: >-
+          --health-cmd "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')\""
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Wait for MiniStack
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4566/_ministack/health && exit 0
+            sleep 2
+          done
+          echo "MiniStack did not become healthy" >&2
+          exit 1
+
+      - name: Dynamo provider tests (ignored, need MiniStack)
+        run: cargo test -p coordin8-provider-dynamo -- --ignored
