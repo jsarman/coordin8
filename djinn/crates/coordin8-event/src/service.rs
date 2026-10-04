@@ -18,9 +18,19 @@ use crate::manager::EventManager;
 /// Map a core error to a gRPC status. `Unavailable` gets its own code (the
 /// dependency isn't ready yet, safe to retry) rather than falling into the
 /// generic `internal` bucket.
+/// Map a core error to a gRPC status. "Gone" must be distinguishable from
+/// "broken": a consumer resumes a durable subscription by id, and only a
+/// NotFound tells it to subscribe afresh (anything else, it should retry).
 fn map_err(e: coordin8_core::Error) -> Status {
+    use coordin8_core::Error as E;
     match e {
-        coordin8_core::Error::Unavailable(_) => Status::unavailable(e.to_string()),
+        E::Unavailable(_) => Status::unavailable(e.to_string()),
+        E::SubscriptionNotFound(_) | E::LeaseNotFound(_) => Status::not_found(e.to_string()),
+        E::SubscriptionExpired(_) | E::LeaseExpired(_) => {
+            Status::failed_precondition(e.to_string())
+        }
+        E::InvalidArgument(_) => Status::invalid_argument(e.to_string()),
+        E::PermissionDenied(_) => Status::permission_denied(e.to_string()),
         _ => Status::internal(e.to_string()),
     }
 }
@@ -730,5 +740,33 @@ mod tests {
         let (store, cleanup) = dynamo_store().await;
         durable_recovers_from_lag(store).await;
         cleanup.await;
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::map_err;
+    use coordin8_core::Error;
+    use tonic::Code;
+
+    #[test]
+    fn gone_is_not_found_not_internal() {
+        assert_eq!(
+            map_err(Error::SubscriptionNotFound("r".into())).code(),
+            Code::NotFound
+        );
+        assert_eq!(
+            map_err(Error::LeaseNotFound("l".into())).code(),
+            Code::NotFound
+        );
+        assert_eq!(
+            map_err(Error::SubscriptionExpired("r".into())).code(),
+            Code::FailedPrecondition
+        );
+        assert_eq!(
+            map_err(Error::Unavailable("x".into())).code(),
+            Code::Unavailable
+        );
+        assert_eq!(map_err(Error::Storage("x".into())).code(), Code::Internal);
     }
 }

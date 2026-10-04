@@ -22,8 +22,15 @@ use crate::manager::SpaceManager;
 /// dependency isn't ready yet, safe to retry) rather than falling into the
 /// generic `internal` bucket.
 fn map_err(e: coordin8_core::Error) -> Status {
+    use coordin8_core::Error as E;
     match e {
-        coordin8_core::Error::Unavailable(_) => Status::unavailable(e.to_string()),
+        E::Unavailable(_) => Status::unavailable(e.to_string()),
+        E::TupleNotFound(_) | E::WatchNotFound(_) | E::LeaseNotFound(_) => {
+            Status::not_found(e.to_string())
+        }
+        E::LeaseExpired(_) => Status::failed_precondition(e.to_string()),
+        E::InvalidArgument(_) => Status::invalid_argument(e.to_string()),
+        E::PermissionDenied(_) => Status::permission_denied(e.to_string()),
         _ => Status::internal(e.to_string()),
     }
 }
@@ -355,5 +362,25 @@ mod tests {
         }
         assert!(saw_loss, "lagged watcher must receive DATA_LOSS");
         assert!(stream.next().await.is_none(), "stream ends after DATA_LOSS");
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::map_err;
+    use coordin8_core::Error;
+    use tonic::Code;
+
+    #[test]
+    fn gone_is_not_found_not_internal() {
+        assert_eq!(
+            map_err(Error::TupleNotFound("t".into())).code(),
+            Code::NotFound
+        );
+        assert_eq!(
+            map_err(Error::LeaseExpired("l".into())).code(),
+            Code::FailedPrecondition
+        );
+        assert_eq!(map_err(Error::Storage("x".into())).code(), Code::Internal);
     }
 }
