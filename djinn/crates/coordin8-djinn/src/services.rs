@@ -354,7 +354,17 @@ fn provider_from_env() -> String {
 /// Space, EventMgr, and TransactionMgr never share lease state even though
 /// they all use the same `LeaseStore` trait and, for the in-memory provider,
 /// the same concrete type.
+///
+/// Exception: the Proxy's leases (`"proxy"`) are always in-memory. A proxy is
+/// a TCP listener inside this process, so its lease must die with the
+/// process. Persisted, a proxy lease would outlive a restart: holders keep
+/// renewing it successfully, never see it as lost, and keep dialing a port
+/// nothing listens on (found running gut-trader on the Dynamo provider).
 async fn lease_store_from_env(namespace: &str) -> Result<Arc<dyn LeaseStore>> {
+    if namespace == "proxy" {
+        info!("  ✓ LeaseStore (proxy): in-memory — proxies are process-local listeners");
+        return Ok(Arc::new(InMemoryLeaseStore::new()));
+    }
     Ok(match provider_from_env().as_str() {
         "dynamo" => {
             let client = coordin8_provider_dynamo::make_dynamo_client().await;
