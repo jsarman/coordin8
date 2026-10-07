@@ -61,12 +61,27 @@ impl DynamoLeaseStore {
 /// will eventually garbage-collect items whose TTL is in the past (epoch 0 is
 /// 1970-01-01). Instead we omit the TTL attribute entirely via `None`.
 fn ttl_epoch(expires_at: &DateTime<Utc>, ttl_seconds: u64) -> Option<i64> {
+    expires_epoch(expires_at, ttl_seconds).map(|e| e.saturating_add(TTL_GRACE_SECS))
+}
+
+/// The lease's expiry as epoch seconds (`None` for FOREVER): what the reaper
+/// scans on. Kept apart from `ttl` so native TTL can never beat the reaper.
+fn expires_epoch(expires_at: &DateTime<Utc>, ttl_seconds: u64) -> Option<i64> {
     if ttl_seconds == LEASE_FOREVER {
         None
     } else {
         Some(expires_at.timestamp())
     }
 }
+
+/// How long after expiry DynamoDB's native TTL may delete a lease row.
+///
+/// The reaper must see an expired lease to cascade it (Registry entry, Space
+/// tuple, subscription); a row TTL deletes first is reclaimed silently and
+/// its resource is orphaned. Real DynamoDB deletes within hours, but an
+/// emulator can delete within a second (Floci does) — racing the 1s reaper.
+/// So `ttl` is only a backstop for rows no reaper will ever visit.
+const TTL_GRACE_SECS: i64 = 3600;
 
 /// Expiry for a new grant/renewal; FOREVER maps to the far-future sentinel and
 /// unrepresentable TTLs are an error rather than a panic.
@@ -159,6 +174,9 @@ impl LeaseStore for DynamoLeaseStore {
                 AttributeValue::N(record.ttl_seconds.to_string()),
             );
 
+        if let Some(epoch) = expires_epoch(&record.expires_at, ttl_secs) {
+            req = req.item("expires_epoch", AttributeValue::N(epoch.to_string()));
+        }
         if let Some(epoch) = ttl_epoch(&record.expires_at, ttl_secs) {
             req = req.item("ttl", AttributeValue::N(epoch.to_string()));
         }
@@ -181,11 +199,11 @@ impl LeaseStore for DynamoLeaseStore {
 
         let (update_expr, ttl_val) = match ttl_epoch(&new_expires_at, ttl_secs) {
             Some(epoch) => (
-                "SET expires_at = :ea, ttl_seconds = :ts, #ttl_field = :ttl",
+                "SET expires_at = :ea, ttl_seconds = :ts, #ttl_field = :ttl, expires_epoch = :ee",
                 Some(epoch),
             ),
             None => (
-                "SET expires_at = :ea, ttl_seconds = :ts REMOVE #ttl_field",
+                "SET expires_at = :ea, ttl_seconds = :ts REMOVE #ttl_field, expires_epoch",
                 None,
             ),
         };
@@ -202,7 +220,12 @@ impl LeaseStore for DynamoLeaseStore {
             .condition_expression("attribute_exists(lease_id)");
 
         if let Some(epoch) = ttl_val {
-            req = req.expression_attribute_values(":ttl", AttributeValue::N(epoch.to_string()));
+            req = req
+                .expression_attribute_values(":ttl", AttributeValue::N(epoch.to_string()))
+                .expression_attribute_values(
+                    ":ee",
+                    AttributeValue::N(new_expires_at.timestamp().to_string()),
+                );
         }
 
         req.send().await.map_err(|e| {
@@ -274,15 +297,19 @@ impl LeaseStore for DynamoLeaseStore {
         let mut last_key: Option<std::collections::HashMap<String, AttributeValue>> = None;
 
         loop {
-            // Pre-filter on the numeric `ttl` epoch. FOREVER leases have no
-            // `ttl` attribute, so they are excluded. The epoch is truncated to
-            // seconds, so this is a superset; `is_expired()` below is the
-            // final authority.
+            // Pre-filter on the numeric `expires_epoch`. FOREVER leases have
+            // none, so they are excluded. Rows written before it existed
+            // carry only `ttl` (then equal to the expiry). The epoch is
+            // truncated to seconds, so this is a superset; `is_expired()`
+            // below is the final authority.
             let mut req = self
                 .client
                 .scan()
                 .table_name(&self.table_name)
-                .filter_expression("attribute_exists(#ttl_field) AND #ttl_field <= :now")
+                .filter_expression(
+                    "(attribute_exists(expires_epoch) AND expires_epoch <= :now) \
+                     OR (attribute_not_exists(expires_epoch) AND attribute_exists(#ttl_field) AND #ttl_field <= :now)",
+                )
                 .expression_attribute_names("#ttl_field", "ttl")
                 .expression_attribute_values(
                     ":now",
@@ -418,6 +445,89 @@ mod tests {
         assert!(
             expired.iter().any(|r| r.lease_id == record.lease_id),
             "expected lease to appear in expired list"
+        );
+
+        teardown(&client, &table_name).await;
+    }
+
+    async fn raw_n(client: &Client, table: &str, lease_id: &str, attr: &str) -> Option<i64> {
+        let item = client
+            .get_item()
+            .table_name(table)
+            .key("lease_id", AttributeValue::S(lease_id.to_string()))
+            .send()
+            .await
+            .unwrap()
+            .item?;
+        item.get(attr)?.as_n().ok()?.parse().ok()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn native_ttl_trails_expiry_by_grace() {
+        // An emulator (Floci) TTL-deletes within ~1s of `ttl`; if `ttl` were
+        // the expiry it would race the reaper and orphan the cascade.
+        let (store, table_name, client) = setup().await;
+
+        let record = store.create("graced", 30).await.unwrap();
+        let ee = raw_n(&client, &table_name, &record.lease_id, "expires_epoch").await;
+        let ttl = raw_n(&client, &table_name, &record.lease_id, "ttl").await;
+        assert_eq!(ee, Some(record.expires_at.timestamp()));
+        assert_eq!(ttl, Some(record.expires_at.timestamp() + TTL_GRACE_SECS));
+
+        let renewed = store.renew(&record.lease_id, 120).await.unwrap();
+        let ee = raw_n(&client, &table_name, &record.lease_id, "expires_epoch").await;
+        let ttl = raw_n(&client, &table_name, &record.lease_id, "ttl").await;
+        assert_eq!(ee, Some(renewed.expires_at.timestamp()));
+        assert_eq!(ttl, Some(renewed.expires_at.timestamp() + TTL_GRACE_SECS));
+
+        let forever = store.renew(&record.lease_id, LEASE_FOREVER).await.unwrap();
+        assert!(forever.ttl_seconds == LEASE_FOREVER);
+        assert_eq!(
+            raw_n(&client, &table_name, &record.lease_id, "expires_epoch").await,
+            None
+        );
+        assert_eq!(
+            raw_n(&client, &table_name, &record.lease_id, "ttl").await,
+            None
+        );
+
+        teardown(&client, &table_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn row_without_expires_epoch_is_still_reaped() {
+        // Rows written before `expires_epoch` existed carry only `ttl`.
+        let (store, table_name, client) = setup().await;
+
+        let past = Utc::now() - chrono::Duration::seconds(5);
+        client
+            .put_item()
+            .table_name(&table_name)
+            .item("lease_id", AttributeValue::S("old-row".into()))
+            .item("resource_id", AttributeValue::S("old".into()))
+            .item(
+                "granted_at",
+                AttributeValue::S((past - chrono::Duration::seconds(30)).to_rfc3339()),
+            )
+            .item("expires_at", AttributeValue::S(past.to_rfc3339()))
+            .item("ttl_seconds", AttributeValue::N("30".into()))
+            .item("ttl", AttributeValue::N(past.timestamp().to_string()))
+            .send()
+            .await
+            .unwrap();
+
+        let listed = store.list_expired().await.unwrap();
+        if store.get("old-row").await.unwrap().is_none() {
+            // An emulator with eager native TTL (Floci) already removed it:
+            // such rows can't linger there, so there's nothing to reap.
+            teardown(&client, &table_name).await;
+            return;
+        }
+        assert!(
+            listed.iter().any(|r| r.lease_id == "old-row"),
+            "listed: {listed:?}"
         );
 
         teardown(&client, &table_name).await;
