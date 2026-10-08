@@ -20,10 +20,12 @@ use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tracing::{info, warn};
 
+use crate::sweep::{self, Held};
 use coordin8_auth::AuthConfig;
 use coordin8_bootstrap::{self_register, RemoteCapabilityResolver, RemoteTxnEnlister};
 use coordin8_core::{
-    EventStore, LeaseReclaimed, LeaseStore, Leasing, RegistryStore, SpaceStore, TxnStore,
+    EventStore, LeaseReclaimed, LeaseStore, Leasing, RegistryStore, SpaceStore, TransactionState,
+    TxnStore,
 };
 use coordin8_event::{EventManager, EventServiceImpl};
 use coordin8_lease::{LeaseManager, LeaseServiceImpl};
@@ -550,6 +552,142 @@ fn spawn_proxy_cascade(manager: &Arc<ProxyManager>, lease_manager: &Arc<LeaseMan
     );
 }
 
+/// Wire a service's orphan sweep (see [`crate::sweep`]): the safety net that
+/// reclaims what the cascade above never saw reclaimed.
+fn spawn_registry_sweep(
+    leases: &Arc<LeaseManager>,
+    store: Arc<dyn RegistryStore>,
+    index: Arc<RegistryIndex>,
+    tx: RegistryBroadcast,
+) {
+    sweep::spawn_orphan_sweep(
+        "registry",
+        Arc::clone(leases),
+        move || {
+            let store = Arc::clone(&store);
+            async move {
+                Ok(store
+                    .list_all()
+                    .await?
+                    .into_iter()
+                    .map(|e| Held::new("entry", e.capability_id, e.lease_id))
+                    .collect())
+            }
+        },
+        move |held: Held| {
+            let (index, tx) = (Arc::clone(&index), tx.clone());
+            async move {
+                if let Ok(Some(entry)) = index.unregister_by_lease(&held.lease_id).await {
+                    tracing::info!(
+                        capability_id = %entry.capability_id,
+                        interface = %entry.interface,
+                        lease_id = %held.lease_id,
+                        "orphaned registry entry reclaimed"
+                    );
+                    let _ = tx.send(coordin8_registry::service::RegistryChangedEvent {
+                        event_type: 1,
+                        entry,
+                    });
+                }
+            }
+        },
+    );
+}
+
+fn spawn_event_sweep(
+    leases: &Arc<LeaseManager>,
+    store: Arc<dyn EventStore>,
+    manager: Arc<EventManager>,
+) {
+    sweep::spawn_orphan_sweep(
+        "event",
+        Arc::clone(leases),
+        move || {
+            let store = Arc::clone(&store);
+            async move {
+                Ok(store
+                    .list_subscriptions()
+                    .await?
+                    .into_iter()
+                    .map(|s| Held::new("subscription", s.registration_id, s.lease_id))
+                    .collect())
+            }
+        },
+        move |held: Held| {
+            let manager = Arc::clone(&manager);
+            async move {
+                let _ = manager.unsubscribe_by_lease(&held.lease_id).await;
+            }
+        },
+    );
+}
+
+fn spawn_space_sweep(
+    leases: &Arc<LeaseManager>,
+    store: Arc<dyn SpaceStore>,
+    manager: Arc<SpaceManager>,
+) {
+    sweep::spawn_orphan_sweep(
+        "space",
+        Arc::clone(leases),
+        move || {
+            let store = Arc::clone(&store);
+            async move {
+                let mut held: Vec<Held> = store
+                    .list_all()
+                    .await?
+                    .into_iter()
+                    .map(|t| Held::new("tuple", t.tuple_id, t.lease_id))
+                    .collect();
+                held.extend(
+                    store
+                        .list_watches()
+                        .await?
+                        .into_iter()
+                        .map(|w| Held::new("watch", w.watch_id, w.lease_id)),
+                );
+                Ok(held)
+            }
+        },
+        move |held: Held| {
+            let manager = Arc::clone(&manager);
+            async move {
+                match held.kind {
+                    "watch" => manager.on_watch_expired(&held.lease_id).await,
+                    _ => manager.on_tuple_expired(&held.lease_id).await,
+                }
+            }
+        },
+    );
+}
+
+/// Only Active transactions: a finished one legitimately outlives its lease,
+/// and `abort_expired` would ignore it anyway.
+fn spawn_txn_sweep(leases: &Arc<LeaseManager>, store: Arc<dyn TxnStore>, manager: Arc<TxnManager>) {
+    sweep::spawn_orphan_sweep(
+        "txn",
+        Arc::clone(leases),
+        move || {
+            let store = Arc::clone(&store);
+            async move {
+                Ok(store
+                    .list_all()
+                    .await?
+                    .into_iter()
+                    .filter(|t| t.state == TransactionState::Active)
+                    .map(|t| Held::new("txn", t.txn_id, t.lease_id))
+                    .collect())
+            }
+        },
+        move |held: Held| {
+            let manager = Arc::clone(&manager);
+            async move {
+                let _ = manager.abort_expired(&held.id).await;
+            }
+        },
+    );
+}
+
 // ── Monolith boot ─────────────────────────────────────────────────────────────
 
 /// Boot every service in a single process on fixed ports (the original monolith).
@@ -608,6 +746,12 @@ pub async fn run_all() -> Result<()> {
             },
         );
     }
+    spawn_registry_sweep(
+        &registry_lease_manager,
+        registry_store.clone(),
+        Arc::clone(&registry_index),
+        registry_tx.clone(),
+    );
     info!("  ✓ Registry: ready");
 
     // ── EventMgr ─────────────────────────────────────────────────────────────
@@ -615,7 +759,11 @@ pub async fn run_all() -> Result<()> {
         embedded_landlord("event", &host, 9005, &auth_config, &shutdown_sig).await?;
     let event_leasing: Arc<dyn Leasing> = event_lease_manager.clone();
     let (event_tx, _) = broadcast::channel::<coordin8_core::EventRecord>(256);
-    let event_manager = Arc::new(EventManager::new(event_store, event_leasing, event_tx));
+    let event_manager = Arc::new(EventManager::new(
+        Arc::clone(&event_store),
+        event_leasing,
+        event_tx,
+    ));
 
     {
         let event_expiry_mgr = Arc::clone(&event_manager);
@@ -630,6 +778,11 @@ pub async fn run_all() -> Result<()> {
             },
         );
     }
+    spawn_event_sweep(
+        &event_lease_manager,
+        Arc::clone(&event_store),
+        Arc::clone(&event_manager),
+    );
     info!("  ✓ EventMgr: ready");
 
     // ── Proxy ────────────────────────────────────────────────────────────────
@@ -656,8 +809,12 @@ pub async fn run_all() -> Result<()> {
     let txn_allowlist =
         txn_participant_allowlist(auth_config.enabled(), Some(&format!("{host}:9006")))?;
     let txn_manager = Arc::new(
-        TxnManager::with_client_auth(txn_store, txn_leasing, auth_config.client_config("txn"))
-            .with_participant_allowlist(txn_allowlist),
+        TxnManager::with_client_auth(
+            Arc::clone(&txn_store),
+            txn_leasing,
+            auth_config.client_config("txn"),
+        )
+        .with_participant_allowlist(txn_allowlist),
     );
 
     {
@@ -676,6 +833,11 @@ pub async fn run_all() -> Result<()> {
             },
         );
     }
+    spawn_txn_sweep(
+        &txn_lease_manager,
+        Arc::clone(&txn_store),
+        Arc::clone(&txn_manager),
+    );
     info!("  ✓ TransactionMgr: ready");
 
     // ── Space ────────────────────────────────────────────────────────────────
@@ -689,7 +851,7 @@ pub async fn run_all() -> Result<()> {
     let space_enlister = Arc::new(LocalTxnEnlister::new(Arc::clone(&txn_manager)));
     let space_participant_endpoint = format!("{host}:9006");
     let space_manager = Arc::new(SpaceManager::with_enlister(
-        space_store,
+        Arc::clone(&space_store),
         space_leasing,
         space_tuple_tx,
         space_expiry_tx,
@@ -714,6 +876,11 @@ pub async fn run_all() -> Result<()> {
             },
         );
     }
+    spawn_space_sweep(
+        &space_lease_manager,
+        Arc::clone(&space_store),
+        Arc::clone(&space_manager),
+    );
     info!("  ✓ Space: ready");
 
     // ── gRPC servers ─────────────────────────────────────────────────────────
@@ -898,7 +1065,7 @@ pub async fn run_registry_on_listener_until(
     let (shutdown_trigger, shutdown_sig) = coordin8_core::shutdown::channel();
 
     let registry_store = registry_store_from_env().await?;
-    let registry_index = Arc::new(RegistryIndex::new(registry_store));
+    let registry_index = Arc::new(RegistryIndex::new(Arc::clone(&registry_store)));
 
     let (lease_manager, lease_svc) = embedded_landlord(
         "registry",
@@ -936,6 +1103,12 @@ pub async fn run_registry_on_listener_until(
             },
         );
     }
+    spawn_registry_sweep(
+        &lease_manager,
+        Arc::clone(&registry_store),
+        Arc::clone(&registry_index),
+        registry_tx.clone(),
+    );
 
     let leasing: Arc<dyn Leasing> = lease_manager;
     let registry_svc = RegistryServiceServer::with_interceptor(
@@ -1048,7 +1221,11 @@ pub async fn run_event_on_listener_until(
 
     let event_store = event_store_from_env().await?;
     let (event_tx, _) = broadcast::channel::<coordin8_core::EventRecord>(256);
-    let event_manager = Arc::new(EventManager::new(event_store, leasing, event_tx));
+    let event_manager = Arc::new(EventManager::new(
+        Arc::clone(&event_store),
+        leasing,
+        event_tx,
+    ));
 
     {
         let event_expiry_mgr = Arc::clone(&event_manager);
@@ -1063,6 +1240,11 @@ pub async fn run_event_on_listener_until(
             },
         );
     }
+    spawn_event_sweep(
+        &lease_manager,
+        Arc::clone(&event_store),
+        Arc::clone(&event_manager),
+    );
 
     let event_svc = EventServiceServer::with_interceptor(
         EventServiceImpl::new(Arc::clone(&event_manager), advertise_host, advertise_port)
@@ -1198,7 +1380,7 @@ pub async fn run_space_on_listener_until(
     let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let space_manager = Arc::new(SpaceManager::with_enlister(
-        space_store,
+        Arc::clone(&space_store),
         leasing,
         space_tuple_tx,
         space_expiry_tx,
@@ -1223,6 +1405,11 @@ pub async fn run_space_on_listener_until(
             },
         );
     }
+    spawn_space_sweep(
+        &lease_manager,
+        Arc::clone(&space_store),
+        Arc::clone(&space_manager),
+    );
 
     let space_svc = SpaceServiceServer::with_interceptor(
         SpaceServiceImpl::new(Arc::clone(&space_manager), advertise_host, advertise_port)
@@ -1350,8 +1537,12 @@ pub async fn run_txn_on_listener_until(
     // Split mode: Space's advertised endpoint must be covered by the allowlist.
     let txn_allowlist = txn_participant_allowlist(auth_config.enabled(), None)?;
     let txn_manager = Arc::new(
-        TxnManager::with_client_auth(txn_store, leasing, auth_config.client_config("txn"))
-            .with_participant_allowlist(txn_allowlist),
+        TxnManager::with_client_auth(
+            Arc::clone(&txn_store),
+            leasing,
+            auth_config.client_config("txn"),
+        )
+        .with_participant_allowlist(txn_allowlist),
     );
 
     {
@@ -1370,6 +1561,11 @@ pub async fn run_txn_on_listener_until(
             },
         );
     }
+    spawn_txn_sweep(
+        &lease_manager,
+        Arc::clone(&txn_store),
+        Arc::clone(&txn_manager),
+    );
 
     let txn_svc = TransactionServiceServer::with_interceptor(
         TxnServiceImpl::new(txn_manager, advertise_host, advertise_port),
@@ -1604,4 +1800,58 @@ pub async fn run_healthcheck(addr: &str) -> Result<()> {
     })
     .await
     .map_err(|_| anyhow::anyhow!("healthcheck timed out"))?
+}
+
+#[cfg(test)]
+mod sweep_wiring_tests {
+    use super::*;
+    use coordin8_core::{LeaseConfig, RegistryEntry};
+    use std::collections::HashMap;
+
+    fn entry(id: &str, lease_id: &str) -> RegistryEntry {
+        RegistryEntry {
+            capability_id: id.into(),
+            lease_id: lease_id.into(),
+            interface: "Greeter".into(),
+            attrs: HashMap::new(),
+            transport: None,
+        }
+    }
+
+    /// The outage case from #60: a Registry entry whose lease row vanished
+    /// without a reclaim is removed (and announced); a live one is kept.
+    #[tokio::test(start_paused = true)]
+    async fn registry_sweep_reclaims_entry_whose_lease_vanished() {
+        let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+        let (expiry_tx, _) = broadcast::channel(16);
+        let leases = Arc::new(LeaseManager::new(
+            Arc::clone(&lease_store),
+            LeaseConfig::default(),
+            expiry_tx,
+        ));
+        let store: Arc<dyn RegistryStore> = Arc::new(InMemoryRegistryStore::new());
+        let index = Arc::new(RegistryIndex::new(Arc::clone(&store)));
+        let (tx, mut changes) = broadcast::channel(16);
+
+        let live = leases.grant("live", 600).await.unwrap();
+        let gone = leases.grant("gone", 600).await.unwrap();
+        index.register(entry("live", &live.lease_id)).await.unwrap();
+        index.register(entry("gone", &gone.lease_id)).await.unwrap();
+        lease_store.cancel(&gone.lease_id).await.unwrap(); // reclaim lost
+
+        spawn_registry_sweep(&leases, Arc::clone(&store), index, tx);
+        // First pass marks it, the next reclaims it (paused clock: instant).
+        tokio::time::sleep(sweep::FIRST_SWEEP_AFTER + sweep::SWEEP_EVERY * 2).await;
+
+        let left: Vec<String> = store
+            .list_all()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.capability_id)
+            .collect();
+        assert_eq!(left, vec!["live".to_string()]);
+        let ev = changes.try_recv().expect("removal announced to watchers");
+        assert_eq!(ev.entry.capability_id, "gone");
+    }
 }

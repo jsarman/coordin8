@@ -31,4 +31,5 @@ clap               = { version = "4", features = ["derive"] }
 tokio-stream       = { version = "0.1", features = ["net"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] } # paused clock for the sweep tests
 tracing-subscriber = { workspace = true }
