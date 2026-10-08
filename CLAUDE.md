@@ -35,6 +35,8 @@ Boot order is strict and load-bearing. No circular dependencies.
 
 **Leasing is distributed, not a layer.** There is no standalone LeaseMgr service. Registry, EventMgr, Space, TransactionMgr, and Proxy each embed their own `LeaseManager` and mount `LeaseService` on their own port — matching Jini/Apache River's `Landlord` pattern, where every service that grants leases manages them in-process rather than depending on a shared external service. This is why Registry, EventMgr, and Space all sit at Layer 1: none of them has a blocking dependency on anything else for their own operation. See `.claude/plans/distributed-leasing/PRD.md` for the full rationale (this replaced an earlier centralized-LeaseMgr design that turned out to be the root cause of a whole class of bootstrap-cycle bugs).
 
+Reclaim delivery (lease reclaimed → cascade cleans up the resource) is an in-process broadcast, so at-most-once. Each service also runs an **orphan sweep** (`coordin8-djinn/src/sweep.rs`): every 30s (first pass ~10s after boot) it reclaims resources whose lease row no longer exists, after two consecutive misses — the net under lost reclaims (lease lapsed while the Djinn was down, lagged cascade).
+
 Lease TTL sentinels (`coordin8-core/src/lease.rs`): `LEASE_ANY = 0` (server picks), `LEASE_FOREVER = u64::MAX`; FOREVER `expires_at` is `DateTime::<Utc>::MAX_UTC`.
 
 A lease is self-describing: the `Lease` message carries `grantor_host`/`grantor_port`, so a holder always knows where to renew without prior knowledge of which service granted it (mirrors Jini's `LandlordLease`).

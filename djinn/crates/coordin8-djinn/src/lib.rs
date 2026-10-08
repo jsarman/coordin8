@@ -4,3 +4,4 @@
 //! down. Call them inside a `tokio::spawn` to run in the background.
 
 pub mod services;
+pub mod sweep;
