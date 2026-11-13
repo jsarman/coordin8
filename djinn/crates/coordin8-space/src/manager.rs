@@ -8,11 +8,16 @@ use tokio::sync::broadcast;
 use tracing::debug;
 use uuid::Uuid;
 
+use coordin8_core::shutdown::ShutdownSignal;
 use coordin8_core::{
     Error, LeaseRecord, Leasing, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord,
     TxnEnlister,
 };
 use coordin8_registry::matcher::{matches, parse_template};
+
+fn shutting_down() -> Error {
+    Error::Unavailable("space is shutting down; retry against another instance".into())
+}
 
 pub struct SpaceManager {
     store: Arc<dyn SpaceStore>,
@@ -31,6 +36,11 @@ pub struct SpaceManager {
     /// duplicate `Enlist` calls when a single txn does multiple writes/takes.
     /// Cleared on commit/abort.
     enlisted: DashMap<String, ()>,
+    /// Ends blocked `read`/`take` waits with `Unavailable` when the server
+    /// shuts down. A unary call holds the graceful drain until it returns, so
+    /// without this one waiting worker makes every restart wait out the grace
+    /// period and exit non-zero.
+    shutdown: ShutdownSignal,
 }
 
 impl SpaceManager {
@@ -52,6 +62,7 @@ impl SpaceManager {
             enlister: None,
             participant_endpoint: None,
             enlisted: DashMap::new(),
+            shutdown: ShutdownSignal::never(),
         }
     }
 
@@ -75,7 +86,15 @@ impl SpaceManager {
             enlister: Some(enlister),
             participant_endpoint: Some(participant_endpoint),
             enlisted: DashMap::new(),
+            shutdown: ShutdownSignal::never(),
         }
+    }
+
+    /// End blocked `read`/`take` waits with `Unavailable` once `shutdown`
+    /// fires.
+    pub fn with_shutdown(mut self, shutdown: ShutdownSignal) -> Self {
+        self.shutdown = shutdown;
+        self
     }
 
     /// Auto-enlist this Space as a participant in `txn_id` if we haven't
@@ -173,15 +192,22 @@ impl SpaceManager {
         let template_clone = template.clone();
         let txn_id_clone = txn_id.clone();
 
+        let stop = self.shutdown.clone().wait();
         let wait_future = async {
+            tokio::pin!(stop);
             loop {
-                match rx.recv().await {
+                // Only the idle wait is interruptible: never mid store call.
+                let msg = tokio::select! {
+                    m = rx.recv() => m,
+                    _ = &mut stop => return Err(shutting_down()),
+                };
+                match msg {
                     Ok(tuple) => {
                         if matches(&ops, &tuple.attrs) {
-                            return Some(tuple);
+                            return Ok(Some(tuple));
                         }
                     }
-                    Err(broadcast::error::RecvError::Closed) => return None,
+                    Err(broadcast::error::RecvError::Closed) => return Ok(None),
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         // We lagged — broadcasts were dropped, so a matching
                         // tuple may already be sitting in the store. Re-query
@@ -190,7 +216,7 @@ impl SpaceManager {
                             .find_match(&template_clone, txn_id_clone.as_deref())
                             .await
                         {
-                            return Some(record);
+                            return Ok(Some(record));
                         }
                     }
                 }
@@ -199,12 +225,12 @@ impl SpaceManager {
 
         if timeout_ms > 0 {
             match tokio::time::timeout(Duration::from_millis(timeout_ms), wait_future).await {
-                Ok(result) => Ok(result),
+                Ok(result) => result,
                 Err(_) => Ok(None),
             }
         } else {
             // timeout_ms == 0 + wait == true → wait indefinitely
-            Ok(wait_future.await)
+            wait_future.await
         }
     }
 
@@ -251,9 +277,17 @@ impl SpaceManager {
         let ops = parse_template(&template);
         let txn_id_clone = txn_id.clone();
 
+        let stop = self.shutdown.clone().wait();
         let wait_future = async {
+            tokio::pin!(stop);
             loop {
-                match rx.recv().await {
+                // Only the idle wait is interruptible: a take_match in flight
+                // always completes, so a claimed tuple is never dropped.
+                let msg = tokio::select! {
+                    m = rx.recv() => m,
+                    _ = &mut stop => return Err(shutting_down()),
+                };
+                match msg {
                     Ok(tuple) => {
                         if !matches(&ops, &tuple.attrs) {
                             continue;
@@ -267,10 +301,10 @@ impl SpaceManager {
                             if txn_id_clone.is_none() {
                                 let _ = lease_mgr.cancel(&record.lease_id).await;
                             }
-                            return Some(record);
+                            return Ok(Some(record));
                         }
                     }
-                    Err(broadcast::error::RecvError::Closed) => return None,
+                    Err(broadcast::error::RecvError::Closed) => return Ok(None),
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         // We lagged — try an immediate take in case we missed the signal
                         if let Ok(Some(record)) = store
@@ -280,7 +314,7 @@ impl SpaceManager {
                             if txn_id_clone.is_none() {
                                 let _ = lease_mgr.cancel(&record.lease_id).await;
                             }
-                            return Some(record);
+                            return Ok(Some(record));
                         }
                     }
                 }
@@ -289,11 +323,11 @@ impl SpaceManager {
 
         if timeout_ms > 0 {
             match tokio::time::timeout(Duration::from_millis(timeout_ms), wait_future).await {
-                Ok(result) => Ok(result),
+                Ok(result) => result,
                 Err(_) => Ok(None),
             }
         } else {
-            Ok(wait_future.await)
+            wait_future.await
         }
     }
 

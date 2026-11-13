@@ -603,7 +603,8 @@ fn spawn_registry_sweep(
                         "orphaned registry entry reclaimed"
                     );
                     let _ = tx.send(coordin8_registry::service::RegistryChangedEvent {
-                        event_type: 1,
+                        event_type: coordin8_proto::coordin8::registry_event::EventType::Expired
+                            as i32,
                         entry,
                     });
                 }
@@ -756,7 +757,8 @@ pub async fn run_all() -> Result<()> {
                             "registry entry reclaimed"
                         );
                         let _ = tx.send(coordin8_registry::service::RegistryChangedEvent {
-                            event_type: 1,
+                            event_type: coordin8_proto::coordin8::registry_event::EventType::Expired
+                                as i32,
                             entry,
                         });
                     }
@@ -868,14 +870,17 @@ pub async fn run_all() -> Result<()> {
     // 2PC coordinator dials back into our own space participant on :9006.
     let space_enlister = Arc::new(LocalTxnEnlister::new(Arc::clone(&txn_manager)));
     let space_participant_endpoint = format!("{host}:9006");
-    let space_manager = Arc::new(SpaceManager::with_enlister(
-        Arc::clone(&space_store),
-        space_leasing,
-        space_tuple_tx,
-        space_expiry_tx,
-        space_enlister,
-        space_participant_endpoint,
-    ));
+    let space_manager = Arc::new(
+        SpaceManager::with_enlister(
+            Arc::clone(&space_store),
+            space_leasing,
+            space_tuple_tx,
+            space_expiry_tx,
+            space_enlister,
+            space_participant_endpoint,
+        )
+        .with_shutdown(shutdown_sig.clone()),
+    );
 
     {
         let space_expiry_mgr = Arc::clone(&space_manager);
@@ -1113,7 +1118,8 @@ pub async fn run_registry_on_listener_until(
                             "registry entry reclaimed (split mode)"
                         );
                         let _ = tx.send(coordin8_registry::service::RegistryChangedEvent {
-                            event_type: 1,
+                            event_type: coordin8_proto::coordin8::registry_event::EventType::Expired
+                                as i32,
                             entry,
                         });
                     }
@@ -1397,14 +1403,17 @@ pub async fn run_space_on_listener_until(
     let space_store = space_store_from_env().await?;
     let (space_tuple_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
     let (space_expiry_tx, _) = broadcast::channel::<coordin8_core::TupleRecord>(256);
-    let space_manager = Arc::new(SpaceManager::with_enlister(
-        Arc::clone(&space_store),
-        leasing,
-        space_tuple_tx,
-        space_expiry_tx,
-        space_enlister,
-        space_participant_endpoint,
-    ));
+    let space_manager = Arc::new(
+        SpaceManager::with_enlister(
+            Arc::clone(&space_store),
+            leasing,
+            space_tuple_tx,
+            space_expiry_tx,
+            space_enlister,
+            space_participant_endpoint,
+        )
+        .with_shutdown(shutdown_sig.clone()),
+    );
 
     {
         let space_expiry_mgr = Arc::clone(&space_manager);

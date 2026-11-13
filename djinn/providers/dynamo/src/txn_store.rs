@@ -306,17 +306,26 @@ impl TxnStore for DynamoTxnStore {
             .update_item()
             .table_name(&self.table_name)
             .key("txn_id", AttributeValue::S(txn_id.to_string()))
-            .update_expression("SET participants = list_append(participants, :p)")
+            // `participant_endpoints` (a string set) makes a repeat enlist
+            // of the same endpoint a no-op instead of a second row.
+            .update_expression(
+                "SET participants = list_append(participants, :p) ADD participant_endpoints :eps",
+            )
             .expression_attribute_names("#s", "state")
             .expression_attribute_values(
                 ":p",
                 AttributeValue::L(vec![participant_to_av(&participant)]),
             )
+            .expression_attribute_values(":ep", AttributeValue::S(participant.endpoint.clone()))
+            .expression_attribute_values(
+                ":eps",
+                AttributeValue::Ss(vec![participant.endpoint.clone()]),
+            )
             .expression_attribute_values(
                 ":active",
                 AttributeValue::S(state_to_str(&TransactionState::Active).to_string()),
             )
-            .condition_expression("#s = :active")
+            .condition_expression("#s = :active AND NOT contains(participant_endpoints, :ep)")
             .send()
             .await;
 
@@ -330,6 +339,14 @@ impl TxnStore for DynamoTxnStore {
                     return Err(Error::Storage(format!("update_item failed: {e}")));
                 }
                 match self.get(txn_id).await? {
+                    Some(t)
+                        if t.state == TransactionState::Active
+                            && t.participants
+                                .iter()
+                                .any(|p| p.endpoint == participant.endpoint) =>
+                    {
+                        Ok(()) // already enlisted
+                    }
                     Some(_) => Err(Error::TransactionTerminal(txn_id.to_string())),
                     None => Err(Error::TransactionNotFound(txn_id.to_string())),
                 }
@@ -510,6 +527,22 @@ mod tests {
             .await
             .unwrap();
 
+        let fetched = store.get("txn-part").await.unwrap().unwrap();
+        assert_eq!(fetched.participants.len(), 2);
+
+        // Repeat enlists of one endpoint, concurrent or not, add no row.
+        let again = || {
+            store.add_participant(
+                "txn-part",
+                ParticipantRecord {
+                    endpoint: "localhost:8081".to_string(),
+                    crash_count: 1,
+                },
+            )
+        };
+        let (a, b) = tokio::join!(again(), again());
+        a.unwrap();
+        b.unwrap();
         let fetched = store.get("txn-part").await.unwrap().unwrap();
         assert_eq!(fetched.participants.len(), 2);
 

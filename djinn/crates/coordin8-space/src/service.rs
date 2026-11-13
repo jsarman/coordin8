@@ -312,6 +312,60 @@ mod tests {
     use coordin8_provider_local::{InMemoryLeaseStore, InMemorySpaceStore};
     use tokio::sync::broadcast;
 
+    /// A blocked Take/Read (unary, wait forever) must end with UNAVAILABLE
+    /// when shutdown begins, or it holds the graceful drain for the whole
+    /// grace period.
+    #[tokio::test]
+    async fn blocked_take_and_read_end_on_shutdown() {
+        let lease_manager: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
+            Arc::new(InMemoryLeaseStore::new()),
+            coordin8_core::LeaseConfig::default(),
+            broadcast::channel(16).0,
+        ));
+        let (trigger, signal) = coordin8_core::shutdown::channel();
+        let manager = Arc::new(
+            SpaceManager::new(
+                Arc::new(InMemorySpaceStore::new()),
+                lease_manager,
+                broadcast::channel::<TupleRecord>(8).0,
+                broadcast::channel::<TupleRecord>(8).0,
+            )
+            .with_shutdown(signal),
+        );
+        let svc = Arc::new(SpaceServiceImpl::new(manager, "127.0.0.1", 9006));
+        let template = std::collections::HashMap::from([("k".to_string(), "v".to_string())]);
+
+        let (s1, t1) = (Arc::clone(&svc), template.clone());
+        let take = tokio::spawn(async move {
+            s1.take(Request::new(TakeRequest {
+                template: t1,
+                wait: true,
+                timeout_ms: 0,
+                txn_id: String::new(),
+            }))
+            .await
+        });
+        let (s2, t2) = (Arc::clone(&svc), template);
+        let read = tokio::spawn(async move {
+            s2.read(Request::new(ReadRequest {
+                template: t2,
+                wait: true,
+                timeout_ms: 0,
+                txn_id: String::new(),
+            }))
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!take.is_finished() && !read.is_finished());
+
+        trigger.trigger();
+        let within = std::time::Duration::from_secs(1);
+        let take = tokio::time::timeout(within, take).await.unwrap().unwrap();
+        let read = tokio::time::timeout(within, read).await.unwrap().unwrap();
+        assert_eq!(take.unwrap_err().code(), tonic::Code::Unavailable);
+        assert_eq!(read.unwrap_err().code(), tonic::Code::Unavailable);
+    }
+
     /// A Notify watcher that falls behind the broadcast must be told
     /// (DATA_LOSS), not silently handed a stream with a gap in it.
     #[tokio::test]

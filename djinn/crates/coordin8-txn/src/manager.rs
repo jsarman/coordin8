@@ -481,10 +481,14 @@ impl TxnManager {
 /// Fail safe: only explicitly recognized values map to a committable vote.
 /// Unknown values (garbled wire data, newer proto enum variants) map to
 /// Aborted — never default toward commit.
+/// Decode a wire vote. Only an explicit PREPARED or NOTCHANGED counts; 0
+/// (`VOTE_UNSPECIFIED`, what an empty response decodes to) and any unknown
+/// value are ABORTED, so nothing ever defaults toward commit.
 fn vote_from_i32(v: i32) -> PrepareVote {
-    match v {
-        0 => PrepareVote::Prepared,
-        1 => PrepareVote::NotChanged,
+    use coordin8_proto::coordin8::PrepareVote as Wire;
+    match Wire::try_from(v) {
+        Ok(Wire::VotePrepared) => PrepareVote::Prepared,
+        Ok(Wire::VoteNotchanged) => PrepareVote::NotChanged,
         _ => PrepareVote::Aborted,
     }
 }

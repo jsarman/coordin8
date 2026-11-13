@@ -113,7 +113,14 @@ impl TxnStore for InMemoryTxnStore {
                 if r.state != TransactionState::Active {
                     return Err(Error::TransactionTerminal(txn_id.to_string()));
                 }
-                r.participants.push(participant);
+                // A repeat enlist of the same endpoint is a no-op.
+                if !r
+                    .participants
+                    .iter()
+                    .any(|p| p.endpoint == participant.endpoint)
+                {
+                    r.participants.push(participant);
+                }
                 Ok(())
             }
             None => Err(Error::TransactionNotFound(txn_id.to_string())),
@@ -191,6 +198,15 @@ mod tests {
         s.create(rec("next")).await.unwrap();
         assert!(s.get("done").await.unwrap().is_none());
         assert!(s.get("open").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn repeat_enlist_is_deduped() {
+        let s = InMemoryTxnStore::new();
+        s.create(rec("t")).await.unwrap();
+        s.add_participant("t", part()).await.unwrap();
+        s.add_participant("t", part()).await.unwrap();
+        assert_eq!(s.get("t").await.unwrap().unwrap().participants.len(), 1);
     }
 
     #[tokio::test]
