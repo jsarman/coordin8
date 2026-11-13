@@ -16,4 +16,5 @@ pub use registry::{CapabilityResolver, RegistryEntry, RegistryStore, TransportCo
 pub use space::{SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord};
 pub use txn::{
     ParticipantRecord, PrepareVote, TransactionRecord, TransactionState, TxnEnlister, TxnStore,
+    FINISHED_TXN_RETENTION_SECS,
 };

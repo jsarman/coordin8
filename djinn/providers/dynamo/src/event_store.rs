@@ -253,6 +253,7 @@ impl EventStore for DynamoEventStore {
             .client
             .get_item()
             .table_name(&self.sub_table)
+            .consistent_read(true)
             .key(
                 "registration_id",
                 AttributeValue::S(registration_id.to_string()),
@@ -328,7 +329,11 @@ impl EventStore for DynamoEventStore {
         let mut last_key: Option<HashMap<String, AttributeValue>> = None;
 
         loop {
-            let mut req = self.client.scan().table_name(&self.sub_table);
+            let mut req = self
+                .client
+                .scan()
+                .table_name(&self.sub_table)
+                .consistent_read(true);
             if let Some(ref lek) = last_key {
                 req = req.set_exclusive_start_key(Some(lek.clone()));
             }
@@ -447,6 +452,7 @@ impl EventStore for DynamoEventStore {
                 .client
                 .query()
                 .table_name(&self.mailbox_table)
+                .consistent_read(true)
                 .key_condition_expression("registration_id = :rid AND seq_num > :after")
                 .expression_attribute_values(":rid", AttributeValue::S(registration_id.to_string()))
                 .expression_attribute_values(":after", AttributeValue::N(after_seq.to_string()))
@@ -555,6 +561,7 @@ impl DynamoEventStore {
                 .client
                 .query()
                 .table_name(&self.mailbox_table)
+                .consistent_read(true)
                 .key_condition_expression("registration_id = :rid")
                 .expression_attribute_values(":rid", AttributeValue::S(registration_id.to_string()))
                 .set_exclusive_start_key(last_key.take())

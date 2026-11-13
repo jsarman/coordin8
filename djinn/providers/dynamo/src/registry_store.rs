@@ -234,6 +234,7 @@ impl RegistryStore for DynamoRegistryStore {
             .client
             .get_item()
             .table_name(&self.table_name)
+            .consistent_read(true)
             .key(
                 "capability_id",
                 AttributeValue::S(capability_id.to_string()),
@@ -272,7 +273,11 @@ impl RegistryStore for DynamoRegistryStore {
         let mut last_key: Option<HashMap<String, AttributeValue>> = None;
 
         loop {
-            let mut req = self.client.scan().table_name(&self.table_name);
+            let mut req = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .consistent_read(true);
 
             if let Some(ref lek) = last_key {
                 req = req.set_exclusive_start_key(Some(lek.clone()));

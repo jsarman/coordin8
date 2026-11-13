@@ -261,6 +261,7 @@ impl LeaseStore for DynamoLeaseStore {
             .client
             .get_item()
             .table_name(&self.table_name)
+            .consistent_read(true)
             .key("lease_id", AttributeValue::S(lease_id.to_string()))
             .send()
             .await
@@ -301,7 +302,10 @@ impl LeaseStore for DynamoLeaseStore {
             // none, so they are excluded. Rows written before it existed
             // carry only `ttl` (then equal to the expiry). The epoch is
             // truncated to seconds, so this is a superset; `is_expired()`
-            // below is the final authority.
+            // below is the final authority. Eventually consistent on
+            // purpose (half the read cost, every second): a stale row is
+            // re-checked by `remove_if_unchanged`, a missed one is seen on
+            // the next tick.
             let mut req = self
                 .client
                 .scan()

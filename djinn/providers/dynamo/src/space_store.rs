@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use aws_sdk_dynamodb::{types::AttributeValue, Client};
+use aws_sdk_dynamodb::{
+    types::{AttributeValue, Delete, Put, TransactWriteItem},
+    Client,
+};
 use chrono::{DateTime, Utc};
 
 use coordin8_core::{Error, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord};
@@ -76,6 +79,63 @@ impl DynamoSpaceStore {
 }
 
 impl DynamoSpaceStore {
+    /// Atomically delete `key` from `from` (only if it still exists) and put
+    /// `item` into txn_taken. `Ok(false)` when the row was already gone or a
+    /// concurrent transaction touched it first — the caller tries the next
+    /// match, as it would after a failed conditional delete.
+    async fn move_to_txn_taken(
+        &self,
+        from: &str,
+        key: HashMap<String, AttributeValue>,
+        item: HashMap<String, AttributeValue>,
+    ) -> Result<bool, Error> {
+        let build = |e: aws_sdk_dynamodb::error::BuildError| Error::Storage(e.to_string());
+        let delete = Delete::builder()
+            .table_name(from)
+            .set_key(Some(key))
+            .condition_expression("attribute_exists(tuple_id)")
+            .build()
+            .map_err(build)?;
+        let put = Put::builder()
+            .table_name(&self.txn_taken_table)
+            .set_item(Some(item))
+            .build()
+            .map_err(build)?;
+        let result = self
+            .client
+            .transact_write_items()
+            .transact_items(TransactWriteItem::builder().delete(delete).build())
+            .transact_items(TransactWriteItem::builder().put(put).build())
+            .send()
+            .await;
+        match result {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let lost_race = e
+                    .as_service_error()
+                    .filter(|se| se.is_transaction_canceled_exception())
+                    .is_some_and(|se| match se {
+                        aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError::TransactionCanceledException(tc) => {
+                            tc.cancellation_reasons().iter().any(|r| {
+                                matches!(
+                                    r.code(),
+                                    Some("ConditionalCheckFailed") | Some("TransactionConflict")
+                                )
+                            })
+                        }
+                        _ => false,
+                    });
+                if lost_race {
+                    Ok(false)
+                } else {
+                    Err(Error::Storage(format!(
+                        "transact_write_items (take into txn_taken) failed: {e}"
+                    )))
+                }
+            }
+        }
+    }
+
     /// Remove a tuple with this lease from any transaction's uncommitted or
     /// taken buffer. The buffer tables have no lease GSI (adding one would
     /// require a schema migration for CloudFormation-provisioned tables), so
@@ -290,7 +350,7 @@ async fn scan_all(
     let mut last_key: Option<HashMap<String, AttributeValue>> = None;
 
     loop {
-        let mut req = client.scan().table_name(table_name);
+        let mut req = client.scan().table_name(table_name).consistent_read(true);
         if let Some(ref lek) = last_key {
             req = req.set_exclusive_start_key(Some(lek.clone()));
         }
@@ -325,6 +385,7 @@ async fn query_by_pk(
         let mut req = client
             .query()
             .table_name(table_name)
+            .consistent_read(true)
             .key_condition_expression(format!("{pk_name} = :pk"))
             .expression_attribute_values(":pk", AttributeValue::S(pk_value.to_string()));
         if let Some(ref lek) = last_key {
@@ -369,6 +430,7 @@ async fn scan_by_lease(
         let mut req = client
             .scan()
             .table_name(table_name)
+            .consistent_read(true)
             .filter_expression("lease_id = :lid")
             .expression_attribute_values(":lid", AttributeValue::S(lease_id.to_string()));
         if let Some(ref lek) = last_key {
@@ -426,6 +488,7 @@ impl SpaceStore for DynamoSpaceStore {
             .client
             .get_item()
             .table_name(&self.tuple_table)
+            .consistent_read(true)
             .key("tuple_id", AttributeValue::S(tuple_id.to_string()))
             .send()
             .await
@@ -530,28 +593,25 @@ impl SpaceStore for DynamoSpaceStore {
             for item in &uncommitted {
                 let record = tuple_from_item(item)?;
                 if matches(&ops, &record.attrs) {
-                    // Remove from uncommitted
-                    self.client
-                        .delete_item()
-                        .table_name(&self.uncommitted_table)
-                        .key("txn_id", AttributeValue::S(tid.to_string()))
-                        .key("tuple_id", AttributeValue::S(record.tuple_id.clone()))
-                        .send()
-                        .await
-                        .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
-
-                    // Track so commit can cancel its lease (abort discards it).
+                    // Move it from the uncommitted buffer to txn_taken (so
+                    // commit can cancel its lease; abort discards it) in one
+                    // transaction: never in neither table.
                     let mut own_item = tuple_to_item(&record);
                     own_item.insert("txn_id".to_string(), AttributeValue::S(tid.to_string()));
                     own_item.insert(OWN_WRITE_ATTR.to_string(), AttributeValue::Bool(true));
-                    self.client
-                        .put_item()
-                        .table_name(&self.txn_taken_table)
-                        .set_item(Some(own_item))
-                        .send()
-                        .await
-                        .map_err(|e| Error::Storage(format!("put_item (txn_taken) failed: {e}")))?;
-                    return Ok(Some(record));
+                    let key = HashMap::from([
+                        ("txn_id".to_string(), AttributeValue::S(tid.to_string())),
+                        (
+                            "tuple_id".to_string(),
+                            AttributeValue::S(record.tuple_id.clone()),
+                        ),
+                    ]);
+                    if self
+                        .move_to_txn_taken(&self.uncommitted_table, key, own_item)
+                        .await?
+                    {
+                        return Ok(Some(record));
+                    }
                 }
             }
         }
@@ -560,7 +620,29 @@ impl SpaceStore for DynamoSpaceStore {
         let items = scan_all(&self.client, &self.tuple_table).await?;
         for item in &items {
             let record = tuple_from_item(item)?;
-            if matches(&ops, &record.attrs) {
+            if !matches(&ops, &record.attrs) {
+                continue;
+            }
+            // Under a transaction the take is a move into txn_taken (for
+            // restore-on-abort), done atomically: a crash or failed put
+            // between a delete and a put would lose the tuple. Tuple rows
+            // are immutable, so the scanned item is exactly what's moved.
+            if let Some(tid) = txn_id {
+                let mut taken_item = tuple_to_item(&record);
+                taken_item.insert("txn_id".to_string(), AttributeValue::S(tid.to_string()));
+                let key = HashMap::from([(
+                    "tuple_id".to_string(),
+                    AttributeValue::S(record.tuple_id.clone()),
+                )]);
+                if self
+                    .move_to_txn_taken(&self.tuple_table, key, taken_item)
+                    .await?
+                {
+                    return Ok(Some(record));
+                }
+                continue; // someone else took it, try the next match
+            }
+            {
                 // Atomic take: conditional delete (only succeeds if item still exists)
                 let result = self
                     .client
@@ -575,27 +657,7 @@ impl SpaceStore for DynamoSpaceStore {
                 match result {
                     Ok(resp) => {
                         if let Some(deleted_item) = resp.attributes {
-                            let taken = tuple_from_item(&deleted_item)?;
-
-                            // Track taken tuple for restore-on-abort
-                            if let Some(tid) = txn_id {
-                                let mut taken_item = tuple_to_item(&taken);
-                                taken_item.insert(
-                                    "txn_id".to_string(),
-                                    AttributeValue::S(tid.to_string()),
-                                );
-                                self.client
-                                    .put_item()
-                                    .table_name(&self.txn_taken_table)
-                                    .set_item(Some(taken_item))
-                                    .send()
-                                    .await
-                                    .map_err(|e| {
-                                        Error::Storage(format!("put_item (txn_taken) failed: {e}"))
-                                    })?;
-                            }
-
-                            return Ok(Some(taken));
+                            return Ok(Some(tuple_from_item(&deleted_item)?));
                         }
                     }
                     Err(e) => {
@@ -1004,6 +1066,40 @@ mod tests {
         // Second take should find nothing
         let taken2 = store.take_match(&template, None).await.unwrap();
         assert!(taken2.is_none());
+
+        teardown(&client, &tables).await;
+    }
+
+    /// A transactional take is one TransactWriteItems (delete + put into
+    /// txn_taken). Two transactions racing for one tuple: exactly one gets
+    /// it, and it lands in txn_taken exactly once.
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn concurrent_txn_takes_move_tuple_once() {
+        let (store, tables, client) = setup().await;
+        store.insert(make_tuple("t-race", "lease-r")).await.unwrap();
+        let template = HashMap::from([("type".to_string(), "order".to_string())]);
+
+        let (a, b) = tokio::join!(
+            store.take_match(&template, Some("txn-a")),
+            store.take_match(&template, Some("txn-b"))
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(
+            a.is_some() as u8 + b.is_some() as u8,
+            1,
+            "exactly one take wins: {a:?} {b:?}"
+        );
+        assert!(store.get("t-race").await.unwrap().is_none());
+        let winner = if a.is_some() { "txn-a" } else { "txn-b" };
+        let loser = if a.is_some() { "txn-b" } else { "txn-a" };
+        assert!(store.has_txn(winner).await.unwrap());
+        assert!(!store.has_txn(loser).await.unwrap());
+
+        // Abort restores it.
+        let (_, restored) = store.abort_txn(winner).await.unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(store.get("t-race").await.unwrap().is_some());
 
         teardown(&client, &tables).await;
     }

@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Coordin8 DynamoDB tables. Deploy this template before starting the Djinn.
   All tables use PAY_PER_REQUEST billing. The five coordin8_leases_* tables
-  have TTL enabled.
+  and coordin8_txn have TTL enabled.
 
 Resources:
 
@@ -177,6 +177,10 @@ Resources:
       KeySchema:
         - AttributeName: txn_id
           KeyType: HASH
+      # Finished (Committed/Aborted) transactions carry a ttl one day out.
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
 
   # ── EventMgr ─────────────────────────────────────────────────────────────────
 

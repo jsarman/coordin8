@@ -19,6 +19,11 @@ pub enum PrepareVote {
     Aborted,
 }
 
+/// How long a finished (`Committed`/`Aborted`) transaction record is kept,
+/// for idempotent retries and recovery, before the store drops it. Both
+/// providers honour it (Dynamo via native TTL on `ttl`).
+pub const FINISHED_TXN_RETENTION_SECS: u64 = 24 * 60 * 60;
+
 /// A participant registered via Enlist — holds the endpoint the TxnMgr
 /// calls back during 2PC.
 #[derive(Debug, Clone)]
