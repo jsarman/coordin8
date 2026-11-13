@@ -1,29 +1,37 @@
-//! Opt-in allowlist for TransactionMgr participant endpoints.
+//! Opt-in allowlist for endpoints a Djinn service dials on a caller's behalf.
 //!
-//! `Enlist` stores a caller-supplied `host:port` that the coordinator later
-//! dials during 2PC, attaching its outbound service token when JWT auth is on.
-//! Without a guard any caller can aim the Djinn at arbitrary internal hosts
-//! (SSRF) or harvest a valid token by enlisting an endpoint it controls.
-//!
-//! `COORDIN8_TXN_PARTICIPANT_ALLOW` is a comma-separated list of entries:
+//! Two services take a caller-supplied `host:port` and later connect to it:
+//! TransactionMgr dials enlisted participants during 2PC (attaching its
+//! outbound service token when JWT auth is on), and the Proxy forwards raw TCP
+//! to whatever transport a Registry entry advertises. Without a guard any
+//! caller can aim the Djinn at arbitrary internal hosts (SSRF), harvest a
+//! token, or get a tunnel through the Djinn. Each service reads its own
+//! variable ([`TXN_PARTICIPANT_ALLOW_VAR`], [`PROXY_UPSTREAM_ALLOW_VAR`]), a
+//! comma-separated list of entries:
 //!
 //! - exact hostname: `space`
 //! - wildcard-suffix hostname: `*.internal` (matches `a.internal`, not `internal`)
 //! - IPv4 / IPv6 literal: `10.0.0.5`, `::1`
-//! - CIDR: `10.0.0.0/8`, `fd00::/8` (matches IP-literal endpoints only)
+//! - CIDR: `10.0.0.0/8`, `fd00::/8` (matches IP-literal endpoints, or resolved
+//!   addresses where the caller checks them)
 //!
 //! A non-CIDR entry may carry a `:port` suffix (`space:9006`, `[::1]:9006`) to
 //! restrict the port; no port means any port. Unset/empty allows everything.
 //!
-//! Matching is on the literal host string in the endpoint. **No DNS
-//! resolution is performed**: allowing a hostname trusts whatever it resolves
-//! to, and a CIDR entry never matches a hostname endpoint.
+//! [`EndpointAllowlist::check`] matches the literal host string. **No DNS
+//! resolution is performed there**: allowing a hostname trusts whatever it
+//! resolves to. Callers that resolve first can additionally vet the resolved
+//! address with [`EndpointAllowlist::allows_ip`] /
+//! [`EndpointAllowlist::explicitly_allows_ip`].
 
 use std::net::IpAddr;
 
-use coordin8_core::Error;
+use crate::Error;
 
-pub const ALLOW_ENV_VAR: &str = "COORDIN8_TXN_PARTICIPANT_ALLOW";
+/// TransactionMgr: participant endpoints it may dial during 2PC.
+pub const TXN_PARTICIPANT_ALLOW_VAR: &str = "COORDIN8_TXN_PARTICIPANT_ALLOW";
+/// Proxy: upstream addresses it may forward to.
+pub const PROXY_UPSTREAM_ALLOW_VAR: &str = "COORDIN8_PROXY_UPSTREAM_ALLOW";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HostPattern {
@@ -46,8 +54,10 @@ enum Host {
     Ip(IpAddr),
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ParticipantAllowlist {
+#[derive(Debug, Clone)]
+pub struct EndpointAllowlist {
+    /// The variable it was configured from, named in errors.
+    var: &'static str,
     /// Empty = allow all.
     entries: Vec<Entry>,
 }
@@ -205,7 +215,7 @@ impl Entry {
 
 /// Parse an endpoint, which must be strictly `host:port` / `[v6]:port`.
 fn parse_endpoint(endpoint: &str) -> Result<(Host, u16), String> {
-    let bad = |why: &str| format!("participant_endpoint '{endpoint}' must be host:port ({why})");
+    let bad = |why: &str| format!("endpoint '{endpoint}' must be host:port ({why})");
     // Bare IPv6 without brackets is ambiguous as an endpoint.
     if endpoint.matches(':').count() > 1 && !endpoint.starts_with('[') {
         return Err(bad("IPv6 literals must be bracketed"));
@@ -217,9 +227,22 @@ fn parse_endpoint(endpoint: &str) -> Result<(Host, u16), String> {
     Ok((host, port))
 }
 
-impl ParticipantAllowlist {
-    pub fn allow_all() -> Self {
-        Self::default()
+/// Link-local ranges (169.254.0.0/16, fe80::/10): cloud metadata services
+/// live here. Callers that dial on a caller's behalf refuse them unless an
+/// IP/CIDR entry names them explicitly.
+pub fn is_link_local(ip: IpAddr) -> bool {
+    match canon(ip) {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+    }
+}
+
+impl EndpointAllowlist {
+    pub fn allow_all(var: &'static str) -> Self {
+        Self {
+            var,
+            entries: Vec::new(),
+        }
     }
 
     /// True when no restriction is configured.
@@ -229,26 +252,30 @@ impl ParticipantAllowlist {
 
     /// Parse a comma-separated spec. Empty/blank = allow all. Any invalid
     /// entry is an error naming the entry.
-    pub fn parse(spec: &str) -> Result<Self, String> {
+    pub fn parse(var: &'static str, spec: &str) -> Result<Self, String> {
         if spec.trim().is_empty() {
-            return Ok(Self::allow_all());
+            return Ok(Self::allow_all(var));
         }
         let mut entries = Vec::new();
         for raw in spec.split(',') {
             entries.push(
-                parse_entry(raw)
-                    .map_err(|e| format!("{ALLOW_ENV_VAR}: bad entry '{}': {e}", raw.trim()))?,
+                parse_entry(raw).map_err(|e| format!("{var}: bad entry '{}': {e}", raw.trim()))?,
             );
         }
-        Ok(Self { entries })
+        Ok(Self { var, entries })
     }
 
-    /// Read [`ALLOW_ENV_VAR`]; unset/empty = allow all. Fail-fast on invalid.
-    pub fn from_env() -> Result<Self, String> {
-        match std::env::var(ALLOW_ENV_VAR) {
-            Ok(v) => Self::parse(&v),
-            Err(_) => Ok(Self::allow_all()),
+    /// Read `var`; unset/empty = allow all. Fail-fast on invalid.
+    pub fn from_env(var: &'static str) -> Result<Self, String> {
+        match std::env::var(var) {
+            Ok(v) => Self::parse(var, &v),
+            Err(_) => Ok(Self::allow_all(var)),
         }
+    }
+
+    /// The variable this list was configured from.
+    pub fn var(&self) -> &'static str {
+        self.var
     }
 
     /// Additionally allow one exact `host:port` endpoint (e.g. bundled mode's
@@ -272,9 +299,23 @@ impl ParticipantAllowlist {
             Ok(())
         } else {
             Err(Error::PermissionDenied(format!(
-                "participant endpoint '{endpoint}' is not permitted by {ALLOW_ENV_VAR}"
+                "endpoint '{endpoint}' is not permitted by {}",
+                self.var
             )))
         }
+    }
+
+    /// Whether a resolved address is permitted: allow-all, or an IP/CIDR
+    /// entry covers it. Hostname entries never match here.
+    pub fn allows_ip(&self, ip: IpAddr, port: u16) -> bool {
+        self.is_allow_all() || self.explicitly_allows_ip(ip, port)
+    }
+
+    /// Whether an IP/CIDR entry names this address. Allow-all does not count:
+    /// this is how an operator opts back into a range refused by default.
+    pub fn explicitly_allows_ip(&self, ip: IpAddr, port: u16) -> bool {
+        let host = Host::Ip(canon(ip));
+        self.entries.iter().any(|e| e.matches(&host, port))
     }
 }
 
@@ -282,10 +323,12 @@ impl ParticipantAllowlist {
 mod tests {
     use super::*;
 
-    fn al(s: &str) -> ParticipantAllowlist {
-        ParticipantAllowlist::parse(s).unwrap()
+    const V: &str = TXN_PARTICIPANT_ALLOW_VAR;
+
+    fn al(s: &str) -> EndpointAllowlist {
+        EndpointAllowlist::parse(V, s).unwrap()
     }
-    fn ok(a: &ParticipantAllowlist, e: &str) -> bool {
+    fn ok(a: &EndpointAllowlist, e: &str) -> bool {
         a.check(e).is_ok()
     }
 
@@ -293,7 +336,7 @@ mod tests {
     fn unset_or_blank_allows_all() {
         assert!(ok(&al(""), "anything.example:1"));
         assert!(ok(&al("  "), "10.1.2.3:99"));
-        assert!(ParticipantAllowlist::allow_all().is_allow_all());
+        assert!(EndpointAllowlist::allow_all(V).is_allow_all());
     }
 
     #[test]
@@ -389,10 +432,10 @@ mod tests {
             "[::1",
             "10.0.0.0/8:80",
         ] {
-            assert!(ParticipantAllowlist::parse(bad).is_err(), "{bad}");
+            assert!(EndpointAllowlist::parse(V, bad).is_err(), "{bad}");
         }
-        let e = ParticipantAllowlist::parse("ok,10.0.0.0/99").unwrap_err();
-        assert!(e.contains("10.0.0.0/99") && e.contains(ALLOW_ENV_VAR));
+        let e = EndpointAllowlist::parse(V, "ok,10.0.0.0/99").unwrap_err();
+        assert!(e.contains("10.0.0.0/99") && e.contains(V));
     }
 
     #[test]
@@ -405,5 +448,36 @@ mod tests {
         assert!(ok(&a, "x.internal:1"));
         let all = al("").with_implicit_endpoint("djinn-host:9006").unwrap();
         assert!(all.is_allow_all());
+    }
+
+    #[test]
+    fn link_local_detection() {
+        for ip in [
+            "169.254.169.254",
+            "169.254.0.1",
+            "fe80::1",
+            "febf::1",
+            "::ffff:169.254.1.1",
+        ] {
+            assert!(is_link_local(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["10.0.0.1", "127.0.0.1", "fec0::1", "::1", "8.8.8.8"] {
+            assert!(!is_link_local(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn resolved_ip_checks() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let all = al("");
+        assert!(all.allows_ip(ip("10.0.0.1"), 80));
+        assert!(!all.explicitly_allows_ip(ip("169.254.169.254"), 80));
+        let a = al("10.0.0.0/8, 169.254.169.254:80, svc");
+        assert!(a.allows_ip(ip("10.9.9.9"), 1));
+        assert!(!a.allows_ip(ip("11.0.0.1"), 1));
+        assert!(a.explicitly_allows_ip(ip("169.254.169.254"), 80));
+        assert!(!a.explicitly_allows_ip(ip("169.254.169.254"), 81));
+        let e = a.check("evil:1").unwrap_err().to_string();
+        assert!(e.contains(V), "{e}");
     }
 }

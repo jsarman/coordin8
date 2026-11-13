@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use tokio::net::{TcpListener, TcpStream};
@@ -7,7 +9,13 @@ use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use coordin8_core::{CapabilityResolver, LeaseReclaimed, LeaseRecord, Leasing};
+use coordin8_core::{
+    is_link_local, CapabilityResolver, EndpointAllowlist, LeaseReclaimed, LeaseRecord, Leasing,
+    RegistryEntry, PROXY_UPSTREAM_ALLOW_VAR,
+};
+
+/// How long a forwarded connection waits for the upstream to accept.
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Resource-id prefix for proxy leases: `proxy:<proxy_id>`.
 pub const PROXY_RESOURCE_PREFIX: &str = "proxy:";
@@ -20,6 +28,8 @@ pub enum ProxyError {
     ProxyNotFound(String),
     #[error("proxy port range exhausted")]
     PortRangeExhausted,
+    #[error("{0}")]
+    Forbidden(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("store error: {0}")]
@@ -40,6 +50,9 @@ pub struct ProxyConfig {
     /// When set, ports are allocated sequentially within [min, max].
     /// When None, the OS picks an ephemeral port.
     pub port_range: Option<(u16, u16)>,
+    /// Upstreams the proxy may forward to (`COORDIN8_PROXY_UPSTREAM_ALLOW`).
+    /// Link-local addresses are refused unless an IP/CIDR entry names them.
+    pub upstream_allow: EndpointAllowlist,
 }
 
 impl Default for ProxyConfig {
@@ -47,6 +60,7 @@ impl Default for ProxyConfig {
         Self {
             bind_host: "127.0.0.1".to_string(),
             port_range: None,
+            upstream_allow: EndpointAllowlist::allow_all(PROXY_UPSTREAM_ALLOW_VAR),
         }
     }
 }
@@ -56,7 +70,8 @@ impl ProxyConfig {
     ///   PROXY_BIND_HOST  (default: 127.0.0.1)
     ///   PROXY_PORT_MIN   (optional)
     ///   PROXY_PORT_MAX   (optional)
-    pub fn from_env() -> Self {
+    ///   COORDIN8_PROXY_UPSTREAM_ALLOW (optional; invalid entries are an error)
+    pub fn from_env() -> Result<Self, String> {
         let bind_host =
             std::env::var("PROXY_BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let port_range = match (
@@ -70,10 +85,11 @@ impl ProxyConfig {
             (Some(min), Some(max)) => Some((min, max)),
             _ => None,
         };
-        Self {
+        Ok(Self {
             bind_host,
             port_range,
-        }
+            upstream_allow: EndpointAllowlist::from_env(PROXY_UPSTREAM_ALLOW_VAR)?,
+        })
     }
 }
 
@@ -137,7 +153,13 @@ impl ProxyManager {
         template: HashMap<String, String>,
         ttl_secs: u64,
     ) -> Result<(String, u16, LeaseRecord), ProxyError> {
-        let _ = self.resolve(&template).await?;
+        // Fail early: an upstream the proxy would refuse is refused here.
+        let entry = self
+            .resolver
+            .resolve(&template)
+            .await?
+            .ok_or_else(|| ProxyError::NotFound(template.clone()))?;
+        vet_upstream(&self.config.upstream_allow, &entry, &template).await?;
 
         let listener = self.bind_listener().await?;
         let local_port = listener.local_addr()?.port();
@@ -152,13 +174,14 @@ impl ProxyManager {
 
         let proxies = self.proxies.clone();
         let resolver = self.resolver.clone();
+        let allow = self.config.upstream_allow.clone();
         let pid = proxy_id.clone();
 
         info!(proxy_id = %pid, local_port, "proxy opened");
 
         tokio::spawn(async move {
             tokio::select! {
-                _ = accept_loop(listener, resolver, template) => {}
+                _ = accept_loop(listener, resolver, allow, template) => {}
                 _ = rx => {
                     debug!(proxy_id = %pid, "proxy shut down");
                 }
@@ -198,31 +221,69 @@ impl ProxyManager {
         let Some(proxy_id) = event.record.resource_id.strip_prefix(PROXY_RESOURCE_PREFIX) else {
             return;
         };
-        if let Some((_, entry)) = self.proxies.remove(proxy_id) {
+        // Only the proxy's own lease closes it: `Grant` accepts any resource
+        // id, so a lease named `proxy:<victim>` must not close the victim.
+        if let Some((_, entry)) = self
+            .proxies
+            .remove_if(proxy_id, |_, e| e.lease_id == event.record.lease_id)
+        {
             let _ = entry.shutdown.send(());
             info!(proxy_id, reason = ?event.reason, "proxy lease reclaimed, listener closed");
         }
     }
+}
 
-    async fn resolve(&self, template: &HashMap<String, String>) -> Result<String, ProxyError> {
-        let entry = self
-            .resolver
-            .resolve(template)
-            .await?
-            .ok_or_else(|| ProxyError::NotFound(template.clone()))?;
-
-        let t = entry
-            .transport
-            .ok_or_else(|| ProxyError::NotFound(template.clone()))?;
-        let host = t.config.get("host").cloned().unwrap_or_default();
-        let port = t.config.get("port").cloned().unwrap_or_default();
-        Ok(format!("{host}:{port}"))
+/// Resolve an entry's transport to the addresses the proxy may dial. Each
+/// resolved address must be allowed (literal `host:port` match, or an IP/CIDR
+/// entry covering it), and a link-local address (cloud metadata) only when an
+/// IP/CIDR entry names it. The proxy then dials exactly the vetted address, so
+/// a DNS answer that changes between check and connect can't slip past.
+async fn vet_upstream(
+    allow: &EndpointAllowlist,
+    entry: &RegistryEntry,
+    template: &HashMap<String, String>,
+) -> Result<Vec<SocketAddr>, ProxyError> {
+    let t = entry
+        .transport
+        .as_ref()
+        .ok_or_else(|| ProxyError::NotFound(template.clone()))?;
+    let host = t.config.get("host").map(String::as_str).unwrap_or_default();
+    let port = t.config.get("port").map(String::as_str).unwrap_or_default();
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let endpoint = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let literal_ok = match allow.check(&endpoint) {
+        Ok(()) => true,
+        Err(coordin8_core::Error::InvalidArgument(e)) => {
+            return Err(ProxyError::Forbidden(format!("bad upstream: {e}")))
+        }
+        Err(_) => false,
+    };
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(&endpoint).await?.collect();
+    let ok: Vec<SocketAddr> = addrs
+        .iter()
+        .copied()
+        .filter(|a| {
+            (literal_ok || allow.allows_ip(a.ip(), a.port()))
+                && (!is_link_local(a.ip()) || allow.explicitly_allows_ip(a.ip(), a.port()))
+        })
+        .collect();
+    if ok.is_empty() {
+        return Err(ProxyError::Forbidden(format!(
+            "upstream '{endpoint}' is not permitted by {} (link-local addresses need an explicit IP/CIDR entry)",
+            allow.var()
+        )));
     }
+    Ok(ok)
 }
 
 async fn accept_loop(
     listener: TcpListener,
     resolver: Arc<dyn CapabilityResolver>,
+    allow: EndpointAllowlist,
     template: HashMap<String, String>,
 ) {
     loop {
@@ -230,9 +291,10 @@ async fn accept_loop(
             Ok((client, peer)) => {
                 debug!(%peer, "proxy accepted connection");
                 let r = resolver.clone();
+                let a = allow.clone();
                 let tmpl = template.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = forward(client, r, tmpl).await {
+                    if let Err(e) = forward(client, r, &a, tmpl).await {
                         warn!("proxy forward error: {e}");
                     }
                 });
@@ -248,8 +310,9 @@ async fn accept_loop(
 async fn forward(
     mut client: TcpStream,
     resolver: Arc<dyn CapabilityResolver>,
+    allow: &EndpointAllowlist,
     template: HashMap<String, String>,
-) -> std::io::Result<()> {
+) -> Result<(), ProxyError> {
     let entry = match resolver.resolve(&template).await {
         Ok(Some(e)) => e,
         Ok(None) => {
@@ -261,18 +324,17 @@ async fn forward(
             return Ok(());
         }
     };
-
-    let t = match entry.transport {
-        Some(t) => t,
-        None => return Ok(()),
-    };
-
-    let host = t.config.get("host").cloned().unwrap_or_default();
-    let port = t.config.get("port").cloned().unwrap_or_default();
-    let addr = format!("{host}:{port}");
-
-    let mut upstream = TcpStream::connect(&addr).await?;
-    debug!(%addr, "proxy connected to upstream");
+    // Re-vetted per connection: the entry (and its address) can change.
+    let addrs = vet_upstream(allow, &entry, &template).await?;
+    let mut upstream = tokio::time::timeout(
+        UPSTREAM_CONNECT_TIMEOUT,
+        TcpStream::connect(addrs.as_slice()),
+    )
+    .await
+    .map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream connect timed out")
+    })??;
+    debug!(?addrs, "proxy connected to upstream");
 
     tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
     Ok(())
@@ -382,6 +444,91 @@ mod tests {
             mgr.leasing.renew(&lease.lease_id, 60).await.is_err(),
             "lease should be gone after Release"
         );
+    }
+
+    #[tokio::test]
+    async fn forged_lease_on_proxy_resource_is_ignored() {
+        let mgr = rig();
+        let (id, port, _) = mgr.open(HashMap::new(), 60).await.unwrap();
+        // Anyone can Grant a lease naming this proxy's resource id, then cancel it.
+        let forged = mgr
+            .leasing
+            .grant(&format!("{PROXY_RESOURCE_PREFIX}{id}"), 60)
+            .await
+            .unwrap();
+        mgr.leasing.cancel(&forged.lease_id).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(is_listening(port).await, "forged lease closed the proxy");
+        assert!(mgr.proxies.get(&id).is_some());
+    }
+
+    #[tokio::test]
+    async fn link_local_upstream_is_refused_unless_named() {
+        struct MetaData;
+        #[async_trait::async_trait]
+        impl CapabilityResolver for MetaData {
+            async fn resolve(
+                &self,
+                _t: &HashMap<String, String>,
+            ) -> Result<Option<RegistryEntry>, Error> {
+                let config = HashMap::from([
+                    ("host".to_string(), "169.254.169.254".to_string()),
+                    ("port".to_string(), "80".to_string()),
+                ]);
+                Ok(Some(RegistryEntry {
+                    capability_id: "c".into(),
+                    lease_id: "l".into(),
+                    interface: "Svc".into(),
+                    attrs: HashMap::new(),
+                    transport: Some(TransportConfig {
+                        transport_type: "tcp".into(),
+                        config,
+                    }),
+                }))
+            }
+        }
+        let (tx, _) = broadcast::channel::<LeaseReclaimed>(8);
+        let lm = Arc::new(LeaseManager::new(
+            Arc::new(InMemoryLeaseStore::new()),
+            LeaseConfig::default(),
+            tx,
+        ));
+        let mgr = ProxyManager::new(Arc::new(MetaData), ProxyConfig::default(), lm.clone());
+        assert!(matches!(
+            mgr.open(HashMap::new(), 60).await,
+            Err(ProxyError::Forbidden(_))
+        ));
+        let named = ProxyConfig {
+            upstream_allow: EndpointAllowlist::parse(
+                PROXY_UPSTREAM_ALLOW_VAR,
+                "169.254.169.254:80",
+            )
+            .unwrap(),
+            ..ProxyConfig::default()
+        };
+        let mgr = ProxyManager::new(Arc::new(MetaData), named, lm);
+        assert!(mgr.open(HashMap::new(), 60).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn upstream_outside_allowlist_is_refused() {
+        let config = ProxyConfig {
+            upstream_allow: EndpointAllowlist::parse(PROXY_UPSTREAM_ALLOW_VAR, "10.0.0.0/8, svc")
+                .unwrap(),
+            ..ProxyConfig::default()
+        };
+        let (tx, _) = broadcast::channel::<LeaseReclaimed>(8);
+        let lm = Arc::new(LeaseManager::new(
+            Arc::new(InMemoryLeaseStore::new()),
+            LeaseConfig::default(),
+            tx,
+        ));
+        // `Fixed` resolves to 127.0.0.1:1.
+        let mgr = ProxyManager::new(Arc::new(Fixed), config, lm);
+        assert!(matches!(
+            mgr.open(HashMap::new(), 60).await,
+            Err(ProxyError::Forbidden(_))
+        ));
     }
 
     #[tokio::test]

@@ -195,3 +195,27 @@ async fn store_cas_false_on_wrong_expected_state() {
         TransactionState::Active
     );
 }
+
+/// `LeaseService.Grant` accepts any resource id, so a lease named
+/// `txn:<victim>` can be granted and cancelled by anyone. Its reclaim must not
+/// abort the victim's transaction; only the transaction's own lease does.
+#[tokio::test]
+async fn forged_lease_reclaim_does_not_abort() {
+    let (mgr, store) = make_manager();
+    let (txn_id, _) = mgr.begin(60).await.unwrap();
+
+    mgr.on_lease_reclaimed(&txn_id, "forged-lease-id")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get(&txn_id).await.unwrap().unwrap().state,
+        TransactionState::Active
+    );
+
+    let own = store.get(&txn_id).await.unwrap().unwrap().lease_id;
+    mgr.on_lease_reclaimed(&txn_id, &own).await.unwrap();
+    assert_eq!(
+        store.get(&txn_id).await.unwrap().unwrap().state,
+        TransactionState::Aborted
+    );
+}
