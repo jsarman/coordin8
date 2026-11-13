@@ -9,6 +9,7 @@
 
 | Topic | Status | Notes |
 |-------|--------|-------|
+| [review-2026-11-12](review-2026-11-12/PRD.md) | In progress (#63–#68 open) | Second full review: txn recovery, Dynamo consistency/atomic take/txn TTL, Proxy upstream allowlist + loopback ports, client-acked events, leased Notify, Go SDK stream errors. TLS, scans, authorization not started |
 | [review-2026-10-03](review-2026-10-03/PRD.md) | COMPLETE (2026-10-03, #40–#53) | Fixes from a full-repo review (2PC races, Dynamo lease/event bugs, Space txn leases, event durability, registry/proxy/txn security, graceful shutdown), first SDK test suites, Claude tooling + docs refresh |
 
 ---
