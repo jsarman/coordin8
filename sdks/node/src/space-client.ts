@@ -6,6 +6,7 @@ import type {
   WriteRequest,
 } from "../gen/coordin8/space";
 import { SpaceEventType } from "../gen/coordin8/space";
+import { LeaseClient } from "./lease-client";
 import type { Lease } from "./lease-client";
 
 export interface TupleRecord {
@@ -78,6 +79,8 @@ function toSpaceEvent(evt: ProtoSpaceEvent): SpaceEvent {
 
 export class SpaceClient {
   private readonly stub: GrpcSpaceClient;
+  /** Space's own LeaseService: renews watch leases. */
+  private readonly leases: LeaseClient;
 
   constructor(channel: grpc.Channel, interceptors: grpc.Interceptor[] = []) {
     this.stub = new GrpcSpaceClient(
@@ -85,6 +88,7 @@ export class SpaceClient {
       grpc.credentials.createInsecure(),
       { channelOverride: channel, interceptors }
     );
+    this.leases = LeaseClient.fromChannel(channel, interceptors);
   }
 
   /** Write a leased tuple into the Space. */
@@ -186,6 +190,10 @@ export class SpaceClient {
   /**
    * Higher-level notify that returns an async iterable of SpaceEvent objects.
    * Stops when the stream ends, errors, or the AbortSignal fires.
+   *
+   * The watch lives as long as its lease, which arrives as the stream's first
+   * (REGISTERED) message: it is renewed in the background while iterating. If
+   * it is reclaimed anyway, iteration throws NOT_FOUND.
    */
   async *watch(
     opts: NotifyOpts,
@@ -195,8 +203,21 @@ export class SpaceClient {
     if (signal) {
       signal.addEventListener("abort", () => stream.cancel(), { once: true });
     }
-    for await (const raw of stream) {
-      yield toSpaceEvent(raw);
+    const renewals = new AbortController();
+    try {
+      for await (const raw of stream) {
+        if (raw.type === SpaceEventType.REGISTERED) {
+          const ttl = raw.lease?.ttlSeconds || opts.ttlSeconds || 60;
+          if (raw.lease?.leaseId) {
+            this.leases.keepAlive(raw.lease.leaseId, ttl, renewals.signal);
+          }
+          continue;
+        }
+        yield toSpaceEvent(raw);
+      }
+    } finally {
+      renewals.abort();
+      stream.cancel();
     }
   }
 

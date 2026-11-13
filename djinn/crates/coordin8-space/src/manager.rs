@@ -41,6 +41,9 @@ pub struct SpaceManager {
     /// without this one waiting worker makes every restart wait out the grace
     /// period and exit non-zero.
     shutdown: ShutdownSignal,
+    /// Live Notify streams by watch lease id: fired when the lease is
+    /// reclaimed, so the stream ends with its watch.
+    watch_ends: DashMap<String, tokio::sync::oneshot::Sender<()>>,
 }
 
 impl SpaceManager {
@@ -63,6 +66,7 @@ impl SpaceManager {
             participant_endpoint: None,
             enlisted: DashMap::new(),
             shutdown: ShutdownSignal::never(),
+            watch_ends: DashMap::new(),
         }
     }
 
@@ -87,6 +91,7 @@ impl SpaceManager {
             participant_endpoint: Some(participant_endpoint),
             enlisted: DashMap::new(),
             shutdown: ShutdownSignal::never(),
+            watch_ends: DashMap::new(),
         }
     }
 
@@ -408,7 +413,7 @@ impl SpaceManager {
         on: SpaceEventKind,
         ttl_secs: u64,
         handback: Vec<u8>,
-    ) -> Result<(String, String), Error> {
+    ) -> Result<(String, LeaseRecord, tokio::sync::oneshot::Receiver<()>), Error> {
         let watch_id = Uuid::new_v4().to_string();
         let resource_id = format!("space-watch:{}", watch_id);
         let lease = self.lease_manager.grant(&resource_id, ttl_secs).await?;
@@ -421,11 +426,24 @@ impl SpaceManager {
             handback,
         };
 
-        self.store.create_watch(record).await?;
+        let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+        self.watch_ends.insert(lease.lease_id.clone(), end_tx);
+        if let Err(e) = self.store.create_watch(record).await {
+            self.watch_ends.remove(&lease.lease_id);
+            let _ = self.lease_manager.cancel(&lease.lease_id).await;
+            return Err(e);
+        }
 
         debug!(watch_id, lease_id = %lease.lease_id, "space notification created");
 
-        Ok((watch_id, lease.lease_id))
+        Ok((watch_id, lease, end_rx))
+    }
+
+    /// The Notify client went away: release its watch (the reclaim cascade
+    /// then removes the record).
+    pub async fn end_watch(&self, lease_id: &str) {
+        self.watch_ends.remove(lease_id);
+        let _ = self.lease_manager.cancel(lease_id).await;
     }
 
     /// Subscribe to the tuple appearance broadcast.
@@ -448,6 +466,9 @@ impl SpaceManager {
 
     /// Called by the lease expiry listener when a space-watch: lease expires.
     pub async fn on_watch_expired(&self, lease_id: &str) {
+        if let Some((_, end)) = self.watch_ends.remove(lease_id) {
+            let _ = end.send(());
+        }
         if let Ok(Some(watch)) = self.store.remove_watch_by_lease(lease_id).await {
             debug!(watch_id = %watch.watch_id, lease_id, "space notification expired");
         }

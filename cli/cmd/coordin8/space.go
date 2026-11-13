@@ -211,7 +211,7 @@ var spaceNotifyCmd = &cobra.Command{
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer cancel()
 
-		ch, err := c.Space().Notify(ctx, coordin8.NotifyOpts{
+		w, err := c.Space().Notify(ctx, coordin8.NotifyOpts{
 			Template: spaceNotifyTemplate,
 			On:       eventType,
 			TTL:      time.Duration(spaceNotifyTTL) * time.Second,
@@ -223,7 +223,7 @@ var spaceNotifyCmd = &cobra.Command{
 
 		fmt.Printf("watching %s events... (Ctrl+C to stop)\n\n", spaceNotifyOn)
 
-		for evt := range ch {
+		for evt := range w.C {
 			label := "APPEARANCE"
 			if evt.Type == coordin8.Expiration {
 				label = "EXPIRATION"
@@ -238,7 +238,7 @@ var spaceNotifyCmd = &cobra.Command{
 				fmt.Printf("[%s] %s\n", evt.OccurredAt.Format(time.RFC3339), label)
 			}
 		}
-		return nil
+		return w.Err()
 	},
 }
 

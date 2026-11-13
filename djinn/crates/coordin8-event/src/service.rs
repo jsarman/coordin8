@@ -9,7 +9,7 @@ use tracing::{debug, error};
 
 use coordin8_core::DeliveryMode;
 use coordin8_proto::coordin8::{
-    event_service_server::EventService, CancelSubscriptionRequest, EmitRequest, Event,
+    event_service_server::EventService, AckRequest, CancelSubscriptionRequest, EmitRequest, Event,
     EventRegistration, Lease, ReceiveRequest, RenewSubscriptionRequest, SubscribeRequest,
 };
 
@@ -156,10 +156,11 @@ async fn best_effort_loop(
 }
 
 /// Durable delivery (at-least-once): every event comes from the mailbox, in
-/// per-registration seq order. An entry is acked (deleted) only after it was
-/// sent AND the transport pulled it off the channel; a disconnect before that
-/// leaves it in the mailbox for the next `Receive`. Broadcast messages are just
-/// wake-ups; lag is harmless because the mailbox is the source of truth.
+/// per-registration seq order. Nothing is deleted here: only the client knows
+/// what it received, so entries stay until it acknowledges them (`Ack`, or a
+/// `Receive` whose `after_seq` covers them) and a reconnect re-sends the rest.
+/// Broadcast messages are just wake-ups; lag is harmless because the mailbox
+/// is the source of truth.
 async fn durable_loop(
     manager: Arc<EventManager>,
     registration_id: String,
@@ -167,10 +168,11 @@ async fn durable_loop(
     tx: mpsc::Sender<Result<Event, Status>>,
     source: String,
     handback: Vec<u8>,
-    first_batch: Vec<coordin8_core::EventRecord>,
+    // The resume cursor and the first page after it.
+    (after_seq, first_batch): (u64, Vec<coordin8_core::EventRecord>),
 ) {
     let mut wakeups = BroadcastStream::new(broadcast_rx);
-    let mut cursor = 0u64;
+    let mut cursor = after_seq;
     let mut batch = first_batch;
 
     loop {
@@ -183,15 +185,6 @@ async fn durable_loop(
                     .await
                     .is_err()
                 {
-                    return;
-                }
-                // Room in the channel again => the previous event was consumed.
-                if tx.reserve().await.is_err() {
-                    return;
-                }
-                if let Err(e) = manager.ack_mailbox(&registration_id, &[seq]).await {
-                    error!(registration_id, seq, error = %e, "mailbox ack failed");
-                    let _ = tx.send(Err(map_err(e))).await;
                     return;
                 }
                 cursor = seq;
@@ -278,7 +271,10 @@ impl EventService for EventServiceImpl {
         &self,
         req: Request<ReceiveRequest>,
     ) -> Result<Response<Self::ReceiveStream>, Status> {
-        let registration_id = req.into_inner().registration_id;
+        let ReceiveRequest {
+            registration_id,
+            after_seq,
+        } = req.into_inner();
 
         let sub = self
             .manager
@@ -296,10 +292,7 @@ impl EventService for EventServiceImpl {
         // emitted in the gap still wakes us.
         let broadcast_rx = self.manager.subscribe_broadcast();
 
-        // Capacity 1: the stream only holds one event in flight, so "the
-        // channel has room again" means the previous event was pulled by the
-        // transport. Durable acks key off that.
-        let (tx, rx) = mpsc::channel::<Result<Event, Status>>(1);
+        let (tx, rx) = mpsc::channel::<Result<Event, Status>>(16);
         let manager = self.manager.clone();
 
         if !is_durable {
@@ -317,9 +310,16 @@ impl EventService for EventServiceImpl {
             return Ok(Response::new(Box::pin(stream)));
         }
 
+        // The resume cursor acknowledges everything at or below it.
+        if after_seq > 0 {
+            manager
+                .ack_through(&registration_id, after_seq)
+                .await
+                .map_err(map_err)?;
+        }
         // A failing backlog read is surfaced to the caller, not swallowed.
         let first_batch = manager
-            .peek_mailbox(&registration_id, 0, MAILBOX_BATCH)
+            .peek_mailbox(&registration_id, after_seq, MAILBOX_BATCH)
             .await
             .map_err(map_err)?;
 
@@ -336,7 +336,7 @@ impl EventService for EventServiceImpl {
             tx,
             source,
             handback,
-            first_batch,
+            (after_seq, first_batch),
         ));
 
         #[allow(clippy::result_large_err)] // tonic::Status is the gRPC error type
@@ -344,6 +344,15 @@ impl EventService for EventServiceImpl {
             Err(Status::unavailable("server shutting down"))
         });
         Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn ack(&self, req: Request<AckRequest>) -> Result<Response<()>, Status> {
+        let r = req.into_inner();
+        self.manager
+            .ack_through(&r.registration_id, r.up_to_seq)
+            .await
+            .map_err(map_err)?;
+        Ok(Response::new(()))
     }
 
     async fn emit(&self, req: Request<EmitRequest>) -> Result<Response<()>, Status> {
@@ -447,6 +456,7 @@ mod tests {
     ) -> <EventServiceImpl as EventService>::ReceiveStream {
         svc.receive(Request::new(ReceiveRequest {
             registration_id: reg.to_string(),
+            after_seq: 0,
         }))
         .await
         .unwrap()
@@ -522,7 +532,7 @@ mod tests {
         assert_eq!(seen, (1..=5).collect::<BTreeSet<u64>>());
     }
 
-    async fn live_delivered_not_replayed(store: Arc<dyn EventStore>) {
+    async fn acked_not_replayed(store: Arc<dyn EventStore>) {
         let m = manager(store, 16);
         let svc = EventServiceImpl::new(m.clone(), "h", 1);
         let reg = subscribe(&m, DeliveryMode::Durable).await;
@@ -534,7 +544,12 @@ mod tests {
         let got = collect(&mut s1, Duration::from_millis(400)).await;
         assert_eq!(got.iter().map(|e| e.seq_num).collect::<Vec<_>>(), [1, 2, 3]);
         assert_eq!(got[0].handback, vec![9]);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        svc.ack(Request::new(AckRequest {
+            registration_id: reg.clone(),
+            up_to_seq: 3,
+        }))
+        .await
+        .unwrap();
         drop(s1);
 
         let mut s2 = receive(&svc, &reg).await;
@@ -545,6 +560,45 @@ mod tests {
         emit(&m, "a").await;
         let got = collect(&mut s2, Duration::from_millis(400)).await;
         assert_eq!(got.iter().map(|e| e.seq_num).collect::<Vec<_>>(), [4]);
+    }
+
+    /// The review's repro: two events pulled off the stream, then the
+    /// connection dies. Unacked, so nothing is lost: all three come again.
+    async fn unacked_in_flight_redelivered(store: Arc<dyn EventStore>) {
+        let m = manager(store, 16);
+        let svc = EventServiceImpl::new(m.clone(), "h", 1);
+        let reg = subscribe(&m, DeliveryMode::Durable).await;
+        for _ in 0..3 {
+            emit(&m, "a").await;
+        }
+        let mut s1 = receive(&svc, &reg).await;
+        s1.next().await.unwrap().unwrap();
+        s1.next().await.unwrap().unwrap();
+        drop(s1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(m.peek_mailbox(&reg, 0, 100).await.unwrap().len(), 3);
+
+        // A resume cursor acknowledges what the client did process.
+        let mut s2 = svc
+            .receive(Request::new(ReceiveRequest {
+                registration_id: reg.clone(),
+                after_seq: 1,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let got = collect(&mut s2, Duration::from_millis(400)).await;
+        assert_eq!(got.iter().map(|e| e.seq_num).collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(m.peek_mailbox(&reg, 0, 100).await.unwrap().len(), 2);
+
+        let err = svc
+            .ack(Request::new(AckRequest {
+                registration_id: "nope".into(),
+                up_to_seq: 1,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
     async fn durable_recovers_from_lag(store: Arc<dyn EventStore>) {
@@ -582,8 +636,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mem_live_delivered_not_replayed() {
-        live_delivered_not_replayed(mem()).await;
+    async fn mem_acked_not_replayed() {
+        acked_not_replayed(mem()).await;
+    }
+
+    #[tokio::test]
+    async fn mem_unacked_in_flight_redelivered() {
+        unacked_in_flight_redelivered(mem()).await;
     }
 
     #[tokio::test]
@@ -728,9 +787,17 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires MiniStack on localhost:4566"]
-    async fn dynamo_live_delivered_not_replayed() {
+    async fn dynamo_acked_not_replayed() {
         let (store, cleanup) = dynamo_store().await;
-        live_delivered_not_replayed(store).await;
+        acked_not_replayed(store).await;
+        cleanup.await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn dynamo_unacked_in_flight_redelivered() {
+        let (store, cleanup) = dynamo_store().await;
+        unacked_in_flight_redelivered(store).await;
         cleanup.await;
     }
 

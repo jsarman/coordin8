@@ -352,7 +352,7 @@ async fn notify_appearance() {
     let mgr2 = Arc::clone(&mgr);
 
     // Create a notification
-    let (_watch_id, _lease_id) = mgr
+    let (_watch_id, _lease, _ended) = mgr
         .notify(
             [("kind".into(), "alert".into())].into(),
             SpaceEventKind::Appearance,

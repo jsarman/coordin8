@@ -2,6 +2,7 @@ package coordin8
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
@@ -11,11 +12,15 @@ import (
 // SpaceClient wraps the generated SpaceService gRPC client.
 type SpaceClient struct {
 	client pb.SpaceServiceClient
+	leases *LeaseClient // Space's own LeaseService (watch leases)
 }
 
 // Space returns a client for Space (tuple store) operations.
 func (c *Client) Space() *SpaceClient {
-	return &SpaceClient{client: pb.NewSpaceServiceClient(c.spaceConn)}
+	return &SpaceClient{
+		client: pb.NewSpaceServiceClient(c.spaceConn),
+		leases: NewLeaseClient(c.spaceConn),
+	}
 }
 
 // TupleRecord is a tuple stored in the Space.
@@ -189,10 +194,20 @@ type NotifyOpts struct {
 	Handback []byte
 }
 
-// Notify subscribes to tuple events matching the template.
-// Returns a channel that receives events until ctx is cancelled or the
-// watch lease expires.
-func (c *SpaceClient) Notify(ctx context.Context, opts NotifyOpts) (<-chan SpaceEvent, error) {
+// Watch is a live Notify subscription. Range over C for events; when it
+// closes, Err says why (codes.NotFound: the watch lease was reclaimed).
+type Watch struct {
+	*Stream[SpaceEvent]
+	// Lease is the watch's own lease. Notify keeps it renewed while ctx is
+	// live; cancel ctx (or the lease) to end the watch.
+	Lease LeaseRecord
+}
+
+// Notify subscribes to tuple events matching the template. The watch lives
+// as long as its lease, which Notify renews in the background until ctx is
+// cancelled or the stream ends.
+func (c *SpaceClient) Notify(ctx context.Context, opts NotifyOpts) (*Watch, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	stream, err := c.client.Notify(ctx, &pb.NotifyRequest{
 		Template:   opts.Template,
 		On:         pb.SpaceEventType(opts.On),
@@ -200,33 +215,44 @@ func (c *SpaceClient) Notify(ctx context.Context, opts NotifyOpts) (<-chan Space
 		Handback:   opts.Handback,
 	})
 	if err != nil {
+		cancel()
 		return nil, err
 	}
+	// The first message is the watch registration, carrying its lease.
+	first, err := stream.Recv()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if first.Type != pb.SpaceEventType_REGISTERED || first.Lease == nil {
+		cancel()
+		return nil, fmt.Errorf("space notify: expected a REGISTERED event first, got %v", first.Type)
+	}
+	w := &Watch{Lease: protoToRecord(first.Lease)}
+	ttl := time.Duration(first.Lease.TtlSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = opts.TTL
+	}
+	if ttl > 0 {
+		_ = c.leases.KeepAlive(ctx, w.Lease.LeaseID, ttl)
+	}
 
-	ch := make(chan SpaceEvent, 16)
-	go func() {
-		defer close(ch)
-		for {
-			evt, err := stream.Recv()
-			if err != nil {
-				return
-			}
-			se := SpaceEvent{
-				Type:     SpaceEventType(evt.Type),
-				Tuple:    protoToTuple(evt.Tuple),
-				Handback: evt.Handback,
-			}
-			if evt.OccurredAt != nil {
-				se.OccurredAt = evt.OccurredAt.AsTime()
-			}
-			select {
-			case ch <- se:
-			case <-ctx.Done():
-				return
-			}
+	w.Stream = pump(ctx, 16, stream.Recv, func(evt *pb.SpaceEvent) (SpaceEvent, bool) {
+		se := SpaceEvent{
+			Type:     SpaceEventType(evt.Type),
+			Tuple:    protoToTuple(evt.Tuple),
+			Handback: evt.Handback,
 		}
+		if evt.OccurredAt != nil {
+			se.OccurredAt = evt.OccurredAt.AsTime()
+		}
+		return se, true
+	}, nil)
+	go func() {
+		<-w.Done()
+		cancel() // stop renewing
 	}()
-	return ch, nil
+	return w, nil
 }
 
 // RenewTuple extends the lease on a tuple already in the Space.

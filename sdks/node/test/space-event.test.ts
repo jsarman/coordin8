@@ -60,6 +60,7 @@ async function startSpace() {
           },
           notify: (call) => {
             s.notify = call.request;
+            call.write({ type: 2, handback: Buffer.alloc(0), lease: { leaseId: "watch-lease", ttlSeconds: 60 } });
             call.write({ type: 1, tuple: tuple("n"), occurredAt: new Date(9_000), handback: call.request.handback });
             call.write({ type: 0, handback: Buffer.alloc(0) });
             call.end();
@@ -90,6 +91,7 @@ async function startEvents() {
     subscribe: undefined as any,
     emit: undefined as any,
     cancelled: undefined as string | undefined,
+    acks: [] as number[],
   };
   const server = cleanup.server(
     await serve([
@@ -121,6 +123,10 @@ async function startEvents() {
           },
           emit: (call, cb) => {
             e.emit = call.request;
+            cb(null, {});
+          },
+          ack: (call, cb) => {
+            e.acks.push(Number(call.request.upToSeq));
             cb(null, {});
           },
           renewSubscription: (call, cb) =>
@@ -271,8 +277,8 @@ describe("EventClient", () => {
     assert.deepEqual(e.subscribe.template, {});
   });
 
-  it("receive yields mapped events", async () => {
-    const { client } = await startEvents();
+  it("receive yields mapped events and acks each once processed", async () => {
+    const { e, client } = await startEvents();
     const got = [];
     for await (const evt of client.receive("reg-1")) got.push(evt);
     assert.equal(got.length, 2);
@@ -284,6 +290,8 @@ describe("EventClient", () => {
     assert.equal(got[0].handback.toString(), "hb");
     assert.equal(got[0].emittedAt?.getTime(), 5_000);
     assert.equal(got[1].emittedAt, undefined);
+    for (let i = 0; i < 100 && e.acks.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(e.acks, [3, 0]);
   });
 
   it("emit, renewSubscription and cancelSubscription", async () => {

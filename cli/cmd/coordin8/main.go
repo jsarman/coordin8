@@ -162,7 +162,7 @@ var leaseWatchCmd = &cobra.Command{
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		ch, err := lc.Watch(ctx, leaseResourceID)
+		s, err := lc.Watch(ctx, leaseResourceID)
 		if err != nil {
 			return err
 		}
@@ -173,7 +173,7 @@ var leaseWatchCmd = &cobra.Command{
 		}
 		fmt.Printf("watching expiry events for resource: %s\n\n", filter)
 
-		for evt := range ch {
+		for evt := range s.C {
 			reason := "expired"
 			if evt.Cancelled {
 				reason = "cancelled"
@@ -181,7 +181,7 @@ var leaseWatchCmd = &cobra.Command{
 			fmt.Printf("[%s] %s  lease_id=%s  resource_id=%s\n",
 				evt.ExpiredAt.Format(time.RFC3339), reason, evt.LeaseID, evt.ResourceID)
 		}
-		return nil
+		return s.Err()
 	},
 }
 
@@ -336,17 +336,17 @@ var registryWatchCmd = &cobra.Command{
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		ch, err := c.Registry().Watch(ctx, coordin8.Template(registryLookupTemplate))
+		s, err := c.Registry().Watch(ctx, coordin8.Template(registryLookupTemplate))
 		if err != nil {
 			return err
 		}
 
 		fmt.Println("watching registry events...")
-		for evt := range ch {
+		for evt := range s.C {
 			fmt.Printf("[%-12s] %s  interface=%s\n",
 				evt.Type, evt.Capability.CapabilityID, evt.Capability.Interface)
 		}
-		return nil
+		return s.Err()
 	},
 }
 

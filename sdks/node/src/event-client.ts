@@ -80,18 +80,43 @@ export class EventClient {
   /**
    * Receive events for a registration (server-streaming).
    * Returns an async iterable of EventRecord objects.
+   *
+   * DURABLE registrations are at-least-once: the server keeps each event
+   * until it is acknowledged. An event is acknowledged once the loop asks for
+   * the next one (its body ran to completion), so an event whose processing
+   * threw, or that was in flight when the connection dropped, is delivered
+   * again on the next receive. Handle duplicates by seqNum.
    */
   async *receive(
     registrationId: string,
     signal?: AbortSignal
   ): AsyncGenerator<EventRecord> {
-    const stream = this.stub.receive({ registrationId });
+    const stream = this.stub.receive({ registrationId, afterSeq: 0 });
     if (signal) {
       signal.addEventListener("abort", () => stream.cancel(), { once: true });
     }
     for await (const raw of stream) {
-      yield toEvent(raw);
+      const evt = toEvent(raw);
+      yield evt;
+      // Resumed: the consumer is done with evt.
+      this.ack(registrationId, evt.seqNum).catch(() => {
+        /* a failed ack only means a redelivery */
+      });
     }
+  }
+
+  /**
+   * Acknowledge every DURABLE event on the registration with
+   * seqNum <= upToSeq, deleting it from the mailbox. receive() does this for
+   * you.
+   */
+  ack(registrationId: string, upToSeq: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.stub.ack({ registrationId, upToSeq }, (err) => {
+        if (err) return reject(err);
+        resolve();
+      });
+    });
   }
 
   /** Emit an event into the bus. */

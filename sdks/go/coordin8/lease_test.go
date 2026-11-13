@@ -98,10 +98,11 @@ func TestWatchMapsExpiryEvents(t *testing.T) {
 		{LeaseId: "b", ResourceId: "r", Reason: pb.ReclaimReason_CANCELLED},
 	}}
 	lc, _ := dialFakeLease(t, f)
-	ch, err := lc.Watch(context.Background(), "r")
+	s, err := lc.Watch(context.Background(), "r")
 	if err != nil {
 		t.Fatal(err)
 	}
+	ch := s.C
 	e1, e2 := <-ch, <-ch
 	if e1.LeaseID != "a" || e1.Cancelled || !e1.ExpiredAt.Equal(time.Unix(5, 0)) {
 		t.Fatalf("e1 = %+v", e1)
@@ -111,6 +112,9 @@ func TestWatchMapsExpiryEvents(t *testing.T) {
 	}
 	if _, ok := <-ch; ok {
 		t.Fatal("channel should close when stream ends")
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("clean end should report no error, got %v", err)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -21,9 +20,9 @@ type cachedConn struct {
 	stale   bool
 }
 
-// ServiceDiscovery caches Djinn proxies by template and watches the registry
-// for service changes. Repeated calls with the same template return a cached
-// connection without any additional Djinn round-trips.
+// ServiceDiscovery caches Djinn proxies by template. Repeated calls with the
+// same template return a cached connection without any additional Djinn
+// round-trips.
 //
 // One leased proxy is kept per template. Proxy re-resolves the upstream on
 // every new TCP connection, so a held conn survives the service expiring,
@@ -42,7 +41,16 @@ type ServiceDiscovery struct {
 	client  *Client
 	mu      sync.Mutex
 	cache   map[string]*cachedConn
-	cancels map[string]context.CancelFunc
+	opening map[string]*opening // one proxy open in flight per template
+}
+
+// opening is a refresh in progress; concurrent Gets for its template wait
+// on done and share the result instead of opening (and then closing) their
+// own proxy.
+type opening struct {
+	done chan struct{}
+	conn *grpc.ClientConn
+	err  error
 }
 
 // NewServiceDiscovery creates a ServiceDiscovery manager backed by djinn.
@@ -50,7 +58,7 @@ func NewServiceDiscovery(client *Client) *ServiceDiscovery {
 	return &ServiceDiscovery{
 		client:  client,
 		cache:   make(map[string]*cachedConn),
-		cancels: make(map[string]context.CancelFunc),
+		opening: make(map[string]*opening),
 	}
 }
 
@@ -67,9 +75,25 @@ func (sd *ServiceDiscovery) Get(ctx context.Context, tmpl Template) (*grpc.Clien
 		sd.mu.Unlock()
 		return conn, nil
 	}
+	if op, ok := sd.opening[key]; ok {
+		sd.mu.Unlock()
+		select {
+		case <-op.done:
+			return op.conn, op.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	op := &opening{done: make(chan struct{})}
+	sd.opening[key] = op
 	sd.mu.Unlock()
 
-	return sd.refresh(ctx, key, tmpl)
+	op.conn, op.err = sd.refresh(ctx, key, tmpl)
+	sd.mu.Lock()
+	delete(sd.opening, key)
+	sd.mu.Unlock()
+	close(op.done)
+	return op.conn, op.err
 }
 
 func (sd *ServiceDiscovery) refresh(ctx context.Context, key string, tmpl Template) (*grpc.ClientConn, error) {
@@ -104,12 +128,6 @@ func (sd *ServiceDiscovery) refresh(ctx context.Context, key string, tmpl Templa
 	}
 	sd.cache[key] = &cachedConn{proxyID: handle.ProxyID, handle: handle, conn: conn}
 	go sd.watchLease(key, handle)
-
-	if _, watching := sd.cancels[key]; !watching {
-		watchCtx, cancel := context.WithCancel(context.Background())
-		sd.cancels[key] = cancel
-		go sd.watch(watchCtx, key, tmpl)
-	}
 	sd.mu.Unlock()
 
 	return conn, nil
@@ -129,59 +147,16 @@ func (sd *ServiceDiscovery) watchLease(key string, handle *ProxyHandle) {
 	}
 }
 
-func (sd *ServiceDiscovery) watch(ctx context.Context, key string, tmpl Template) {
-	for {
-		ch, err := sd.client.Registry().Watch(ctx, tmpl)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-				continue // reconnect
-			}
-		}
-		sd.consumeWatch(ctx, ch, key, tmpl)
-		// Stream ended — reconnect unless cancelled.
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Second):
-			continue
-		}
-	}
-}
-
-func (sd *ServiceDiscovery) consumeWatch(ctx context.Context, ch <-chan RegistryEvent, key string, tmpl Template) {
-	for {
-		select {
-		case _, ok := <-ch:
-			if !ok {
-				return
-			}
-			// "expired" / "registered" / "modified": nothing to do. Proxy
-			// re-resolves the upstream on every new TCP connection, so the
-			// existing proxy stays valid while the service restarts or moves.
-			// Only a lost proxy lease replaces an entry (see watchLease).
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-// Close releases all cached proxies and watch streams.
+// Close releases all cached proxies.
 func (sd *ServiceDiscovery) Close() {
 	sd.mu.Lock()
 	defer sd.mu.Unlock()
 
-	for _, cancel := range sd.cancels {
-		cancel()
-	}
 	for _, entry := range sd.cache {
 		entry.conn.Close()
 		_ = entry.handle.Release(context.Background())
 	}
 	sd.cache = make(map[string]*cachedConn)
-	sd.cancels = make(map[string]context.CancelFunc)
 }
 
 func templateKey(tmpl Template) string {

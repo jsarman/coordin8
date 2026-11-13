@@ -95,6 +95,18 @@ export interface EventRegistration {
 
 export interface ReceiveRequest {
   registrationId: string;
+  /**
+   * Resume cursor (DURABLE): acknowledges every event with
+   * seq_num <= after_seq, then delivers from after_seq + 1. 0 = from the
+   * oldest unacknowledged event.
+   */
+  afterSeq: number;
+}
+
+export interface AckRequest {
+  registrationId: string;
+  /** the seq_num of the last event processed */
+  upToSeq: number;
 }
 
 export interface EmitRequest {
@@ -458,13 +470,16 @@ export const EventRegistration = {
 };
 
 function createBaseReceiveRequest(): ReceiveRequest {
-  return { registrationId: "" };
+  return { registrationId: "", afterSeq: 0 };
 }
 
 export const ReceiveRequest = {
   encode(message: ReceiveRequest, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
     if (message.registrationId !== "") {
       writer.uint32(10).string(message.registrationId);
+    }
+    if (message.afterSeq !== 0) {
+      writer.uint32(16).uint64(message.afterSeq);
     }
     return writer;
   },
@@ -483,6 +498,13 @@ export const ReceiveRequest = {
 
           message.registrationId = reader.string();
           continue;
+        case 2:
+          if (tag !== 16) {
+            break;
+          }
+
+          message.afterSeq = longToNumber(reader.uint64() as Long);
+          continue;
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -493,13 +515,19 @@ export const ReceiveRequest = {
   },
 
   fromJSON(object: any): ReceiveRequest {
-    return { registrationId: isSet(object.registrationId) ? globalThis.String(object.registrationId) : "" };
+    return {
+      registrationId: isSet(object.registrationId) ? globalThis.String(object.registrationId) : "",
+      afterSeq: isSet(object.afterSeq) ? globalThis.Number(object.afterSeq) : 0,
+    };
   },
 
   toJSON(message: ReceiveRequest): unknown {
     const obj: any = {};
     if (message.registrationId !== "") {
       obj.registrationId = message.registrationId;
+    }
+    if (message.afterSeq !== 0) {
+      obj.afterSeq = Math.round(message.afterSeq);
     }
     return obj;
   },
@@ -510,6 +538,81 @@ export const ReceiveRequest = {
   fromPartial<I extends Exact<DeepPartial<ReceiveRequest>, I>>(object: I): ReceiveRequest {
     const message = createBaseReceiveRequest();
     message.registrationId = object.registrationId ?? "";
+    message.afterSeq = object.afterSeq ?? 0;
+    return message;
+  },
+};
+
+function createBaseAckRequest(): AckRequest {
+  return { registrationId: "", upToSeq: 0 };
+}
+
+export const AckRequest = {
+  encode(message: AckRequest, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.registrationId !== "") {
+      writer.uint32(10).string(message.registrationId);
+    }
+    if (message.upToSeq !== 0) {
+      writer.uint32(16).uint64(message.upToSeq);
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): AckRequest {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAckRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag !== 10) {
+            break;
+          }
+
+          message.registrationId = reader.string();
+          continue;
+        case 2:
+          if (tag !== 16) {
+            break;
+          }
+
+          message.upToSeq = longToNumber(reader.uint64() as Long);
+          continue;
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AckRequest {
+    return {
+      registrationId: isSet(object.registrationId) ? globalThis.String(object.registrationId) : "",
+      upToSeq: isSet(object.upToSeq) ? globalThis.Number(object.upToSeq) : 0,
+    };
+  },
+
+  toJSON(message: AckRequest): unknown {
+    const obj: any = {};
+    if (message.registrationId !== "") {
+      obj.registrationId = message.registrationId;
+    }
+    if (message.upToSeq !== 0) {
+      obj.upToSeq = Math.round(message.upToSeq);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AckRequest>, I>>(base?: I): AckRequest {
+    return AckRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AckRequest>, I>>(object: I): AckRequest {
+    const message = createBaseAckRequest();
+    message.registrationId = object.registrationId ?? "";
+    message.upToSeq = object.upToSeq ?? 0;
     return message;
   },
 };
@@ -1134,6 +1237,10 @@ export const EventServiceService = {
   /**
    * Receive events for a registration (server-streaming).
    * Equivalent to RemoteEventListener.notify() in Jini — but pull-based.
+   * DURABLE: delivery is at-least-once. An event stays in the mailbox,
+   * and is re-sent on the next Receive, until the client acknowledges it
+   * with Ack (or a Receive whose after_seq covers it). Sending it is not
+   * enough: frames in flight when a connection drops never arrived.
    */
   receive: {
     path: "/coordin8.EventService/Receive",
@@ -1143,6 +1250,19 @@ export const EventServiceService = {
     requestDeserialize: (value: Buffer) => ReceiveRequest.decode(value),
     responseSerialize: (value: Event) => Buffer.from(Event.encode(value).finish()),
     responseDeserialize: (value: Buffer) => Event.decode(value),
+  },
+  /**
+   * Acknowledge (delete) every DURABLE mailbox event with
+   * seq_num <= up_to_seq. A no-op for BEST_EFFORT registrations.
+   */
+  ack: {
+    path: "/coordin8.EventService/Ack",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: AckRequest) => Buffer.from(AckRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => AckRequest.decode(value),
+    responseSerialize: (value: Empty) => Buffer.from(Empty.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => Empty.decode(value),
   },
   /** Emit an event into the bus. Any service can call this. */
   emit: {
@@ -1186,8 +1306,17 @@ export interface EventServiceServer extends UntypedServiceImplementation {
   /**
    * Receive events for a registration (server-streaming).
    * Equivalent to RemoteEventListener.notify() in Jini — but pull-based.
+   * DURABLE: delivery is at-least-once. An event stays in the mailbox,
+   * and is re-sent on the next Receive, until the client acknowledges it
+   * with Ack (or a Receive whose after_seq covers it). Sending it is not
+   * enough: frames in flight when a connection drops never arrived.
    */
   receive: handleServerStreamingCall<ReceiveRequest, Event>;
+  /**
+   * Acknowledge (delete) every DURABLE mailbox event with
+   * seq_num <= up_to_seq. A no-op for BEST_EFFORT registrations.
+   */
+  ack: handleUnaryCall<AckRequest, Empty>;
   /** Emit an event into the bus. Any service can call this. */
   emit: handleUnaryCall<EmitRequest, Empty>;
   /** Renew a subscription lease. */
@@ -1219,9 +1348,29 @@ export interface EventServiceClient extends Client {
   /**
    * Receive events for a registration (server-streaming).
    * Equivalent to RemoteEventListener.notify() in Jini — but pull-based.
+   * DURABLE: delivery is at-least-once. An event stays in the mailbox,
+   * and is re-sent on the next Receive, until the client acknowledges it
+   * with Ack (or a Receive whose after_seq covers it). Sending it is not
+   * enough: frames in flight when a connection drops never arrived.
    */
   receive(request: ReceiveRequest, options?: Partial<CallOptions>): ClientReadableStream<Event>;
   receive(request: ReceiveRequest, metadata?: Metadata, options?: Partial<CallOptions>): ClientReadableStream<Event>;
+  /**
+   * Acknowledge (delete) every DURABLE mailbox event with
+   * seq_num <= up_to_seq. A no-op for BEST_EFFORT registrations.
+   */
+  ack(request: AckRequest, callback: (error: ServiceError | null, response: Empty) => void): ClientUnaryCall;
+  ack(
+    request: AckRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: Empty) => void,
+  ): ClientUnaryCall;
+  ack(
+    request: AckRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: Empty) => void,
+  ): ClientUnaryCall;
   /** Emit an event into the bus. Any service can call this. */
   emit(request: EmitRequest, callback: (error: ServiceError | null, response: Empty) => void): ClientUnaryCall;
   emit(

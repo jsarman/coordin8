@@ -139,38 +139,25 @@ type RegistryEvent struct {
 	Capability Capability
 }
 
-// Watch streams registry events for capabilities matching template.
-func (c *RegistryClient) Watch(ctx context.Context, tmpl Template) (<-chan RegistryEvent, error) {
+// Watch streams registry events for capabilities matching template until
+// ctx is cancelled or the stream ends (then Err says why).
+func (c *RegistryClient) Watch(ctx context.Context, tmpl Template) (*Stream[RegistryEvent], error) {
 	stream, err := c.client.Watch(ctx, &pb.RegistryWatchRequest{Template: tmpl})
 	if err != nil {
 		return nil, err
 	}
-
-	ch := make(chan RegistryEvent, 16)
-	go func() {
-		defer close(ch)
-		for {
-			evt, err := stream.Recv()
-			if err != nil {
-				return
-			}
-			typeStr := "registered"
-			switch evt.Type {
-			case pb.RegistryEvent_EXPIRED:
-				typeStr = "expired"
-			case pb.RegistryEvent_MODIFIED:
-				typeStr = "modified"
-			}
-			e := RegistryEvent{Type: typeStr}
-			if evt.Capability != nil {
-				e.Capability = pbToCapability(evt.Capability)
-			}
-			select {
-			case ch <- e:
-			case <-ctx.Done():
-				return
-			}
+	return pump(ctx, 16, stream.Recv, func(evt *pb.RegistryEvent) (RegistryEvent, bool) {
+		typeStr := "registered"
+		switch evt.Type {
+		case pb.RegistryEvent_EXPIRED:
+			typeStr = "expired"
+		case pb.RegistryEvent_MODIFIED:
+			typeStr = "modified"
 		}
-	}()
-	return ch, nil
+		e := RegistryEvent{Type: typeStr}
+		if evt.Capability != nil {
+			e.Capability = pbToCapability(evt.Capability)
+		}
+		return e, true
+	}, nil), nil
 }

@@ -78,7 +78,7 @@ func main() {
 
 	// Watch for auction expiry
 	fmt.Println("  watching for expired auctions...")
-	ch, err := djinn.Space().Notify(ctx, coordin8.NotifyOpts{
+	watch, err := djinn.Space().Notify(ctx, coordin8.NotifyOpts{
 		Template: map[string]string{"type": "auction"},
 		On:       coordin8.Expiration,
 		TTL:      300 * time.Second,
@@ -88,11 +88,14 @@ func main() {
 	}
 
 	go func() {
-		for evt := range ch {
+		for evt := range watch.C {
 			if evt.Tuple == nil {
 				continue
 			}
 			settleByAuctionID(ctx, djinn, evt.Tuple.Attrs["auction_id"])
+		}
+		if err := watch.Err(); err != nil {
+			log.Printf("auction expiry watch ended: %v (restart to resume; startup reconciliation settles what was missed)", err)
 		}
 	}()
 
