@@ -35,17 +35,23 @@ service TransactionService {
 // ParticipantService — implemented BY services that want to participate.
 // The manager calls these during 2PC. Participants register their
 // endpoint address via EnlistRequest.participant_endpoint.
+// Every call must be idempotent: TransactionMgr re-sends after a crash, a
+// lost reply or a failed call, until it gets an answer.
 service ParticipantService {
     // Phase 1: can you commit? Returns PREPARED, NOTCHANGED, or ABORTED.
     rpc Prepare(ParticipantRequest)           returns (PrepareResponse);
 
-    // Phase 2: commit (only called if you returned PREPARED).
+    // Phase 2: commit. Normally only sent to PREPARED voters, but recovery
+    // re-sends it to every participant of a decided transaction, so Commit
+    // for a transaction you hold no state for (NOTCHANGED, or already
+    // committed) must succeed as a no-op.
     rpc Commit(ParticipantRequest)            returns (google.protobuf.Empty);
 
-    // Rollback.
+    // Rollback. A no-op for a transaction you hold no state for.
     rpc Abort(ParticipantRequest)             returns (google.protobuf.Empty);
 
-    // Optimization: single-participant transactions skip a round-trip.
+    // Optimization: single-participant transactions skip a round-trip. On
+    // a retry after the transaction already committed, answer NOTCHANGED.
     rpc PrepareAndCommit(ParticipantRequest)  returns (PrepareResponse);
 }
 

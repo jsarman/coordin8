@@ -856,6 +856,9 @@ pub async fn run_all() -> Result<()> {
         Arc::clone(&txn_store),
         Arc::clone(&txn_manager),
     );
+    // Finish transactions a crash or a failed participant call left in
+    // Voting/Prepared: once now, then on a timer.
+    txn_manager.spawn_recovery(coordin8_txn::RECOVERY_INTERVAL);
     info!("  ✓ TransactionMgr: ready");
 
     // ── Space ────────────────────────────────────────────────────────────────
@@ -1584,6 +1587,9 @@ pub async fn run_txn_on_listener_until(
         Arc::clone(&txn_store),
         Arc::clone(&txn_manager),
     );
+    // Finish transactions a crash or a failed participant call left in
+    // Voting/Prepared: once now, then on a timer.
+    txn_manager.spawn_recovery(coordin8_txn::RECOVERY_INTERVAL);
 
     let txn_svc = TransactionServiceServer::with_interceptor(
         TxnServiceImpl::new(txn_manager, advertise_host, advertise_port),

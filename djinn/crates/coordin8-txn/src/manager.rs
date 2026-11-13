@@ -1,11 +1,12 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
 use coordin8_auth::ClientAuthConfig;
 use coordin8_observability::wrap_traced_channel as wrap_channel;
 use futures::future::join_all;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use coordin8_core::{EndpointAllowlist, TXN_PARTICIPANT_ALLOW_VAR};
@@ -22,7 +23,27 @@ pub struct TxnManager {
     lease_manager: Arc<dyn Leasing>,
     client_auth: ClientAuthConfig,
     allowlist: EndpointAllowlist,
+    /// Transactions whose commit (or recovery) this process is driving right
+    /// now. Recovery skips them; after a restart the set is empty, so every
+    /// `Voting`/`Prepared` transaction is recovered. Assumes one TxnMgr per
+    /// store, as deployed today.
+    in_flight: Arc<Mutex<HashSet<String>>>,
 }
+
+/// Removes its txn from `in_flight` when the commit or recovery ends.
+struct InFlight {
+    set: Arc<Mutex<HashSet<String>>>,
+    txn_id: String,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.set.lock().unwrap().remove(&self.txn_id);
+    }
+}
+
+/// How often [`TxnManager::spawn_recovery`] sweeps for stuck transactions.
+pub const RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
 
 impl TxnManager {
     pub fn new(store: Arc<dyn TxnStore>, lease_manager: Arc<dyn Leasing>) -> Self {
@@ -43,6 +64,7 @@ impl TxnManager {
             lease_manager,
             client_auth,
             allowlist: EndpointAllowlist::allow_all(TXN_PARTICIPANT_ALLOW_VAR),
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -175,16 +197,29 @@ impl TxnManager {
     }
 
     pub async fn commit(&self, txn_id: &str) -> Result<(), Error> {
+        // Mark in flight before the CAS, so recovery never sees our Voting
+        // state as stuck.
+        let Some(_guard) = self.claim(txn_id) else {
+            return self.settled_or_in_progress(txn_id).await;
+        };
         // Claim the commit: only one caller can move Active -> Voting.
         if !self
             .store
             .update_state_if(txn_id, TransactionState::Active, TransactionState::Voting)
             .await?
         {
-            return match self.fetch(txn_id).await?.state {
+            let txn = self.fetch(txn_id).await?;
+            return match txn.state {
                 TransactionState::Committed => Ok(()), // idempotent
                 TransactionState::Aborted => Err(Error::TransactionAborted(txn_id.to_string())),
-                _ => Err(Error::TransactionCommitInProgress(txn_id.to_string())),
+                // Nobody in this process is driving it: it's stuck (a failed
+                // phase 2, a lost single-participant reply, or a coordinator
+                // restart). Finish it now instead of refusing.
+                _ => match self.recover_one(&txn).await? {
+                    Some(TransactionState::Committed) => Ok(()),
+                    Some(_) => Err(Error::TransactionAborted(txn_id.to_string())),
+                    None => Err(Error::TransactionOutcomeUnknown(txn_id.to_string())),
+                },
             };
         }
 
@@ -228,9 +263,19 @@ impl TxnManager {
                     warn!(txn_id, endpoint = %ep, "single participant voted ABORTED");
                     return Err(Error::TransactionAborted(txn_id.to_string()));
                 }
+                Err(Error::Unavailable(e)) => {
+                    // Never connected, so the participant never saw the
+                    // request: aborting is safe and final.
+                    warn!(txn_id, endpoint = %ep, error = %e, "participant unreachable — aborting");
+                    self.transition(txn_id, TransactionState::Voting, TransactionState::Aborted)
+                        .await?;
+                    self.lease_manager.cancel(&txn.lease_id).await.ok();
+                    return Err(Error::TransactionAborted(txn_id.to_string()));
+                }
                 Err(e) => {
-                    // Transport error: the participant may or may not have
-                    // committed. Do NOT record Aborted; leave the txn in Voting.
+                    // The request may have reached the participant: it may or
+                    // may not have committed. Leave the txn in Voting; recovery
+                    // retries PrepareAndCommit (idempotent) to learn the answer.
                     error!(
                         txn_id,
                         endpoint = %ep,
@@ -301,17 +346,24 @@ impl TxnManager {
 
         let commit_results = join_all(commit_futs).await;
 
-        // Log commit-phase failures but don't abort — once we passed prepare,
-        // we're committed. Participants that failed need recovery (v2 concern).
+        // Once every participant prepared, the decision is commit; `Prepared`
+        // records it. A participant that missed its Commit keeps the txn in
+        // `Prepared`, and recovery re-drives Commit until it acks. The caller
+        // still gets success: the outcome is decided and durable.
+        let mut unacked = 0;
         for (i, result) in commit_results.iter().enumerate() {
             if let Err(e) = result {
+                unacked += 1;
                 error!(
                     txn_id,
                     endpoint = %prepared_eps[i],
                     error = %e,
-                    "commit-phase call failed — participant needs recovery"
+                    "commit-phase call failed — recovery will re-drive it"
                 );
             }
+        }
+        if unacked > 0 {
+            return Ok(());
         }
 
         self.transition(
@@ -327,6 +379,150 @@ impl TxnManager {
             "transaction committed"
         );
         Ok(())
+    }
+
+    // ── Recovery ──────────────────────────────────────────────────────────────
+
+    fn claim(&self, txn_id: &str) -> Option<InFlight> {
+        self.in_flight
+            .lock()
+            .unwrap()
+            .insert(txn_id.to_string())
+            .then(|| InFlight {
+                set: Arc::clone(&self.in_flight),
+                txn_id: txn_id.to_string(),
+            })
+    }
+
+    async fn settled_or_in_progress(&self, txn_id: &str) -> Result<(), Error> {
+        match self.fetch(txn_id).await?.state {
+            TransactionState::Committed => Ok(()),
+            TransactionState::Aborted => Err(Error::TransactionAborted(txn_id.to_string())),
+            _ => Err(Error::TransactionCommitInProgress(txn_id.to_string())),
+        }
+    }
+
+    /// Finish every `Voting`/`Prepared` transaction nobody in this process is
+    /// driving: the ones a crash, a failed phase-2 call or a lost
+    /// single-participant reply left behind. Returns how many reached a final
+    /// state. Run on boot and on a timer ([`Self::spawn_recovery`]).
+    pub async fn recover(&self) -> Result<usize, Error> {
+        let mut resolved = 0;
+        for txn in self.store.list_all().await? {
+            if !matches!(
+                txn.state,
+                TransactionState::Voting | TransactionState::Prepared
+            ) {
+                continue;
+            }
+            let Some(_guard) = self.claim(&txn.txn_id) else {
+                continue; // a live commit owns it
+            };
+            // Re-read under the claim: it may have finished since the list.
+            let Some(txn) = self.store.get(&txn.txn_id).await? else {
+                continue;
+            };
+            match self.recover_one(&txn).await {
+                Ok(Some(state)) => {
+                    resolved += 1;
+                    info!(txn_id = %txn.txn_id, ?state, "transaction recovered");
+                }
+                Ok(None) => {}
+                Err(e) => warn!(txn_id = %txn.txn_id, error = %e, "transaction recovery failed"),
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// Sweep with [`Self::recover`] now and every `interval`.
+    pub fn spawn_recovery(self: &Arc<Self>, interval: Duration) {
+        let mgr = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = mgr.recover().await {
+                    warn!(error = %e, "transaction recovery sweep failed");
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    /// Drive one stuck transaction (caller holds its in-flight claim) as far
+    /// as the participants allow. The recorded state is the decision:
+    ///
+    /// - `Prepared`: every participant voted yes, so the decision is commit.
+    ///   Re-send Commit to every participant (a NOTCHANGED voter, or one that
+    ///   already committed, must treat it as a no-op) until all ack.
+    /// - `Voting` with one participant: the PrepareAndCommit reply was lost.
+    ///   Ask again; it is idempotent, and the answer is the outcome.
+    /// - `Voting` otherwise: no decision was recorded, so abort everywhere.
+    ///
+    /// `Some(final state)` when finished, `None` when a participant is still
+    /// unreachable (the next sweep retries).
+    async fn recover_one(
+        &self,
+        txn: &TransactionRecord,
+    ) -> Result<Option<TransactionState>, Error> {
+        let id = txn.txn_id.as_str();
+        match txn.state {
+            TransactionState::Prepared => {
+                let acks = join_all(txn.participants.iter().map(|p| {
+                    let client_auth = self.client_auth.clone();
+                    async move { Self::call_commit(&p.endpoint, id, &client_auth).await }
+                }))
+                .await;
+                if let Some(e) = acks.into_iter().find_map(Result::err) {
+                    warn!(txn_id = id, error = %e, "re-driving commit: participant not acked yet");
+                    return Ok(None);
+                }
+                self.finish(txn, TransactionState::Prepared, TransactionState::Committed)
+                    .await
+            }
+            TransactionState::Voting if txn.participants.len() == 1 => {
+                let ep = &txn.participants[0].endpoint;
+                match Self::call_prepare_and_commit(ep, id, &self.client_auth).await {
+                    Ok(PrepareVote::Prepared) | Ok(PrepareVote::NotChanged) => {
+                        self.finish(txn, TransactionState::Voting, TransactionState::Committed)
+                            .await
+                    }
+                    Ok(PrepareVote::Aborted) => {
+                        self.finish(txn, TransactionState::Voting, TransactionState::Aborted)
+                            .await
+                    }
+                    Err(e) => {
+                        warn!(txn_id = id, endpoint = %ep, error = %e, "single participant still unreachable");
+                        Ok(None)
+                    }
+                }
+            }
+            TransactionState::Voting => {
+                let done = self
+                    .finish(txn, TransactionState::Voting, TransactionState::Aborted)
+                    .await?;
+                Self::do_abort_participants(id, &txn.participants, &self.client_auth).await;
+                Ok(done)
+            }
+            ref other => Ok(Some(other.clone())),
+        }
+    }
+
+    /// CAS `from -> to` and release the txn lease. `None` if someone else
+    /// moved it first (then nothing here is final).
+    async fn finish(
+        &self,
+        txn: &TransactionRecord,
+        from: TransactionState,
+        to: TransactionState,
+    ) -> Result<Option<TransactionState>, Error> {
+        if !self
+            .store
+            .update_state_if(&txn.txn_id, from, to.clone())
+            .await?
+        {
+            return Ok(None);
+        }
+        self.lease_manager.cancel(&txn.lease_id).await.ok();
+        Ok(Some(to))
     }
 
     /// CAS a state transition owned by the in-flight commit. Failure means
@@ -376,7 +572,7 @@ impl TxnManager {
         let channel = Self::connect_to(endpoint)?
             .connect()
             .await
-            .map_err(|e| Error::Internal(format!("connect to {} failed: {}", endpoint, e)))?;
+            .map_err(|e| Error::Unavailable(format!("connect to {} failed: {}", endpoint, e)))?;
 
         let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
         let resp = client
@@ -397,7 +593,7 @@ impl TxnManager {
         let channel = Self::connect_to(endpoint)?
             .connect()
             .await
-            .map_err(|e| Error::Internal(format!("connect to {} failed: {}", endpoint, e)))?;
+            .map_err(|e| Error::Unavailable(format!("connect to {} failed: {}", endpoint, e)))?;
 
         let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
         client
@@ -417,7 +613,7 @@ impl TxnManager {
         let channel = Self::connect_to(endpoint)?
             .connect()
             .await
-            .map_err(|e| Error::Internal(format!("connect to {} failed: {}", endpoint, e)))?;
+            .map_err(|e| Error::Unavailable(format!("connect to {} failed: {}", endpoint, e)))?;
 
         let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
         client
@@ -437,7 +633,7 @@ impl TxnManager {
         let channel = Self::connect_to(endpoint)?
             .connect()
             .await
-            .map_err(|e| Error::Internal(format!("connect to {} failed: {}", endpoint, e)))?;
+            .map_err(|e| Error::Unavailable(format!("connect to {} failed: {}", endpoint, e)))?;
 
         let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
         let resp = client
