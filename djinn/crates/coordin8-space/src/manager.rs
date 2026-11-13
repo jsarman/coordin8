@@ -113,6 +113,11 @@ impl SpaceManager {
         input_tuple_id: Option<String>,
         txn_id: Option<String>,
     ) -> Result<(TupleRecord, LeaseRecord), Error> {
+        // Validate (and enlist) before granting: a rejected write must not
+        // leave a lease with no tuple behind it.
+        if let Some(ref tid) = txn_id {
+            self.ensure_enlisted(tid).await?;
+        }
         let tuple_id = Uuid::new_v4().to_string();
         let resource_id = format!("space:{}", tuple_id);
         let lease = self.lease_manager.grant(&resource_id, ttl_secs).await?;
@@ -127,14 +132,19 @@ impl SpaceManager {
             input_tuple_id,
         };
 
+        let stored = match txn_id {
+            // Transactional write — buffer, don't broadcast yet.
+            Some(ref tid) => self.store.insert_uncommitted(tid, record.clone()).await,
+            None => self.store.insert(record.clone()).await,
+        };
+        if let Err(e) = stored {
+            let _ = self.lease_manager.cancel(&lease.lease_id).await;
+            return Err(e);
+        }
         if let Some(ref tid) = txn_id {
-            // Transactional write — auto-enlist, buffer, don't broadcast yet.
-            self.ensure_enlisted(tid).await?;
-            self.store.insert_uncommitted(tid, record.clone()).await?;
             debug!(tuple_id, txn_id = tid, lease_id = %lease.lease_id, "tuple written (uncommitted)");
         } else {
-            // Non-transactional — insert and broadcast immediately.
-            self.store.insert(record.clone()).await?;
+            // Non-transactional — broadcast immediately.
             debug!(tuple_id, lease_id = %lease.lease_id, granted_ttl = lease.ttl_seconds, "tuple written");
             let _ = self.tuple_tx.send(record.clone());
         }

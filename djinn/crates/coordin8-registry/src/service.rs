@@ -219,10 +219,11 @@ impl RegistryService for RegistryServiceImpl {
                 }),
             };
 
-            self.index
-                .register(entry.clone())
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+            if let Err(e) = self.index.register(entry.clone()).await {
+                // Don't leave a lease with no entry behind it.
+                let _ = self.lease_manager.cancel(&lease.lease_id).await;
+                return Err(Status::internal(e.to_string()));
+            }
 
             debug!(
                 capability_id,

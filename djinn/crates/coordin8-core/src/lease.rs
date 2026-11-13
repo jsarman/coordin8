@@ -69,7 +69,7 @@ pub struct LeaseConfig {
 }
 
 impl LeaseConfig {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         Self::from_env_for(None)
     }
 
@@ -82,35 +82,53 @@ impl LeaseConfig {
     /// resource type — a 2PC transaction and a service registration
     /// shouldn't share one default cap — without requiring every deployment
     /// to set per-namespace env vars if it doesn't care to.
-    pub fn from_env_for(namespace: Option<&str>) -> Self {
-        let namespaced = |suffix: &str| -> Option<String> {
-            let ns = namespace?;
-            std::env::var(format!("{}_{}", ns.to_uppercase(), suffix)).ok()
+    ///
+    /// A value that doesn't parse is an error (fail fast at startup), not a
+    /// silent fallback to the default.
+    pub fn from_env_for(namespace: Option<&str>) -> Result<Self, String> {
+        let read = |suffix: &str| -> Option<(String, String)> {
+            if let Some(ns) = namespace {
+                let name = format!("{}_{}", ns.to_uppercase(), suffix);
+                if let Ok(v) = std::env::var(&name) {
+                    return Some((name, v));
+                }
+            }
+            std::env::var(suffix).ok().map(|v| (suffix.to_string(), v))
+        };
+        let seconds = |(name, v): (String, String)| -> Result<u64, String> {
+            v.trim()
+                .parse::<u64>()
+                .map_err(|_| format!("{name}={v:?}: expected whole seconds"))
         };
 
-        let max_ttl_raw =
-            namespaced("MAX_LEASE_TTL").or_else(|| std::env::var("MAX_LEASE_TTL").ok());
-        let max_ttl = match max_ttl_raw {
-            Some(v) if v.eq_ignore_ascii_case("forever") => None,
-            Some(v) => Some(v.parse::<u64>().unwrap_or(3600)),
+        let max_ttl = match read("MAX_LEASE_TTL") {
+            Some((_, v)) if v.trim().eq_ignore_ascii_case("forever") => None,
+            Some(var) => Some(seconds(var)?),
             None => Some(3600),
         };
-
-        let preferred_ttl = namespaced("PREFERRED_LEASE_TTL")
-            .or_else(|| std::env::var("PREFERRED_LEASE_TTL").ok())
-            .and_then(|v| v.parse::<u64>().ok())
+        let preferred_ttl = read("PREFERRED_LEASE_TTL")
+            .map(seconds)
+            .transpose()?
             .unwrap_or(300);
 
+        Ok(Self::new(max_ttl, preferred_ttl))
+    }
+
+    /// A policy whose preferred TTL never exceeds the cap.
+    pub fn new(max_ttl: Option<u64>, preferred_ttl: u64) -> Self {
         Self {
             max_ttl,
-            preferred_ttl,
+            preferred_ttl: max_ttl.map_or(preferred_ttl, |m| preferred_ttl.min(m)),
         }
     }
 
     /// Negotiate the granted TTL from a client-requested value.
     pub fn negotiate(&self, requested: u64) -> u64 {
         match requested {
-            LEASE_ANY => self.preferred_ttl,
+            LEASE_ANY => match self.max_ttl {
+                Some(max) => self.preferred_ttl.min(max),
+                None => self.preferred_ttl,
+            },
             LEASE_FOREVER => match self.max_ttl {
                 None => LEASE_FOREVER,
                 Some(max) => max,
@@ -191,4 +209,39 @@ pub trait Leasing: Send + Sync {
     async fn grant(&self, resource_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error>;
     async fn renew(&self, lease_id: &str, ttl_secs: u64) -> Result<LeaseRecord, Error>;
     async fn cancel(&self, lease_id: &str) -> Result<(), Error>;
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    // Unique namespaces per test: env vars are process-global.
+    #[test]
+    fn unparsable_ttl_is_an_error_not_a_silent_default() {
+        std::env::set_var("CFGT1_MAX_LEASE_TTL", "1h");
+        let e = LeaseConfig::from_env_for(Some("cfgt1")).unwrap_err();
+        assert!(e.contains("CFGT1_MAX_LEASE_TTL"), "{e}");
+        std::env::set_var("CFGT2_PREFERRED_LEASE_TTL", "-5");
+        assert!(LeaseConfig::from_env_for(Some("cfgt2")).is_err());
+        std::env::set_var("CFGT3_MAX_LEASE_TTL", "Forever");
+        assert_eq!(
+            LeaseConfig::from_env_for(Some("cfgt3")).unwrap().max_ttl,
+            None
+        );
+    }
+
+    #[test]
+    fn preferred_ttl_never_exceeds_the_cap() {
+        std::env::set_var("CFGT4_MAX_LEASE_TTL", "60");
+        std::env::set_var("CFGT4_PREFERRED_LEASE_TTL", "300");
+        let c = LeaseConfig::from_env_for(Some("cfgt4")).unwrap();
+        assert_eq!(c.preferred_ttl, 60);
+        assert_eq!(c.negotiate(LEASE_ANY), 60);
+        // Even when built by hand.
+        let raw = LeaseConfig {
+            max_ttl: Some(10),
+            preferred_ttl: 300,
+        };
+        assert_eq!(raw.negotiate(LEASE_ANY), 10);
+    }
 }

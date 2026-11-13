@@ -68,7 +68,11 @@ impl TxnManager {
             begun_at: Utc::now(),
         };
 
-        self.store.create(record).await?;
+        if let Err(e) = self.store.create(record).await {
+            // Don't leave a lease with no transaction behind it.
+            self.lease_manager.cancel(&lease.lease_id).await.ok();
+            return Err(e);
+        }
         debug!(txn_id, lease_id = %lease.lease_id, ttl_secs, "transaction begun");
         Ok((txn_id, lease))
     }

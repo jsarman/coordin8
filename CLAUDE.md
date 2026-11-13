@@ -197,7 +197,7 @@ CI (`.github/workflows/ci.yml`) runs: Rust `cargo build --all`, `cargo test --al
 | `COORDIN8_PROVIDER` | Djinn | `local` (default) or `dynamo` |
 | `DYNAMODB_ENDPOINT`, `AWS_*` | Dynamo provider | Endpoint override (MiniStack `http://localhost:4566`) + standard AWS creds/region |
 | `COORDIN8_AUTO_CREATE_TABLES` | Dynamo provider | `true`/`1` creates tables on init (dev/tests); unset = expect CFN-provisioned |
-| `MAX_LEASE_TTL`, `PREFERRED_LEASE_TTL` | LeaseManager | Seconds (max may be `FOREVER`); defaults 3600 / 300; per-service override `<REGISTRY\|EVENT\|SPACE\|TXN>_MAX_LEASE_TTL` etc. |
+| `MAX_LEASE_TTL`, `PREFERRED_LEASE_TTL` | LeaseManager | Seconds (max may be `FOREVER`); defaults 3600 / 300; per-service override `<REGISTRY\|EVENT\|SPACE\|TXN>_MAX_LEASE_TTL` etc. An unparsable value is a startup error; preferred is capped at max |
 | `PROXY_BIND_HOST`, `PROXY_PORT_MIN/MAX` | Proxy | Forwarding bind address and fixed port range |
 | `COORDIN8_JWT_SECRET` | all services | Enables gRPC JWT (HS256) auth; unset = auth off. `COORDIN8_AUTH_VERIFY_SIGNATURE=false` skips signature checks |
 | `COORDIN8_TXN_PARTICIPANT_ALLOW` | TransactionMgr | Opt-in allowlist for `Enlist` participant endpoints (SSRF / token-leak guard). Comma-separated: hostname, `*.suffix`, IP literal, CIDR; optional `:port` on non-CIDR entries. No DNS resolution. Unset = allow all (warns if JWT auth is on). Invalid entry = startup error. Bundled mode always allows its own Space endpoint; split mode must list Space's advertised `host:port` |
