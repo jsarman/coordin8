@@ -44,6 +44,10 @@ pub struct SpaceManager {
     /// Live Notify streams by watch lease id: fired when the lease is
     /// reclaimed, so the stream ends with its watch.
     watch_ends: DashMap<String, tokio::sync::oneshot::Sender<()>>,
+    /// Transactions the coordinator had no record of on the last reconcile
+    /// pass. One "no record" answer is not enough to abort: it takes two
+    /// passes in a row, as the orphan sweep does for resources.
+    unknown_txns: DashMap<String, ()>,
 }
 
 impl SpaceManager {
@@ -67,6 +71,7 @@ impl SpaceManager {
             enlisted: DashMap::new(),
             shutdown: ShutdownSignal::never(),
             watch_ends: DashMap::new(),
+            unknown_txns: DashMap::new(),
         }
     }
 
@@ -92,6 +97,7 @@ impl SpaceManager {
             enlisted: DashMap::new(),
             shutdown: ShutdownSignal::never(),
             watch_ends: DashMap::new(),
+            unknown_txns: DashMap::new(),
         }
     }
 
@@ -414,7 +420,10 @@ impl SpaceManager {
             return Ok(0);
         };
         let mut done = 0;
-        for txn_id in self.store.list_txns().await? {
+        let held = self.store.list_txns().await?;
+        // Forget marks for transactions this Space no longer holds.
+        self.unknown_txns.retain(|id, _| held.contains(id));
+        for txn_id in held {
             let state = match enlister.state(&txn_id).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -422,12 +431,27 @@ impl SpaceManager {
                     continue;
                 }
             };
+            if state.is_some() {
+                self.unknown_txns.remove(&txn_id);
+            }
             let result = match &state {
                 Some(TransactionState::Committed | TransactionState::Prepared) => {
                     self.commit_space_txn(&txn_id).await
                 }
                 Some(s) if s.is_abort() => self.abort_space_txn(&txn_id).await,
-                None => self.abort_space_txn(&txn_id).await,
+                // No record twice in a row: the coordinator never committed
+                // it and has forgotten it. Once could be a transient miss.
+                None if self.unknown_txns.remove(&txn_id).is_some() => {
+                    self.abort_space_txn(&txn_id).await
+                }
+                None => {
+                    self.unknown_txns.insert(txn_id.clone(), ());
+                    debug!(
+                        txn_id,
+                        "reconcile: coordinator has no record, abort on next pass"
+                    );
+                    continue;
+                }
                 Some(_) => continue,
             };
             match result {

@@ -109,11 +109,12 @@ impl TransactionService for TxnServiceImpl {
         req: Request<GetStateRequest>,
     ) -> Result<Response<TransactionStateResponse>, Status> {
         let txn_id = req.into_inner().txn_id;
-        let state = self
-            .manager
-            .get_state(&txn_id)
-            .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+        let state = self.manager.get_state(&txn_id).await.map_err(|e| match e {
+            // Only a missing record is NOT_FOUND: participants read it
+            // as "abort". A store failure must not look like one.
+            coordin8_core::Error::TransactionNotFound(_) => Status::not_found(e.to_string()),
+            other => map_err(other),
+        })?;
 
         Ok(Response::new(TransactionStateResponse {
             state: state_to_proto(&state),
