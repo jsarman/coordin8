@@ -4,6 +4,19 @@ Description: >
   All tables use PAY_PER_REQUEST billing. The five coordin8_leases_* tables
   and coordin8_txn have TTL enabled.
 
+Parameters:
+  ProtectTables:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: >
+      "true" for production: point-in-time recovery and deletion protection
+      on every table. Off by default so dev stacks (MiniStack) stay
+      disposable and free.
+
+Conditions:
+  Protect: !Equals [!Ref ProtectTables, "true"]
+
 Resources:
 
   # ── Leasing (distributed — no standalone LeaseMgr) ──────────────────────────
@@ -26,6 +39,9 @@ Resources:
     Properties:
       TableName: coordin8_leases_registry
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: lease_id
           AttributeType: S
@@ -50,6 +66,9 @@ Resources:
     Properties:
       TableName: coordin8_leases_event
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: lease_id
           AttributeType: S
@@ -74,6 +93,9 @@ Resources:
     Properties:
       TableName: coordin8_leases_space
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: lease_id
           AttributeType: S
@@ -98,6 +120,9 @@ Resources:
     Properties:
       TableName: coordin8_leases_txn
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: lease_id
           AttributeType: S
@@ -122,6 +147,9 @@ Resources:
     Properties:
       TableName: coordin8_leases_proxy
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: lease_id
           AttributeType: S
@@ -148,6 +176,9 @@ Resources:
     Properties:
       TableName: coordin8_registry
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: capability_id
           AttributeType: S
@@ -171,6 +202,9 @@ Resources:
     Properties:
       TableName: coordin8_txn
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: txn_id
           AttributeType: S
@@ -189,6 +223,9 @@ Resources:
     Properties:
       TableName: coordin8_event_subscriptions
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: registration_id
           AttributeType: S
@@ -210,6 +247,9 @@ Resources:
     Properties:
       TableName: coordin8_event_mailbox
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: registration_id
           AttributeType: S
@@ -228,6 +268,9 @@ Resources:
     Properties:
       TableName: coordin8_space
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: tuple_id
           AttributeType: S
@@ -249,6 +292,9 @@ Resources:
     Properties:
       TableName: coordin8_space_uncommitted
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: txn_id
           AttributeType: S
@@ -265,6 +311,9 @@ Resources:
     Properties:
       TableName: coordin8_space_txn_taken
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: txn_id
           AttributeType: S
@@ -281,6 +330,9 @@ Resources:
     Properties:
       TableName: coordin8_space_watches
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [Protect, true, false]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [Protect, true, false]
       AttributeDefinitions:
         - AttributeName: watch_id
           AttributeType: S

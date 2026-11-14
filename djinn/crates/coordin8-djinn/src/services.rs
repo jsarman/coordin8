@@ -495,7 +495,8 @@ async fn embedded_landlord(
     Authed<LeaseServiceServer<LeaseServiceImpl>>,
 )> {
     let store = lease_store_from_env(namespace).await?;
-    let config = coordin8_core::LeaseConfig::from_env_for(Some(namespace));
+    let config = coordin8_core::LeaseConfig::from_env_for(Some(namespace))
+        .map_err(|e| anyhow::anyhow!("lease policy ({namespace}): {e}"))?;
     info!(
         "  Lease policy ({namespace}): max_ttl={}, preferred_ttl={}s",
         config
