@@ -108,12 +108,17 @@ enum TransactionState {
     ABORTED    = 4;  // rolled back
 }
 
-// 0 is deliberately not a vote: proto3 decodes an unset field (an empty
-// PrepareResponse) as 0, and that must never count as a yes. The coordinator
-// treats UNSPECIFIED, like any unknown value, as ABORTED.
+// Every value that ever meant something else decodes as an abort, so a
+// participant built against older stubs fails safe instead of committing:
+//   0 — unset (an empty PrepareResponse); before #65 it meant PREPARED.
+//   1 — reserved; before #65 it meant NOTCHANGED, in #65 PREPARED.
+//   2 — ABORTED, as it was before #65 (in #65 it meant NOTCHANGED).
+// The coordinator treats UNSPECIFIED, reserved and unknown values as ABORTED.
+// Never reuse a number here; add new votes above 4.
 enum PrepareVote {
+    reserved 1;
     VOTE_UNSPECIFIED = 0;  // no vote; treated as ABORTED
-    VOTE_PREPARED    = 1;  // state modified; ready to commit
-    VOTE_NOTCHANGED  = 2;  // read-only participant; no action needed at commit
-    VOTE_ABORTED     = 3;  // cannot commit; transaction must abort
+    VOTE_ABORTED     = 2;  // cannot commit; transaction must abort
+    VOTE_PREPARED    = 3;  // state modified; ready to commit
+    VOTE_NOTCHANGED  = 4;  // read-only participant; no action needed at commit
 }
