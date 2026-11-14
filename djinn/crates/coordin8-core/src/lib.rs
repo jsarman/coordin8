@@ -17,7 +17,7 @@ pub use lease::{
     LEASE_ANY, LEASE_FOREVER, MAX_REPRESENTABLE_TTL_SECS,
 };
 pub use registry::{CapabilityResolver, RegistryEntry, RegistryStore, TransportConfig};
-pub use space::{SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord};
+pub use space::{SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord, TxnApplied};
 pub use txn::{
     ParticipantRecord, PrepareVote, TransactionRecord, TransactionState, TxnEnlister, TxnStore,
     FINISHED_TXN_RETENTION_SECS,
