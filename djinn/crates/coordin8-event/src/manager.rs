@@ -209,13 +209,11 @@ impl EventManager {
     /// client has processed them. `SubscriptionNotFound` for an unknown
     /// registration.
     pub async fn ack_through(&self, registration_id: &str, up_to_seq: u64) -> Result<(), Error> {
-        if self
-            .store
-            .get_subscription(registration_id)
-            .await?
-            .is_none()
-        {
-            return Err(Error::SubscriptionNotFound(registration_id.to_string()));
+        match self.store.get_subscription(registration_id).await? {
+            None => return Err(Error::SubscriptionNotFound(registration_id.to_string())),
+            // No mailbox: nothing to delete, skip the query.
+            Some(sub) if sub.delivery != DeliveryMode::Durable => return Ok(()),
+            Some(_) => {}
         }
         const PAGE: usize = 256;
         loop {
