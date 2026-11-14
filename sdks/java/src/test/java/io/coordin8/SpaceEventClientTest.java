@@ -314,7 +314,10 @@ class SpaceEventClientTest {
         while (fakeEvents.acks.size() < 2 && System.currentTimeMillis() < deadline) {
             Thread.sleep(10);
         }
-        assertEquals(List.of(3L, 0L), fakeEvents.acks);
+        // Acks are fire-and-forget, so they may land in either order (each
+        // is cumulative, so order doesn't matter to the server).
+        assertEquals(java.util.Set.of(3L, 0L), java.util.Set.copyOf(fakeEvents.acks));
+        assertEquals(2, fakeEvents.acks.size());
     }
 
     @Test
