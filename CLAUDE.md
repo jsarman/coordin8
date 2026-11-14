@@ -39,6 +39,8 @@ Reclaim delivery (lease reclaimed → cascade cleans up the resource) is an in-p
 
 Lease TTL sentinels (`coordin8-core/src/lease.rs`): `LEASE_ANY = 0` (server picks), `LEASE_FOREVER = u64::MAX`; FOREVER `expires_at` is `DateTime::<Utc>::MAX_UTC`.
 
+**2PC recovery.** The recorded txn state is the decision: `Prepared` = commit (re-send `Commit` to every participant until all ack), `Voting` with one participant = ask `PrepareAndCommit` again (idempotent), `Voting` otherwise = abort everywhere. `TxnManager::recover` runs on boot and every 30s (`spawn_recovery`), skipping commits live in this process; a client retrying `commit()` on a stuck txn runs it too. A phase-2 failure leaves the txn `Prepared` (the caller still gets success); an unreachable single participant (connect failed, nothing sent) aborts on the spot. Participant calls must therefore be idempotent, and `Commit`/`Abort` for an unknown txn a no-op (see `transaction.proto`).
+
 A lease is self-describing: the `Lease` message carries `grantor_host`/`grantor_port`, so a holder always knows where to renew without prior knowledge of which service granted it (mirrors Jini's `LandlordLease`).
 
 ### Split Mode

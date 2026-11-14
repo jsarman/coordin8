@@ -162,27 +162,6 @@ async fn enlist_after_commit_cas_is_rejected() {
 }
 
 #[tokio::test]
-async fn single_participant_transport_error_is_not_aborted() {
-    let (mgr, _) = make_manager();
-    let (txn_id, _) = mgr.begin(60).await.unwrap();
-    // Nothing listens here: connect fails -> transport error.
-    mgr.enlist(&txn_id, "127.0.0.1:1".into(), 0).await.unwrap();
-
-    let err = mgr.commit(&txn_id).await.unwrap_err();
-    assert!(matches!(err, Error::TransactionOutcomeUnknown(_)));
-    assert_eq!(
-        mgr.get_state(&txn_id).await.unwrap(),
-        TransactionState::Voting
-    );
-    // Lease expiry must not flip it to Aborted either.
-    mgr.abort_expired(&txn_id).await.unwrap();
-    assert_eq!(
-        mgr.get_state(&txn_id).await.unwrap(),
-        TransactionState::Voting
-    );
-}
-
-#[tokio::test]
 async fn store_cas_false_on_wrong_expected_state() {
     let (mgr, store) = make_manager();
     let (txn_id, _) = mgr.begin(60).await.unwrap();
