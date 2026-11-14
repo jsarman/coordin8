@@ -1,16 +1,55 @@
+use std::time::{Duration, Instant};
+
 use async_trait::async_trait;
 use dashmap::DashMap;
 
-use coordin8_core::{Error, ParticipantRecord, TransactionRecord, TransactionState, TxnStore};
+use coordin8_core::{
+    Error, ParticipantRecord, TransactionRecord, TransactionState, TxnStore,
+    FINISHED_TXN_RETENTION_SECS,
+};
 
 pub struct InMemoryTxnStore {
     records: DashMap<String, TransactionRecord>,
+    /// When each finished (Committed/Aborted) record reached that state.
+    /// Records older than `retention` are dropped on the next `create`,
+    /// mirroring the Dynamo provider's native TTL.
+    finished: DashMap<String, Instant>,
+    retention: Duration,
 }
 
 impl InMemoryTxnStore {
     pub fn new() -> Self {
+        Self::with_retention(Duration::from_secs(FINISHED_TXN_RETENTION_SECS))
+    }
+
+    pub fn with_retention(retention: Duration) -> Self {
         Self {
             records: DashMap::new(),
+            finished: DashMap::new(),
+            retention,
+        }
+    }
+
+    fn note_state(&self, txn_id: &str, state: &TransactionState) {
+        if matches!(
+            state,
+            TransactionState::Committed | TransactionState::Aborted
+        ) {
+            self.finished.insert(txn_id.to_string(), Instant::now());
+        }
+    }
+
+    fn prune_finished(&self) {
+        let retention = self.retention;
+        let expired: Vec<String> = self
+            .finished
+            .iter()
+            .filter(|e| e.value().elapsed() >= retention)
+            .map(|e| e.key().clone())
+            .collect();
+        for id in expired {
+            self.finished.remove(&id);
+            self.records.remove(&id);
         }
     }
 }
@@ -24,6 +63,7 @@ impl Default for InMemoryTxnStore {
 #[async_trait]
 impl TxnStore for InMemoryTxnStore {
     async fn create(&self, record: TransactionRecord) -> Result<(), Error> {
+        self.prune_finished();
         self.records.insert(record.txn_id.clone(), record);
         Ok(())
     }
@@ -35,6 +75,7 @@ impl TxnStore for InMemoryTxnStore {
     async fn update_state(&self, txn_id: &str, state: TransactionState) -> Result<(), Error> {
         match self.records.get_mut(txn_id) {
             Some(mut r) => {
+                self.note_state(txn_id, &state);
                 r.state = state;
                 Ok(())
             }
@@ -51,6 +92,7 @@ impl TxnStore for InMemoryTxnStore {
         match self.records.get_mut(txn_id) {
             Some(mut r) => {
                 if r.state == expected {
+                    self.note_state(txn_id, &new);
                     r.state = new;
                     Ok(true)
                 } else {
@@ -79,6 +121,7 @@ impl TxnStore for InMemoryTxnStore {
     }
 
     async fn remove(&self, txn_id: &str) -> Result<(), Error> {
+        self.finished.remove(txn_id);
         self.records.remove(txn_id);
         Ok(())
     }
@@ -134,6 +177,20 @@ mod tests {
             .update_state_if("nope", TransactionState::Active, TransactionState::Voting)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn finished_records_expire_active_ones_do_not() {
+        let s = InMemoryTxnStore::with_retention(Duration::from_millis(50));
+        s.create(rec("done")).await.unwrap();
+        s.create(rec("open")).await.unwrap();
+        s.update_state("done", TransactionState::Committed)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        s.create(rec("next")).await.unwrap();
+        assert!(s.get("done").await.unwrap().is_none());
+        assert!(s.get("open").await.unwrap().is_some());
     }
 
     #[tokio::test]

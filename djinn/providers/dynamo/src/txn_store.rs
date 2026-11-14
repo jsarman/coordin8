@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use aws_sdk_dynamodb::{types::AttributeValue, Client};
 use chrono::{DateTime, Utc};
 
-use coordin8_core::{Error, ParticipantRecord, TransactionRecord, TransactionState, TxnStore};
+use coordin8_core::{
+    Error, ParticipantRecord, TransactionRecord, TransactionState, TxnStore,
+    FINISHED_TXN_RETENTION_SECS,
+};
 
 use crate::table::{ensure_txn_table, TXN_TABLE};
 
@@ -47,6 +50,20 @@ impl DynamoTxnStore {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// The update expression for a state change: a finished state also sets
+/// `ttl` so the row expires instead of living forever.
+fn set_state_expr(value: &str, state: &TransactionState) -> (String, Option<AttributeValue>) {
+    match state {
+        TransactionState::Committed | TransactionState::Aborted => (
+            format!("SET #s = {value}, #ttl = :ttl"),
+            Some(AttributeValue::N(
+                (Utc::now().timestamp() + FINISHED_TXN_RETENTION_SECS as i64).to_string(),
+            )),
+        ),
+        _ => (format!("SET #s = {value}"), None),
+    }
+}
 
 fn state_to_str(state: &TransactionState) -> &'static str {
     match state {
@@ -187,6 +204,7 @@ impl TxnStore for DynamoTxnStore {
             .client
             .get_item()
             .table_name(&self.table_name)
+            .consistent_read(true)
             .key("txn_id", AttributeValue::S(txn_id.to_string()))
             .send()
             .await
@@ -199,14 +217,21 @@ impl TxnStore for DynamoTxnStore {
     }
 
     async fn update_state(&self, txn_id: &str, state: TransactionState) -> Result<(), Error> {
-        let result = self
+        let (expr, ttl) = set_state_expr(":s", &state);
+        let mut req = self
             .client
             .update_item()
             .table_name(&self.table_name)
             .key("txn_id", AttributeValue::S(txn_id.to_string()))
-            .update_expression("SET #s = :s")
+            .update_expression(expr)
             .expression_attribute_names("#s", "state")
-            .expression_attribute_values(":s", AttributeValue::S(state_to_str(&state).to_string()))
+            .expression_attribute_values(":s", AttributeValue::S(state_to_str(&state).to_string()));
+        if let Some(ttl) = ttl {
+            req = req
+                .expression_attribute_names("#ttl", "ttl")
+                .expression_attribute_values(":ttl", ttl);
+        }
+        let result = req
             .condition_expression("attribute_exists(txn_id)")
             .send()
             .await;
@@ -232,21 +257,26 @@ impl TxnStore for DynamoTxnStore {
         expected: TransactionState,
         new: TransactionState,
     ) -> Result<bool, Error> {
-        let result = self
+        let (expr, ttl) = set_state_expr(":new", &new);
+        let mut req = self
             .client
             .update_item()
             .table_name(&self.table_name)
             .key("txn_id", AttributeValue::S(txn_id.to_string()))
-            .update_expression("SET #s = :new")
+            .update_expression(expr)
             .expression_attribute_names("#s", "state")
             .expression_attribute_values(":new", AttributeValue::S(state_to_str(&new).to_string()))
             .expression_attribute_values(
                 ":exp",
                 AttributeValue::S(state_to_str(&expected).to_string()),
             )
-            .condition_expression("#s = :exp")
-            .send()
-            .await;
+            .condition_expression("#s = :exp");
+        if let Some(ttl) = ttl {
+            req = req
+                .expression_attribute_names("#ttl", "ttl")
+                .expression_attribute_values(":ttl", ttl);
+        }
+        let result = req.send().await;
 
         match result {
             Ok(_) => Ok(true),
@@ -323,7 +353,11 @@ impl TxnStore for DynamoTxnStore {
         let mut last_key: Option<HashMap<String, AttributeValue>> = None;
 
         loop {
-            let mut req = self.client.scan().table_name(&self.table_name);
+            let mut req = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .consistent_read(true);
 
             if let Some(ref lek) = last_key {
                 req = req.set_exclusive_start_key(Some(lek.clone()));
@@ -512,6 +546,52 @@ mod tests {
         assert!(ids.contains(&"txn-a"));
         assert!(ids.contains(&"txn-b"));
 
+        teardown(&client, &table_name).await;
+    }
+
+    /// Finished transactions get a native-TTL `ttl` about a day out;
+    /// in-flight ones don't, so they never expire under a running commit.
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn finished_states_set_ttl() {
+        let (store, table_name, client) = setup().await;
+        let ttl_of = |id: &'static str| {
+            let (client, table) = (client.clone(), table_name.clone());
+            async move {
+                client
+                    .get_item()
+                    .table_name(table)
+                    .key("txn_id", AttributeValue::S(id.into()))
+                    .send()
+                    .await
+                    .unwrap()
+                    .item
+                    .unwrap()
+                    .get("ttl")
+                    .map(|v| v.as_n().unwrap().parse::<i64>().unwrap())
+            }
+        };
+        store.create(make_record("t-c", "l1")).await.unwrap();
+        store.create(make_record("t-a", "l2")).await.unwrap();
+        store
+            .update_state_if("t-c", TransactionState::Active, TransactionState::Voting)
+            .await
+            .unwrap();
+        assert_eq!(ttl_of("t-c").await, None);
+        store
+            .update_state_if("t-c", TransactionState::Voting, TransactionState::Committed)
+            .await
+            .unwrap();
+        store
+            .update_state("t-a", TransactionState::Aborted)
+            .await
+            .unwrap();
+        let day = FINISHED_TXN_RETENTION_SECS as i64;
+        for id in ["t-c", "t-a"] {
+            let ttl = ttl_of(id).await.expect("finished txn has ttl");
+            let ahead = ttl - Utc::now().timestamp();
+            assert!((day - 60..=day).contains(&ahead), "{id}: {ahead}");
+        }
         teardown(&client, &table_name).await;
     }
 

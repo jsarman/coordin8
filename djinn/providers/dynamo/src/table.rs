@@ -81,8 +81,13 @@ pub async fn ensure_lease_table(client: &Client, table_name: &str) -> Result<(),
         .await;
 
     handle_create_result(result, table_name)?;
+    enable_ttl(client, table_name).await;
+    Ok(())
+}
 
-    // Enable TTL (idempotent — safe to call even if already enabled).
+/// Enable native TTL on the `ttl` attribute (idempotent; errors are logged,
+/// not fatal).
+async fn enable_ttl(client: &Client, table_name: &str) {
     let ttl_result = client
         .update_time_to_live()
         .table_name(table_name)
@@ -108,8 +113,6 @@ pub async fn ensure_lease_table(client: &Client, table_name: &str) -> Result<(),
             warn!(table = table_name, error = %e, "Failed to enable TTL (non-fatal)");
         }
     }
-
-    Ok(())
 }
 
 /// Ensure the `coordin8_registry` table (or a custom-named one) exists.
@@ -193,6 +196,8 @@ pub async fn ensure_txn_table(client: &Client, table_name: &str) -> Result<(), S
         .await;
 
     handle_create_result(result, table_name)?;
+    // Finished transactions carry a `ttl` (see `coordin8_core::FINISHED_TXN_RETENTION_SECS`).
+    enable_ttl(client, table_name).await;
     Ok(())
 }
 
