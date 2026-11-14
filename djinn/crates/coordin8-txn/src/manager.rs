@@ -1,11 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use coordin8_auth::ClientAuthConfig;
 use coordin8_observability::wrap_traced_channel as wrap_channel;
 use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -28,6 +29,11 @@ pub struct TxnManager {
     /// `Voting`/`Prepared` transaction is recovered. Assumes one TxnMgr per
     /// store, as deployed today.
     in_flight: Arc<Mutex<HashSet<String>>>,
+    /// Backoff for transactions recovery could not finish (a participant
+    /// still unreachable): txn id -> (next attempt, current delay).
+    retry_at: Mutex<HashMap<String, (Instant, Duration)>>,
+    /// First backoff delay; doubles per failed attempt.
+    backoff_base: Duration,
 }
 
 /// Removes its txn from `in_flight` when the commit or recovery ends.
@@ -44,6 +50,22 @@ impl Drop for InFlight {
 
 /// How often [`TxnManager::spawn_recovery`] sweeps for stuck transactions.
 pub const RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Longest wait between recovery attempts on one transaction whose
+/// participant stays unreachable.
+const MAX_RECOVERY_BACKOFF: Duration = Duration::from_secs(10 * 60);
+
+/// How many stuck transactions one sweep drives at once, so one dead
+/// endpoint (5s connect + 10s call timeout) doesn't hold up the rest.
+const RECOVERY_CONCURRENCY: usize = 8;
+
+/// States with a decision, or a vote, still to be delivered.
+fn is_unresolved(s: &TransactionState) -> bool {
+    matches!(
+        s,
+        TransactionState::Voting | TransactionState::Prepared | TransactionState::Aborting
+    )
+}
 
 impl TxnManager {
     pub fn new(store: Arc<dyn TxnStore>, lease_manager: Arc<dyn Leasing>) -> Self {
@@ -65,6 +87,8 @@ impl TxnManager {
             client_auth,
             allowlist: EndpointAllowlist::allow_all(TXN_PARTICIPANT_ALLOW_VAR),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            retry_at: Mutex::new(HashMap::new()),
+            backoff_base: RECOVERY_INTERVAL,
         }
     }
 
@@ -72,6 +96,14 @@ impl TxnManager {
     /// token-leak guard — see [`EndpointAllowlist`]). Default is allow-all.
     pub fn with_participant_allowlist(mut self, allowlist: EndpointAllowlist) -> Self {
         self.allowlist = allowlist;
+        self
+    }
+
+    /// First delay before recovery retries a transaction it could not
+    /// finish (doubles per attempt, capped). Default [`RECOVERY_INTERVAL`];
+    /// tests use zero to retry on every `recover()`.
+    pub fn with_recovery_backoff(mut self, base: Duration) -> Self {
+        self.backoff_base = base;
         self
     }
 
@@ -157,7 +189,7 @@ impl TxnManager {
     pub async fn abort_expired(&self, txn_id: &str) -> Result<(), Error> {
         match self
             .store
-            .update_state_if(txn_id, TransactionState::Active, TransactionState::Aborted)
+            .update_state_if(txn_id, TransactionState::Active, TransactionState::Aborting)
             .await
         {
             Ok(true) => {}
@@ -174,7 +206,7 @@ impl TxnManager {
 
         // Enlists are rejected from here on, so this list is final.
         if let Some(txn) = self.store.get(txn_id).await? {
-            Self::do_abort_participants(txn_id, &txn.participants, &self.client_auth).await;
+            self.deliver_abort(&txn).await?;
         }
         debug!(txn_id, "transaction aborted (lease expired)");
         Ok(())
@@ -183,19 +215,19 @@ impl TxnManager {
     pub async fn abort(&self, txn_id: &str) -> Result<(), Error> {
         if !self
             .store
-            .update_state_if(txn_id, TransactionState::Active, TransactionState::Aborted)
+            .update_state_if(txn_id, TransactionState::Active, TransactionState::Aborting)
             .await?
         {
             return match self.fetch(txn_id).await?.state {
                 TransactionState::Committed => Err(Error::TransactionTerminal(txn_id.to_string())),
-                TransactionState::Aborted => Ok(()), // idempotent
+                s if s.is_abort() => Ok(()), // idempotent
                 _ => Err(Error::TransactionCommitInProgress(txn_id.to_string())),
             };
         }
 
         let txn = self.fetch(txn_id).await?;
-        Self::do_abort_participants(txn_id, &txn.participants, &self.client_auth).await;
         self.lease_manager.cancel(&txn.lease_id).await.ok();
+        self.deliver_abort(&txn).await?;
         debug!(txn_id, "transaction aborted");
         Ok(())
     }
@@ -215,14 +247,20 @@ impl TxnManager {
             let txn = self.fetch(txn_id).await?;
             return match txn.state {
                 TransactionState::Committed => Ok(()), // idempotent
-                TransactionState::Aborted => Err(Error::TransactionAborted(txn_id.to_string())),
+                s if s.is_abort() => Err(Error::TransactionAborted(txn_id.to_string())),
                 // Nobody in this process is driving it: it's stuck (a failed
                 // phase 2, a lost single-participant reply, or a coordinator
                 // restart). Finish it now instead of refusing.
                 _ => match self.recover_one(&txn).await? {
                     Some(TransactionState::Committed) => Ok(()),
                     Some(_) => Err(Error::TransactionAborted(txn_id.to_string())),
-                    None => Err(Error::TransactionOutcomeUnknown(txn_id.to_string())),
+                    // Not every participant has heard yet, but the recorded
+                    // state may already be the decision.
+                    None => match self.fetch(txn_id).await?.state {
+                        TransactionState::Prepared | TransactionState::Committed => Ok(()),
+                        s if s.is_abort() => Err(Error::TransactionAborted(txn_id.to_string())),
+                        _ => Err(Error::TransactionOutcomeUnknown(txn_id.to_string())),
+                    },
                 },
             };
         }
@@ -270,8 +308,10 @@ impl TxnManager {
                 Err(Error::Unavailable(e)) => {
                     // Never connected, so the participant never saw the
                     // request: aborting is safe and final.
+                    // It still holds the txn's state, though, and must be
+                    // told: Aborting until recovery delivers the Abort.
                     warn!(txn_id, endpoint = %ep, error = %e, "participant unreachable — aborting");
-                    self.transition(txn_id, TransactionState::Voting, TransactionState::Aborted)
+                    self.transition(txn_id, TransactionState::Voting, TransactionState::Aborting)
                         .await?;
                     self.lease_manager.cancel(&txn.lease_id).await.ok();
                     return Err(Error::TransactionAborted(txn_id.to_string()));
@@ -327,10 +367,10 @@ impl TxnManager {
 
         if let Some(reason) = abort_reason {
             warn!(txn_id, reason, "prepare phase failed — aborting all");
-            self.transition(txn_id, TransactionState::Voting, TransactionState::Aborted)
+            self.transition(txn_id, TransactionState::Voting, TransactionState::Aborting)
                 .await?;
-            Self::do_abort_participants(txn_id, &participants, &self.client_auth).await;
             self.lease_manager.cancel(&txn.lease_id).await.ok();
+            self.deliver_abort(&txn).await?;
             return Err(Error::TransactionAborted(txn_id.to_string()));
         }
 
@@ -401,41 +441,91 @@ impl TxnManager {
     async fn settled_or_in_progress(&self, txn_id: &str) -> Result<(), Error> {
         match self.fetch(txn_id).await?.state {
             TransactionState::Committed => Ok(()),
-            TransactionState::Aborted => Err(Error::TransactionAborted(txn_id.to_string())),
+            s if s.is_abort() => Err(Error::TransactionAborted(txn_id.to_string())),
             _ => Err(Error::TransactionCommitInProgress(txn_id.to_string())),
         }
     }
 
-    /// Finish every `Voting`/`Prepared` transaction nobody in this process is
-    /// driving: the ones a crash, a failed phase-2 call or a lost
-    /// single-participant reply left behind. Returns how many reached a final
-    /// state. Run on boot and on a timer ([`Self::spawn_recovery`]).
+    /// Finish every unresolved (`Voting`/`Prepared`/`Aborting`) transaction
+    /// nobody in this process is driving: the ones a crash, a failed phase-2
+    /// or abort call, or a lost single-participant reply left behind. Returns
+    /// how many this sweep moved to a final state. Run on boot and on a timer
+    /// ([`Self::spawn_recovery`]). A transaction whose participant stays
+    /// unreachable is retried with backoff (up to [`MAX_RECOVERY_BACKOFF`]);
+    /// the `coordin8_txn_unresolved` gauge counts what is left.
     pub async fn recover(&self) -> Result<usize, Error> {
-        let mut resolved = 0;
-        for txn in self.store.list_all().await? {
-            if !matches!(
-                txn.state,
-                TransactionState::Voting | TransactionState::Prepared
-            ) {
-                continue;
+        let now = Instant::now();
+        let all = self.store.list_all().await?;
+        let unresolved: Vec<_> = all
+            .into_iter()
+            .filter(|t| is_unresolved(&t.state))
+            .collect();
+        let pending = unresolved.len();
+        {
+            // Forget backoff for transactions that are no longer stuck.
+            let ids: HashSet<&str> = unresolved.iter().map(|t| t.txn_id.as_str()).collect();
+            self.retry_at
+                .lock()
+                .unwrap()
+                .retain(|id, _| ids.contains(id.as_str()));
+        }
+        let due: Vec<_> = {
+            let retry_at = self.retry_at.lock().unwrap();
+            unresolved
+                .into_iter()
+                .filter(|t| retry_at.get(&t.txn_id).is_none_or(|(at, _)| *at <= now))
+                .collect()
+        };
+
+        let resolved = stream::iter(due)
+            .map(|txn| async move { self.recover_listed(&txn.txn_id).await })
+            .buffer_unordered(RECOVERY_CONCURRENCY)
+            .filter(|done| std::future::ready(*done))
+            .count()
+            .await;
+        coordin8_observability::set_txn_unresolved(pending.saturating_sub(resolved));
+        Ok(resolved)
+    }
+
+    /// Recover one listed transaction. True only if this call moved it to a
+    /// final state.
+    async fn recover_listed(&self, txn_id: &str) -> bool {
+        let Some(_guard) = self.claim(txn_id) else {
+            return false; // a live commit owns it
+        };
+        // Re-read under the claim: it may have finished since the list.
+        let txn = match self.store.get(txn_id).await {
+            Ok(Some(t)) if is_unresolved(&t.state) => t,
+            Ok(_) => return false,
+            Err(e) => {
+                warn!(txn_id, error = %e, "transaction recovery failed");
+                return false;
             }
-            let Some(_guard) = self.claim(&txn.txn_id) else {
-                continue; // a live commit owns it
-            };
-            // Re-read under the claim: it may have finished since the list.
-            let Some(txn) = self.store.get(&txn.txn_id).await? else {
-                continue;
-            };
-            match self.recover_one(&txn).await {
-                Ok(Some(state)) => {
-                    resolved += 1;
-                    info!(txn_id = %txn.txn_id, ?state, "transaction recovered");
-                }
-                Ok(None) => {}
-                Err(e) => warn!(txn_id = %txn.txn_id, error = %e, "transaction recovery failed"),
+        };
+        match self.recover_one(&txn).await {
+            Ok(Some(state)) => {
+                self.retry_at.lock().unwrap().remove(txn_id);
+                info!(txn_id, ?state, "transaction recovered");
+                true
+            }
+            Ok(None) => {
+                self.back_off(txn_id);
+                false
+            }
+            Err(e) => {
+                self.back_off(txn_id);
+                warn!(txn_id, error = %e, "transaction recovery failed");
+                false
             }
         }
-        Ok(resolved)
+    }
+
+    fn back_off(&self, txn_id: &str) {
+        let mut retry_at = self.retry_at.lock().unwrap();
+        let delay = retry_at.get(txn_id).map_or(self.backoff_base, |(_, d)| {
+            (*d * 2).min(MAX_RECOVERY_BACKOFF)
+        });
+        retry_at.insert(txn_id.to_string(), (Instant::now() + delay, delay));
     }
 
     /// Sweep with [`Self::recover`] now and every `interval`.
@@ -459,7 +549,9 @@ impl TxnManager {
     ///   already committed, must treat it as a no-op) until all ack.
     /// - `Voting` with one participant: the PrepareAndCommit reply was lost.
     ///   Ask again; it is idempotent, and the answer is the outcome.
-    /// - `Voting` otherwise: no decision was recorded, so abort everywhere.
+    /// - `Voting` otherwise: no decision was recorded, so decide abort
+    ///   (only if this CAS wins: someone else may have just decided commit).
+    /// - `Aborting`: re-send Abort to every participant until all ack.
     ///
     /// `Some(final state)` when finished, `None` when a participant is still
     /// unreachable (the next sweep retries).
@@ -500,12 +592,16 @@ impl TxnManager {
                 }
             }
             TransactionState::Voting => {
-                let done = self
-                    .finish(txn, TransactionState::Voting, TransactionState::Aborted)
-                    .await?;
-                Self::do_abort_participants(id, &txn.participants, &self.client_auth).await;
-                Ok(done)
+                if self
+                    .finish(txn, TransactionState::Voting, TransactionState::Aborting)
+                    .await?
+                    .is_none()
+                {
+                    return Ok(None); // lost the CAS: not ours to abort
+                }
+                self.deliver_abort(txn).await
             }
+            TransactionState::Aborting => self.deliver_abort(txn).await,
             ref other => Ok(Some(other.clone())),
         }
     }
@@ -655,25 +751,30 @@ impl TxnManager {
         Ok(vote_from_i32(resp.into_inner().vote))
     }
 
-    async fn do_abort_participants(
-        txn_id: &str,
-        participants: &[ParticipantRecord],
-        client_auth: &ClientAuthConfig,
-    ) {
-        let futs: Vec<_> = participants
-            .iter()
-            .map(|p| {
-                let ep = p.endpoint.clone();
-                let tid = txn_id.to_string();
-                let client_auth = client_auth.clone();
-                async move {
-                    if let Err(e) = Self::call_abort(&ep, &tid, &client_auth).await {
-                        warn!(endpoint = %ep, error = %e, "abort call to participant failed");
-                    }
+    /// Send Abort to every participant of a transaction in `Aborting`, in
+    /// parallel. When all ack, move it to `Aborted`; otherwise it stays
+    /// `Aborting` and recovery re-sends. `Some(Aborted)` when finished.
+    async fn deliver_abort(
+        &self,
+        txn: &TransactionRecord,
+    ) -> Result<Option<TransactionState>, Error> {
+        let id = txn.txn_id.as_str();
+        let acks = join_all(txn.participants.iter().map(|p| {
+            let client_auth = self.client_auth.clone();
+            async move {
+                let r = Self::call_abort(&p.endpoint, id, &client_auth).await;
+                if let Err(e) = &r {
+                    warn!(txn_id = id, endpoint = %p.endpoint, error = %e, "abort not acked yet — recovery will re-send");
                 }
-            })
-            .collect();
-        join_all(futs).await;
+                r
+            }
+        }))
+        .await;
+        if acks.iter().any(Result::is_err) {
+            return Ok(None);
+        }
+        self.finish(txn, TransactionState::Aborting, TransactionState::Aborted)
+            .await
     }
 }
 
@@ -712,5 +813,13 @@ impl LocalTxnEnlister {
 impl coordin8_core::TxnEnlister for LocalTxnEnlister {
     async fn enlist(&self, txn_id: &str, endpoint: &str) -> Result<(), Error> {
         self.manager.enlist(txn_id, endpoint.to_string(), 0).await
+    }
+
+    async fn state(&self, txn_id: &str) -> Result<Option<TransactionState>, Error> {
+        match self.manager.get_state(txn_id).await {
+            Ok(s) => Ok(Some(s)),
+            Err(Error::TransactionNotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }

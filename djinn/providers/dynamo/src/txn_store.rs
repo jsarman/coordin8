@@ -71,6 +71,7 @@ fn state_to_str(state: &TransactionState) -> &'static str {
         TransactionState::Voting => "Voting",
         TransactionState::Prepared => "Prepared",
         TransactionState::Committed => "Committed",
+        TransactionState::Aborting => "Aborting",
         TransactionState::Aborted => "Aborted",
     }
 }
@@ -81,6 +82,7 @@ fn state_from_str(s: &str) -> Result<TransactionState, Error> {
         "Voting" => Ok(TransactionState::Voting),
         "Prepared" => Ok(TransactionState::Prepared),
         "Committed" => Ok(TransactionState::Committed),
+        "Aborting" => Ok(TransactionState::Aborting),
         "Aborted" => Ok(TransactionState::Aborted),
         other => Err(Error::Storage(format!(
             "unknown transaction state: {other}"
@@ -615,8 +617,18 @@ mod tests {
             .update_state_if("t-c", TransactionState::Voting, TransactionState::Committed)
             .await
             .unwrap();
+        // Aborting is a decision still being delivered: it must not expire.
         store
-            .update_state("t-a", TransactionState::Aborted)
+            .update_state_if("t-a", TransactionState::Active, TransactionState::Aborting)
+            .await
+            .unwrap();
+        assert_eq!(ttl_of("t-a").await, None);
+        assert_eq!(
+            store.get("t-a").await.unwrap().unwrap().state,
+            TransactionState::Aborting
+        );
+        store
+            .update_state_if("t-a", TransactionState::Aborting, TransactionState::Aborted)
             .await
             .unwrap();
         let day = FINISHED_TXN_RETENTION_SECS as i64;

@@ -16,7 +16,7 @@ mod otel;
 mod propagation;
 
 pub use logging::{LogFormat, LoggingConfig, LOG_FORMAT_ENV_VAR};
-pub use metrics::{MetricsConfig, PORT_ENV_VAR as METRICS_PORT_ENV_VAR};
+pub use metrics::{set_txn_unresolved, MetricsConfig, PORT_ENV_VAR as METRICS_PORT_ENV_VAR};
 pub use otel::{
     server_layer, wrap_traced_channel, ClientTraceInterceptor, ServerTraceLayer,
     TracedAuthedChannel, TracingConfig, ENDPOINT_ENV_VAR, SAMPLE_RATIO_ENV_VAR,

@@ -817,6 +817,21 @@ impl SpaceStore for DynamoSpaceStore {
         Ok(!taken.is_empty())
     }
 
+    async fn list_txns(&self) -> Result<Vec<String>, Error> {
+        // Buffer tables only hold in-flight transactions, so they stay small.
+        let mut ids = Vec::new();
+        for table in [&self.uncommitted_table, &self.txn_taken_table] {
+            for item in scan_all(&self.client, table).await? {
+                if let Some(AttributeValue::S(id)) = item.get("txn_id") {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
     async fn list_all(&self) -> Result<Vec<TupleRecord>, Error> {
         let items = scan_all(&self.client, &self.tuple_table).await?;
         items.iter().map(tuple_from_item).collect()
@@ -1260,6 +1275,34 @@ mod tests {
         assert!(replay.error.is_none());
         assert!(replay.published.is_empty());
         assert!(store.get("t-ar").await.unwrap().is_none());
+
+        teardown(&client, &tables).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn list_txns_covers_writes_and_takes() {
+        let (store, tables, client) = setup().await;
+        store.insert(make_tuple("t-lt", "l-lt")).await.unwrap();
+        store
+            .insert_uncommitted("txn-w", make_tuple("t-lw", "l-lw"))
+            .await
+            .unwrap();
+        store
+            .insert_uncommitted("txn-w", make_tuple("t-lw2", "l-lw2"))
+            .await
+            .unwrap();
+        let mut order = HashMap::new();
+        order.insert("type".to_string(), "order".to_string());
+        store
+            .take_match(&order, Some("txn-t"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut ids = store.list_txns().await.unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["txn-t".to_string(), "txn-w".to_string()]);
 
         teardown(&client, &tables).await;
     }

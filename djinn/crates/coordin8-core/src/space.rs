@@ -119,6 +119,10 @@ pub trait SpaceStore: Send + Sync {
     /// Check if this store has any uncommitted state for the given transaction.
     async fn has_txn(&self, txn_id: &str) -> Result<bool, Error>;
 
+    /// Every transaction this store holds buffered state for (writes or
+    /// takes), deduplicated. Used to reconcile against the coordinator.
+    async fn list_txns(&self) -> Result<Vec<String>, Error>;
+
     /// List all tuples (for debugging/tests).
     async fn list_all(&self) -> Result<Vec<TupleRecord>, Error>;
 

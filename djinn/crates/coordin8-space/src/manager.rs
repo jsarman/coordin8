@@ -5,13 +5,13 @@ use std::time::Duration;
 use chrono::Utc;
 use dashmap::DashMap;
 use tokio::sync::broadcast;
-use tracing::debug;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use coordin8_core::shutdown::ShutdownSignal;
 use coordin8_core::{
-    Error, LeaseRecord, Leasing, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord,
-    TxnApplied, TxnEnlister,
+    Error, LeaseRecord, Leasing, SpaceEventKind, SpaceStore, SpaceWatchRecord, TransactionState,
+    TupleRecord, TxnApplied, TxnEnlister,
 };
 use coordin8_registry::matcher::{matches, parse_template};
 
@@ -399,6 +399,60 @@ impl SpaceManager {
             }
             Some(e) => Err(e),
         }
+    }
+
+    /// Finish every transaction this Space holds state for whose outcome the
+    /// coordinator has already decided, without waiting to be told: the
+    /// participant's half of recovery. Covers a Commit/Abort that never
+    /// arrived (Space down at the time, or now on a different endpoint the
+    /// coordinator can't reach). Committed or Prepared (the decision is
+    /// commit) -> commit locally; aborted or no record -> abort locally;
+    /// Active/Voting -> still undecided, leave it. Returns how many it
+    /// finished. A no-op without an enlister (no transactions at all).
+    pub async fn reconcile_txns(&self) -> Result<usize, Error> {
+        let Some(enlister) = &self.enlister else {
+            return Ok(0);
+        };
+        let mut done = 0;
+        for txn_id in self.store.list_txns().await? {
+            let state = match enlister.state(&txn_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!(txn_id, error = %e, "reconcile: coordinator unreachable, retry later");
+                    continue;
+                }
+            };
+            let result = match &state {
+                Some(TransactionState::Committed | TransactionState::Prepared) => {
+                    self.commit_space_txn(&txn_id).await
+                }
+                Some(s) if s.is_abort() => self.abort_space_txn(&txn_id).await,
+                None => self.abort_space_txn(&txn_id).await,
+                Some(_) => continue,
+            };
+            match result {
+                Ok(()) => {
+                    done += 1;
+                    info!(txn_id, ?state, "reconciled space txn with coordinator");
+                }
+                Err(e) => warn!(txn_id, error = %e, "reconcile failed, retry later"),
+            }
+        }
+        Ok(done)
+    }
+
+    /// Run [`Self::reconcile_txns`] every `interval` (first pass after one
+    /// interval: on boot the coordinator may not be reachable yet).
+    pub fn spawn_txn_reconcile(self: &Arc<Self>, interval: Duration) {
+        let mgr = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                if let Err(e) = mgr.reconcile_txns().await {
+                    warn!(error = %e, "space txn reconcile sweep failed");
+                }
+            }
+        });
     }
 
     /// Check if this Space has any uncommitted state for the given transaction.
