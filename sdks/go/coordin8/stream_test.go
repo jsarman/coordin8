@@ -9,6 +9,7 @@ import (
 	pb "github.com/coordin8/sdk-go/gen/coordin8"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -19,11 +20,17 @@ type fakeEvents struct {
 	pb.UnimplementedEventServiceServer
 	events []*pb.Event
 	end    error
+	mode   string // delivery header to send ("" = none)
 	mu     sync.Mutex
 	acks   []uint64
 }
 
 func (f *fakeEvents) Receive(_ *pb.ReceiveRequest, s pb.EventService_ReceiveServer) error {
+	if f.mode != "" {
+		if err := s.SendHeader(metadata.Pairs(deliveryHeader, f.mode)); err != nil {
+			return err
+		}
+	}
 	for _, e := range f.events {
 		if err := s.Send(e); err != nil {
 			return err
@@ -63,30 +70,62 @@ func newEventClient(t *testing.T, f *fakeEvents) *EventClient {
 	return c.Events()
 }
 
-// Only events the caller has taken are acknowledged; one still in flight
-// when the stream ends is left for redelivery.
-func TestReceiveAcksWhatTheCallerTook(t *testing.T) {
-	f := &fakeEvents{events: []*pb.Event{{SeqNum: 1}, {SeqNum: 2}, {SeqNum: 3}}}
+// Taking event N acknowledges what came before it, never N itself: the
+// caller may still be processing it. Review 2026-11-14 N3: an event held
+// while the stream was cancelled was acked and lost.
+func TestReceiveAcksOnlyWhatTheCallerFinished(t *testing.T) {
+	f := &fakeEvents{mode: "durable", events: []*pb.Event{{SeqNum: 1}, {SeqNum: 2}, {SeqNum: 3}}}
 	ec := newEventClient(t, f)
 	ctx, cancel := context.WithCancel(context.Background())
 	s, err := ec.Receive(ctx, "reg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for want := uint64(1); want <= 2; want++ {
-		if e := <-s.C; e.SeqNum != want {
-			t.Fatalf("seq = %d, want %d", e.SeqNum, want)
-		}
+	if e := <-s.C; e.SeqNum != 1 {
+		t.Fatalf("seq = %d, want 1", e.SeqNum)
 	}
-	eventually(t, "periodic ack of 2", func() bool { return f.lastAck() == 2 })
+	// Holding event 1 (processing it): nothing may be acked yet.
+	time.Sleep(3 * AckInterval)
+	if got := f.lastAck(); got != 0 {
+		t.Fatalf("acked %d while the caller still held event 1", got)
+	}
+	// Taking 2 means 1 is done.
+	if e := <-s.C; e.SeqNum != 2 {
+		t.Fatalf("seq = %d, want 2", e.SeqNum)
+	}
+	eventually(t, "periodic ack of 1", func() bool { return f.lastAck() == 1 })
+	// Cancel while holding 2: the final flush must not ack it.
 	cancel()
 	<-s.Done()
 	time.Sleep(2 * AckInterval)
-	if got := f.lastAck(); got != 2 {
-		t.Fatalf("acked through %d; event 3 was never taken and must stay unacked", got)
+	if got := f.lastAck(); got != 1 {
+		t.Fatalf("acked through %d; event 2 was still being processed", got)
 	}
 	if s.Err() != nil {
 		t.Fatalf("cancelled stream should end clean, got %v", s.Err())
+	}
+}
+
+// L-g: no Ack traffic on a best-effort stream.
+func TestReceiveSendsNoAcksOnBestEffort(t *testing.T) {
+	f := &fakeEvents{mode: "best-effort", events: []*pb.Event{{SeqNum: 1}, {SeqNum: 2}, {SeqNum: 3}}}
+	ec := newEventClient(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	s, err := ec.Receive(ctx, "reg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		<-s.C
+	}
+	time.Sleep(3 * AckInterval)
+	cancel()
+	<-s.Done()
+	time.Sleep(AckInterval)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.acks) != 0 {
+		t.Fatalf("best-effort stream sent acks %v", f.acks)
 	}
 }
 
