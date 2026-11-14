@@ -9,7 +9,7 @@ use futures::future::join_all;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use coordin8_core::{EndpointAllowlist, TXN_PARTICIPANT_ALLOW_VAR};
+use coordin8_core::{is_metadata_range, EndpointAllowlist, TXN_PARTICIPANT_ALLOW_VAR};
 use coordin8_core::{
     Error, LeaseRecord, Leasing, ParticipantRecord, PrepareVote, TransactionRecord,
     TransactionState, TxnStore,
@@ -108,6 +108,7 @@ impl TxnManager {
         // Well-formedness + allowlist BEFORE anything is stored: a rejected
         // endpoint is never persisted and therefore never dialed.
         self.allowlist.check(&endpoint)?;
+        self.refuse_metadata_range(&endpoint).await?;
         let participant = ParticipantRecord {
             endpoint: endpoint.clone(),
             crash_count,
@@ -116,6 +117,32 @@ impl TxnManager {
         // the race against commit()/abort() is rejected with TransactionTerminal.
         self.store.add_participant(txn_id, participant).await?;
         debug!(txn_id, endpoint, crash_count, "participant enlisted");
+        Ok(())
+    }
+
+    /// Refuse an endpoint that resolves into a cloud-metadata range unless
+    /// the allowlist names that address — the same default the Proxy
+    /// applies to upstreams, and in force even when no allowlist is set.
+    /// Resolution is bounded; an endpoint that does not resolve now is let
+    /// through (dialing it would fail anyway).
+    async fn refuse_metadata_range(&self, endpoint: &str) -> Result<(), Error> {
+        let addrs =
+            match tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(endpoint))
+                .await
+            {
+                Ok(Ok(addrs)) => addrs,
+                _ => return Ok(()),
+            };
+        for a in addrs {
+            if is_metadata_range(a.ip()) && !self.allowlist.explicitly_allows_ip(a.ip(), a.port()) {
+                return Err(Error::PermissionDenied(format!(
+                    "participant endpoint '{endpoint}' resolves to {} (link-local / metadata range); \
+                     name it in {} to allow",
+                    a.ip(),
+                    self.allowlist.var()
+                )));
+            }
+        }
         Ok(())
     }
 
