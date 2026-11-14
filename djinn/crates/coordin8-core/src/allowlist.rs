@@ -227,13 +227,18 @@ fn parse_endpoint(endpoint: &str) -> Result<(Host, u16), String> {
     Ok((host, port))
 }
 
-/// Link-local ranges (169.254.0.0/16, fe80::/10): cloud metadata services
-/// live here. Callers that dial on a caller's behalf refuse them unless an
-/// IP/CIDR entry names them explicitly.
-pub fn is_link_local(ip: IpAddr) -> bool {
+/// Ranges where cloud metadata services live: link-local (169.254.0.0/16,
+/// fe80::/10) and AWS's IPv6 instance metadata (fd00:ec2::/32, e.g.
+/// `fd00:ec2::254`). Services that dial on a caller's behalf (Proxy
+/// upstreams, TxnMgr participants) refuse them unless an IP/CIDR entry
+/// names them explicitly.
+pub fn is_metadata_range(ip: IpAddr) -> bool {
     match canon(ip) {
         IpAddr::V4(v4) => v4.is_link_local(),
-        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            (s[0] & 0xffc0) == 0xfe80 || (s[0] == 0xfd00 && s[1] == 0x0ec2)
+        }
     }
 }
 
@@ -458,11 +463,21 @@ mod tests {
             "fe80::1",
             "febf::1",
             "::ffff:169.254.1.1",
+            "fd00:ec2::254",
+            "fd00:ec2:1::1",
         ] {
-            assert!(is_link_local(ip.parse().unwrap()), "{ip}");
+            assert!(is_metadata_range(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["10.0.0.1", "127.0.0.1", "fec0::1", "::1", "8.8.8.8"] {
-            assert!(!is_link_local(ip.parse().unwrap()), "{ip}");
+        for ip in [
+            "10.0.0.1",
+            "127.0.0.1",
+            "fec0::1",
+            "::1",
+            "8.8.8.8",
+            "fd00:ec3::1",
+            "fd01:ec2::1",
+        ] {
+            assert!(!is_metadata_range(ip.parse().unwrap()), "{ip}");
         }
     }
 

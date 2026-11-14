@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use coordin8_core::{
-    is_link_local, CapabilityResolver, EndpointAllowlist, LeaseReclaimed, LeaseRecord, Leasing,
+    is_metadata_range, CapabilityResolver, EndpointAllowlist, LeaseReclaimed, LeaseRecord, Leasing,
     RegistryEntry, PROXY_UPSTREAM_ALLOW_VAR,
 };
 
@@ -268,7 +268,7 @@ async fn vet_upstream(
         .copied()
         .filter(|a| {
             (literal_ok || allow.allows_ip(a.ip(), a.port()))
-                && (!is_link_local(a.ip()) || allow.explicitly_allows_ip(a.ip(), a.port()))
+                && (!is_metadata_range(a.ip()) || allow.explicitly_allows_ip(a.ip(), a.port()))
         })
         .collect();
     if ok.is_empty() {

@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -10,10 +12,11 @@ use coordin8_core::{
 
 pub struct InMemoryTxnStore {
     records: DashMap<String, TransactionRecord>,
-    /// When each finished (Committed/Aborted) record reached that state.
+    /// Finished (Committed/Aborted) records in the order they finished.
     /// Records older than `retention` are dropped on the next `create`,
-    /// mirroring the Dynamo provider's native TTL.
-    finished: DashMap<String, Instant>,
+    /// mirroring the Dynamo provider's native TTL. Oldest first, so a prune
+    /// only touches what has expired, not a day's worth of history.
+    finished: Mutex<VecDeque<(Instant, String)>>,
     retention: Duration,
 }
 
@@ -25,7 +28,7 @@ impl InMemoryTxnStore {
     pub fn with_retention(retention: Duration) -> Self {
         Self {
             records: DashMap::new(),
-            finished: DashMap::new(),
+            finished: Mutex::new(VecDeque::new()),
             retention,
         }
     }
@@ -35,21 +38,26 @@ impl InMemoryTxnStore {
             state,
             TransactionState::Committed | TransactionState::Aborted
         ) {
-            self.finished.insert(txn_id.to_string(), Instant::now());
+            self.finished
+                .lock()
+                .unwrap()
+                .push_back((Instant::now(), txn_id.to_string()));
         }
     }
 
     fn prune_finished(&self) {
-        let retention = self.retention;
-        let expired: Vec<String> = self
-            .finished
-            .iter()
-            .filter(|e| e.value().elapsed() >= retention)
-            .map(|e| e.key().clone())
-            .collect();
-        for id in expired {
-            self.finished.remove(&id);
-            self.records.remove(&id);
+        let mut finished = self.finished.lock().unwrap();
+        while let Some((at, _)) = finished.front() {
+            if at.elapsed() < self.retention {
+                break;
+            }
+            let (_, id) = finished.pop_front().unwrap();
+            self.records.remove_if(&id, |_, r| {
+                matches!(
+                    r.state,
+                    TransactionState::Committed | TransactionState::Aborted
+                )
+            });
         }
     }
 }
@@ -128,7 +136,7 @@ impl TxnStore for InMemoryTxnStore {
     }
 
     async fn remove(&self, txn_id: &str) -> Result<(), Error> {
-        self.finished.remove(txn_id);
+        // A queued `finished` entry for it pops later as a no-op.
         self.records.remove(txn_id);
         Ok(())
     }

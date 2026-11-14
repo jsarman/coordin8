@@ -164,7 +164,7 @@ mise r demo-greeter-go / demo-greeter-java / demo-greeter-node  # hello-coordin8
 cargo build
 cargo test
 cargo test -p coordin8-lease       # single crate
-cargo clippy --all --all-targets -- -D warnings   # stricter than CI (CI omits --all-targets)
+cargo clippy --all --all-targets -- -D warnings   # same as CI
 cargo test -p coordin8-provider-dynamo -- --ignored   # Dynamo provider tests; needs MiniStack on :4566
 cargo run                           # starts Djinn locally (in-memory)
 
@@ -191,7 +191,7 @@ docker compose down
 
 ### CI and test coverage
 
-CI (`.github/workflows/ci.yml`) runs: Rust `cargo build --all`, `cargo test --all`, `cargo clippy --all -- -D warnings`, `cargo fmt --all --check` (Rust 1.94.1); a `dynamo-provider` job that runs the `#[ignore]`d Dynamo provider tests against a MiniStack service container; Go `build` + `vet` + `go test -race` for `cli/` and `sdks/go/`; `./gradlew build` (incl. JUnit tests) for the Java SDK; `npm run build && npm test` for the Node SDK. Locally, Dynamo tests need MiniStack on :4566 and `-- --ignored`. CI's clippy omits `--all-targets` — run it locally with `--all-targets` to lint test code too.
+CI (`.github/workflows/ci.yml`) runs: Rust `cargo build --all`, `cargo test --all`, `cargo clippy --all --all-targets -- -D warnings`, `cargo fmt --all --check` (Rust 1.94.1); a `dynamo-provider` job that runs the `#[ignore]`d Dynamo provider tests against a MiniStack service container; Go `build` + `vet` + `go test -race` for `cli/` and `sdks/go/`; `./gradlew build` (incl. JUnit tests) for the Java SDK; `npm run build && npm test` for the Node SDK. Locally, Dynamo tests need MiniStack on :4566 and `-- --ignored`.
 
 **Note:** The Makefile `GO ?=` falls back to `$(HOME)/go-install/go/bin/go` when mise is not active. With mise, `go` is on PATH and the env override takes effect automatically.
 
@@ -208,8 +208,8 @@ CI (`.github/workflows/ci.yml`) runs: Rust `cargo build --all`, `cargo test --al
 | `MAX_LEASE_TTL`, `PREFERRED_LEASE_TTL` | LeaseManager | Seconds (max may be `FOREVER`); defaults 3600 / 300; per-service override `<REGISTRY\|EVENT\|SPACE\|TXN>_MAX_LEASE_TTL` etc. An unparsable value is a startup error; preferred is capped at max |
 | `PROXY_BIND_HOST`, `PROXY_PORT_MIN/MAX` | Proxy | Forwarding bind address and fixed port range |
 | `COORDIN8_JWT_SECRET` | all services | Enables gRPC JWT (HS256) auth; unset = auth off. `COORDIN8_AUTH_VERIFY_SIGNATURE=false` skips signature checks |
-| `COORDIN8_TXN_PARTICIPANT_ALLOW` | TransactionMgr | Opt-in allowlist for `Enlist` participant endpoints (SSRF / token-leak guard). Comma-separated: hostname, `*.suffix`, IP literal, CIDR; optional `:port` on non-CIDR entries. No DNS resolution. Unset = allow all (warns if JWT auth is on). Invalid entry = startup error. Bundled mode always allows its own Space endpoint; split mode must list Space's advertised `host:port` |
-| `COORDIN8_PROXY_UPSTREAM_ALLOW` | Proxy | Allowlist of upstreams the Proxy may forward to; same syntax as `COORDIN8_TXN_PARTICIPANT_ALLOW` (shared `EndpointAllowlist` in `coordin8-core`). Checked on `OpenProxy` and on every forwarded connection against the literal `host:port` and each resolved address; the vetted address is the one dialed. Unset = allow all, **except link-local** (169.254/16, fe80::/10 — cloud metadata), which needs an explicit IP/CIDR entry. Warns if JWT auth is on and it's unset |
+| `COORDIN8_TXN_PARTICIPANT_ALLOW` | TransactionMgr | Opt-in allowlist for `Enlist` participant endpoints (SSRF / token-leak guard). Comma-separated: hostname, `*.suffix`, IP literal, CIDR; optional `:port` on non-CIDR entries. No DNS resolution for matching. Unset = allow all (warns if JWT auth is on), **except metadata ranges**: an endpoint resolving to link-local or `fd00:ec2::/32` is refused unless an IP/CIDR entry names it. Invalid entry = startup error. Bundled mode always allows its own Space endpoint; split mode must list Space's advertised `host:port` |
+| `COORDIN8_PROXY_UPSTREAM_ALLOW` | Proxy | Allowlist of upstreams the Proxy may forward to; same syntax as `COORDIN8_TXN_PARTICIPANT_ALLOW` (shared `EndpointAllowlist` in `coordin8-core`). Checked on `OpenProxy` and on every forwarded connection against the literal `host:port` and each resolved address; the vetted address is the one dialed. Unset = allow all, **except metadata ranges** (169.254/16, fe80::/10, AWS IPv6 metadata `fd00:ec2::/32`), which need an explicit IP/CIDR entry. Warns if JWT auth is on and it's unset |
 | `COORDIN8_PUBLISH_HOST` | compose files | Host interface the compose files publish ports on (default `127.0.0.1`; `0.0.0.0` exposes the Djinn to the network) |
 | `COORDIN8_TOKEN` | CLI | Bearer token (`coordin8 auth mint-token`; CLI also `--token`) |
 | `COORDIN8_LOG_FORMAT` | all services | `json` for one-object-per-line logs (default pretty); level via `RUST_LOG` |

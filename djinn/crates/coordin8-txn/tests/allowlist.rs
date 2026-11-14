@@ -144,3 +144,29 @@ async fn bundled_space_endpoint_is_implicitly_allowed() {
         Code::PermissionDenied
     );
 }
+
+/// L-e (review 2026-11-14): with no allowlist at all, Enlist still refuses
+/// cloud-metadata addresses (link-local, AWS IPv6 metadata) unless an
+/// IP/CIDR entry names them; ordinary endpoints are unaffected.
+#[tokio::test]
+async fn metadata_range_refused_by_default() {
+    let (svc, store) = make(EndpointAllowlist::allow_all(VAR));
+    let txn_id = begin(&svc).await;
+    for ep in ["169.254.169.254:80", "[fd00:ec2::254]:80", "[fe80::1]:80"] {
+        let err = enlist(&svc, &txn_id, ep).await.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "{ep}");
+    }
+    assert!(store
+        .get(&txn_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .participants
+        .is_empty());
+    enlist(&svc, &txn_id, "127.0.0.1:9").await.unwrap();
+
+    // Named explicitly: allowed.
+    let (svc, _) = make(EndpointAllowlist::parse(VAR, "169.254.169.254:80").unwrap());
+    let txn_id = begin(&svc).await;
+    enlist(&svc, &txn_id, "169.254.169.254:80").await.unwrap();
+}
