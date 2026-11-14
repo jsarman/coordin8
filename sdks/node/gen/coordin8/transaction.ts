@@ -81,19 +81,23 @@ export function transactionStateToJSON(object: TransactionState): string {
 }
 
 /**
- * 0 is deliberately not a vote: proto3 decodes an unset field (an empty
- * PrepareResponse) as 0, and that must never count as a yes. The coordinator
- * treats UNSPECIFIED, like any unknown value, as ABORTED.
+ * Every value that ever meant something else decodes as an abort, so a
+ * participant built against older stubs fails safe instead of committing:
+ *   0 — unset (an empty PrepareResponse); before #65 it meant PREPARED.
+ *   1 — reserved; before #65 it meant NOTCHANGED, in #65 PREPARED.
+ *   2 — ABORTED, as it was before #65 (in #65 it meant NOTCHANGED).
+ * The coordinator treats UNSPECIFIED, reserved and unknown values as ABORTED.
+ * Never reuse a number here; add new votes above 4.
  */
 export enum PrepareVote {
   /** VOTE_UNSPECIFIED - no vote; treated as ABORTED */
   VOTE_UNSPECIFIED = 0,
-  /** VOTE_PREPARED - state modified; ready to commit */
-  VOTE_PREPARED = 1,
-  /** VOTE_NOTCHANGED - read-only participant; no action needed at commit */
-  VOTE_NOTCHANGED = 2,
   /** VOTE_ABORTED - cannot commit; transaction must abort */
-  VOTE_ABORTED = 3,
+  VOTE_ABORTED = 2,
+  /** VOTE_PREPARED - state modified; ready to commit */
+  VOTE_PREPARED = 3,
+  /** VOTE_NOTCHANGED - read-only participant; no action needed at commit */
+  VOTE_NOTCHANGED = 4,
   UNRECOGNIZED = -1,
 }
 
@@ -102,15 +106,15 @@ export function prepareVoteFromJSON(object: any): PrepareVote {
     case 0:
     case "VOTE_UNSPECIFIED":
       return PrepareVote.VOTE_UNSPECIFIED;
-    case 1:
-    case "VOTE_PREPARED":
-      return PrepareVote.VOTE_PREPARED;
     case 2:
-    case "VOTE_NOTCHANGED":
-      return PrepareVote.VOTE_NOTCHANGED;
-    case 3:
     case "VOTE_ABORTED":
       return PrepareVote.VOTE_ABORTED;
+    case 3:
+    case "VOTE_PREPARED":
+      return PrepareVote.VOTE_PREPARED;
+    case 4:
+    case "VOTE_NOTCHANGED":
+      return PrepareVote.VOTE_NOTCHANGED;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -122,12 +126,12 @@ export function prepareVoteToJSON(object: PrepareVote): string {
   switch (object) {
     case PrepareVote.VOTE_UNSPECIFIED:
       return "VOTE_UNSPECIFIED";
+    case PrepareVote.VOTE_ABORTED:
+      return "VOTE_ABORTED";
     case PrepareVote.VOTE_PREPARED:
       return "VOTE_PREPARED";
     case PrepareVote.VOTE_NOTCHANGED:
       return "VOTE_NOTCHANGED";
-    case PrepareVote.VOTE_ABORTED:
-      return "VOTE_ABORTED";
     case PrepareVote.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";

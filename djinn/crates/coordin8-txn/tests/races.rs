@@ -255,3 +255,64 @@ async fn empty_prepare_response_aborts() {
         );
     }
 }
+
+/// N2 (review 2026-11-14): wire values an older participant sends must never
+/// read as a yes. 0 was PREPARED and 1 NOTCHANGED before #65; 2 was
+/// NOTCHANGED in #65. Each, next to an honest PREPARED voter, aborts.
+#[tokio::test]
+async fn stale_wire_votes_fail_safe() {
+    struct Raw(i32);
+    #[tonic::async_trait]
+    impl ParticipantService for Raw {
+        async fn prepare(
+            &self,
+            _: Request<ParticipantRequest>,
+        ) -> Result<Response<PrepareResponse>, Status> {
+            Ok(Response::new(PrepareResponse { vote: self.0 }))
+        }
+        async fn commit(&self, _: Request<ParticipantRequest>) -> Result<Response<()>, Status> {
+            Ok(Response::new(()))
+        }
+        async fn abort(&self, _: Request<ParticipantRequest>) -> Result<Response<()>, Status> {
+            Ok(Response::new(()))
+        }
+        async fn prepare_and_commit(
+            &self,
+            _: Request<ParticipantRequest>,
+        ) -> Result<Response<PrepareResponse>, Status> {
+            Ok(Response::new(PrepareResponse { vote: self.0 }))
+        }
+    }
+    async fn serve(vote: i32) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ep = listener.local_addr().unwrap().to_string();
+        tokio::spawn(
+            Server::builder()
+                .add_service(ParticipantServiceServer::new(Raw(vote)))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        ep
+    }
+    let yes = coordin8_proto::coordin8::PrepareVote::VotePrepared as i32;
+    let honest = serve(yes).await;
+    for stale in [0, 1, 2, 99] {
+        let old = serve(stale).await;
+        // Two participants (full 2PC) and one (PrepareAndCommit).
+        for eps in [vec![honest.clone(), old.clone()], vec![old.clone()]] {
+            let (mgr, store) = make_manager();
+            let (txn_id, _) = mgr.begin(60).await.unwrap();
+            for ep in &eps {
+                mgr.enlist(&txn_id, ep.clone(), 0).await.unwrap();
+            }
+            assert!(
+                mgr.commit(&txn_id).await.is_err(),
+                "wire vote {stale} with {} participant(s) committed",
+                eps.len()
+            );
+            assert_ne!(
+                store.get(&txn_id).await.unwrap().unwrap().state,
+                TransactionState::Committed
+            );
+        }
+    }
+}
