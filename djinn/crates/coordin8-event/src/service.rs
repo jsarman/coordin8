@@ -21,6 +21,19 @@ use crate::manager::EventManager;
 /// Map a core error to a gRPC status. "Gone" must be distinguishable from
 /// "broken": a consumer resumes a durable subscription by id, and only a
 /// NotFound tells it to subscribe afresh (anything else, it should retry).
+/// Response header on `Receive` naming the registration's delivery mode,
+/// so a client knows whether to `Ack` at all (best-effort has no mailbox).
+pub const DELIVERY_HEADER: &str = "coordin8-delivery";
+
+fn with_delivery<T>(mut resp: Response<T>, durable: bool) -> Response<T> {
+    let mode = if durable { "durable" } else { "best-effort" };
+    resp.metadata_mut().insert(
+        DELIVERY_HEADER,
+        tonic::metadata::MetadataValue::from_static(mode),
+    );
+    resp
+}
+
 fn map_err(e: coordin8_core::Error) -> Status {
     use coordin8_core::Error as E;
     match e {
@@ -307,7 +320,7 @@ impl EventService for EventServiceImpl {
             let stream = self.shutdown.end_stream(ReceiverStream::new(rx), || {
                 Err(Status::unavailable("server shutting down"))
             });
-            return Ok(Response::new(Box::pin(stream)));
+            return Ok(with_delivery(Response::new(Box::pin(stream)), false));
         }
 
         // The resume cursor acknowledges everything at or below it.
@@ -343,7 +356,7 @@ impl EventService for EventServiceImpl {
         let stream = self.shutdown.end_stream(ReceiverStream::new(rx), || {
             Err(Status::unavailable("server shutting down"))
         });
-        Ok(Response::new(Box::pin(stream)))
+        Ok(with_delivery(Response::new(Box::pin(stream)), true))
     }
 
     async fn ack(&self, req: Request<AckRequest>) -> Result<Response<()>, Status> {
@@ -670,6 +683,40 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::DataLoss);
         // and then the stream is over
         assert!(s.next().await.is_none());
+    }
+
+    /// L-g: Receive names the delivery mode, so clients skip Ack on
+    /// best-effort streams; an Ack that does arrive skips the mailbox.
+    #[tokio::test]
+    async fn receive_names_delivery_mode_and_best_effort_ack_is_cheap() {
+        for (mode, want) in [
+            (DeliveryMode::Durable, "durable"),
+            (DeliveryMode::BestEffort, "best-effort"),
+        ] {
+            let m = manager(mem(), 16);
+            let svc = EventServiceImpl::new(m.clone(), "h", 1);
+            let reg = subscribe(&m, mode.clone()).await;
+            let resp = svc
+                .receive(Request::new(ReceiveRequest {
+                    registration_id: reg.clone(),
+                    after_seq: 0,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.metadata()
+                    .get(DELIVERY_HEADER)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                want
+            );
+            m.ack_through(&reg, 10).await.unwrap();
+        }
+        assert!(matches!(
+            manager(mem(), 16).ack_through("nope", 1).await,
+            Err(coordin8_core::Error::SubscriptionNotFound(_))
+        ));
     }
 
     /// Both delivery modes must end their Receive stream with UNAVAILABLE on

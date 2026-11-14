@@ -76,18 +76,29 @@ func (c *EventClient) Subscribe(ctx context.Context, opts SubscribeOpts) (*Event
 }
 
 // AckInterval is how often Receive acknowledges the events the caller has
-// taken off the channel.
+// finished with.
 const AckInterval = 250 * time.Millisecond
+
+// deliveryHeader is the Receive response header naming the registration's
+// delivery mode ("durable" or "best-effort").
+const deliveryHeader = "coordin8-delivery"
 
 // Receive streams events for a registration until ctx is cancelled or the
 // stream ends (then Err says why).
 //
 // DURABLE registrations are at-least-once: the server keeps each event in
 // the mailbox until it is acknowledged. Receive acknowledges an event once
-// the caller has taken it from the channel (C is unbuffered), in batches
-// every AckInterval and when the stream ends. An event in flight when the
-// connection drops is delivered again on the next Receive, so handle
-// duplicates by SeqNum.
+// the caller has finished with it, which it knows when the caller takes the
+// next one from C (C is unbuffered): taking event N acknowledges everything
+// before N. So consume C from one goroutine and finish each event before
+// taking the next. Acks go out in batches every AckInterval.
+//
+// The last event taken is never acknowledged by Receive (the caller may
+// still be processing it when the stream ends), so it is delivered again on
+// the next Receive. Handle duplicates by SeqNum, or call Ack yourself once
+// you are done with an event to avoid that one redelivery.
+//
+// BEST_EFFORT registrations have no mailbox; Receive sends no acks.
 func (c *EventClient) Receive(ctx context.Context, registrationID string) (*Stream[Event], error) {
 	stream, err := c.client.Receive(ctx, &pb.ReceiveRequest{
 		RegistrationId: registrationID,
@@ -97,12 +108,28 @@ func (c *EventClient) Receive(ctx context.Context, registrationID string) (*Stre
 	}
 
 	var mu sync.Mutex
-	var taken, acked uint64
+	// holding: the event the caller has now. finished: the highest SeqNum
+	// the caller is done with (everything taken before `holding`).
+	var holding, finished, acked uint64
+	durable := true
+	var modeOnce sync.Once
+	isDurable := func() bool {
+		// Only called once an event has arrived, so the headers are in and
+		// Header does not block. No header (older server): ack, to be safe.
+		modeOnce.Do(func() {
+			if md, err := stream.Header(); err == nil {
+				if v := md.Get(deliveryHeader); len(v) > 0 && v[0] == "best-effort" {
+					durable = false
+				}
+			}
+		})
+		return durable
+	}
 	flush := func(ctx context.Context) {
 		mu.Lock()
-		upTo := taken
+		upTo := finished
 		mu.Unlock()
-		if upTo <= acked {
+		if upTo <= acked || !isDurable() {
 			return
 		}
 		if err := c.Ack(ctx, registrationID, upTo); err == nil {
@@ -126,9 +153,10 @@ func (c *EventClient) Receive(ctx context.Context, registrationID string) (*Stre
 		return e, true
 	}, func(e Event) {
 		mu.Lock()
-		if e.SeqNum > taken {
-			taken = e.SeqNum
+		if holding > finished {
+			finished = holding
 		}
+		holding = e.SeqNum
 		mu.Unlock()
 	})
 
