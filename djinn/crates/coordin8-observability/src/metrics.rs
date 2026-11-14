@@ -20,7 +20,7 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use prometheus::{Encoder, HistogramVec, IntCounterVec, Registry, TextEncoder};
+use prometheus::{Encoder, HistogramVec, IntCounterVec, IntGauge, Registry, TextEncoder};
 use tower_http::classify::GrpcFailureClass;
 use tracing::Span;
 
@@ -48,6 +48,24 @@ static REQUESTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
         .expect("registered exactly once, at first use");
     counter
 });
+
+static TXN_UNRESOLVED: LazyLock<IntGauge> = LazyLock::new(|| {
+    let gauge = IntGauge::new(
+        "coordin8_txn_unresolved",
+        "Transactions whose decision (or vote) is not yet delivered to every participant \
+         after the last recovery sweep (Voting/Prepared/Aborting)",
+    )
+    .expect("static metric definition is valid");
+    REGISTRY
+        .register(Box::new(gauge.clone()))
+        .expect("registered exactly once, at first use");
+    gauge
+});
+
+/// Set the `coordin8_txn_unresolved` gauge (TransactionMgr recovery).
+pub fn set_txn_unresolved(n: usize) {
+    TXN_UNRESOLVED.set(n as i64);
+}
 
 static REQUEST_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     let histogram = HistogramVec::new(

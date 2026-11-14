@@ -5,13 +5,13 @@ use std::time::Duration;
 use chrono::Utc;
 use dashmap::DashMap;
 use tokio::sync::broadcast;
-use tracing::debug;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use coordin8_core::shutdown::ShutdownSignal;
 use coordin8_core::{
-    Error, LeaseRecord, Leasing, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord,
-    TxnEnlister,
+    Error, LeaseRecord, Leasing, SpaceEventKind, SpaceStore, SpaceWatchRecord, TransactionState,
+    TupleRecord, TxnApplied, TxnEnlister,
 };
 use coordin8_registry::matcher::{matches, parse_template};
 
@@ -362,25 +362,10 @@ impl SpaceManager {
     /// visible store and broadcast them. Takes under the txn stay removed and
     /// their leases are cancelled.
     pub async fn commit_space_txn(&self, txn_id: &str) -> Result<(), Error> {
-        let (flushed, taken) = self.store.commit_txn(txn_id).await?;
-        self.enlisted.remove(txn_id);
-
-        // Tuples taken under the txn are consumed: cancel their leases.
-        for record in &taken {
-            let _ = self.lease_manager.cancel(&record.lease_id).await;
-        }
-
-        // Broadcast all newly visible tuples to wake blocked readers/takers.
-        for record in &flushed {
-            let _ = self.tuple_tx.send(record.clone());
-        }
-
-        debug!(
-            txn_id,
-            flushed = flushed.len(),
-            taken = taken.len(),
-            "space txn committed"
-        );
+        let applied = self.store.commit_txn(txn_id).await;
+        let (flushed, taken) = (applied.published.len(), applied.released.len());
+        self.settle(applied, txn_id).await?;
+        debug!(txn_id, flushed, taken, "space txn committed");
         Ok(())
     }
 
@@ -388,26 +373,86 @@ impl SpaceManager {
     /// their leases) and restore taken tuples back to the visible store.
     /// Restored tuples are broadcast to wake any blocked readers/takers.
     pub async fn abort_space_txn(&self, txn_id: &str) -> Result<(), Error> {
-        let (discarded, restored) = self.store.abort_txn(txn_id).await?;
-        self.enlisted.remove(txn_id);
+        let applied = self.store.abort_txn(txn_id).await;
+        let (restored, discarded) = (applied.published.len(), applied.released.len());
+        self.settle(applied, txn_id).await?;
+        debug!(txn_id, discarded, restored, "space txn aborted");
+        Ok(())
+    }
 
-        // Cancel leases on discarded uncommitted tuples.
-        for record in &discarded {
+    /// Act on whatever a commit/abort moved, even when part of it failed:
+    /// tuples that became visible are broadcast (wake blocked readers and
+    /// takers), tuples gone for good have their leases cancelled. On a
+    /// partial failure the rest stays buffered and the error goes back to the
+    /// coordinator, which re-sends; the replay moves only what is left.
+    async fn settle(&self, applied: TxnApplied, txn_id: &str) -> Result<(), Error> {
+        for record in &applied.released {
             let _ = self.lease_manager.cancel(&record.lease_id).await;
         }
-
-        // Broadcast restored tuples — wake blocked read/take waiters.
-        for record in &restored {
+        for record in &applied.published {
             let _ = self.tuple_tx.send(record.clone());
         }
+        match applied.error {
+            None => {
+                self.enlisted.remove(txn_id);
+                Ok(())
+            }
+            Some(e) => Err(e),
+        }
+    }
 
-        debug!(
-            txn_id,
-            discarded = discarded.len(),
-            restored = restored.len(),
-            "space txn aborted"
-        );
-        Ok(())
+    /// Finish every transaction this Space holds state for whose outcome the
+    /// coordinator has already decided, without waiting to be told: the
+    /// participant's half of recovery. Covers a Commit/Abort that never
+    /// arrived (Space down at the time, or now on a different endpoint the
+    /// coordinator can't reach). Committed or Prepared (the decision is
+    /// commit) -> commit locally; aborted or no record -> abort locally;
+    /// Active/Voting -> still undecided, leave it. Returns how many it
+    /// finished. A no-op without an enlister (no transactions at all).
+    pub async fn reconcile_txns(&self) -> Result<usize, Error> {
+        let Some(enlister) = &self.enlister else {
+            return Ok(0);
+        };
+        let mut done = 0;
+        for txn_id in self.store.list_txns().await? {
+            let state = match enlister.state(&txn_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!(txn_id, error = %e, "reconcile: coordinator unreachable, retry later");
+                    continue;
+                }
+            };
+            let result = match &state {
+                Some(TransactionState::Committed | TransactionState::Prepared) => {
+                    self.commit_space_txn(&txn_id).await
+                }
+                Some(s) if s.is_abort() => self.abort_space_txn(&txn_id).await,
+                None => self.abort_space_txn(&txn_id).await,
+                Some(_) => continue,
+            };
+            match result {
+                Ok(()) => {
+                    done += 1;
+                    info!(txn_id, ?state, "reconciled space txn with coordinator");
+                }
+                Err(e) => warn!(txn_id, error = %e, "reconcile failed, retry later"),
+            }
+        }
+        Ok(done)
+    }
+
+    /// Run [`Self::reconcile_txns`] every `interval` (first pass after one
+    /// interval: on boot the coordinator may not be reachable yet).
+    pub fn spawn_txn_reconcile(self: &Arc<Self>, interval: Duration) {
+        let mgr = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                if let Err(e) = mgr.reconcile_txns().await {
+                    warn!(error = %e, "space txn reconcile sweep failed");
+                }
+            }
+        });
     }
 
     /// Check if this Space has any uncommitted state for the given transaction.

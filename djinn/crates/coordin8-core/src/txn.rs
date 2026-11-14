@@ -9,7 +9,20 @@ pub enum TransactionState {
     Voting,
     Prepared,
     Committed,
+    /// Decided abort, but not every participant has acked its Abort yet —
+    /// the mirror of `Prepared`. Recovery re-sends Abort until all ack, then
+    /// moves it to `Aborted`. Never expires (like `Prepared`), so a
+    /// participant asking later always gets the decision. Clients see it as
+    /// ABORTED.
+    Aborting,
     Aborted,
+}
+
+impl TransactionState {
+    /// The decision is abort (whether or not every participant knows yet).
+    pub fn is_abort(&self) -> bool {
+        matches!(self, Self::Aborting | Self::Aborted)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +70,11 @@ pub struct TransactionRecord {
 #[async_trait]
 pub trait TxnEnlister: Send + Sync {
     async fn enlist(&self, txn_id: &str, endpoint: &str) -> Result<(), Error>;
+
+    /// The transaction's state as the coordinator records it, `None` if it
+    /// has no record. Lets a participant finish a transaction whose
+    /// Commit/Abort never reached it (see `SpaceManager::reconcile_txns`).
+    async fn state(&self, txn_id: &str) -> Result<Option<TransactionState>, Error>;
 }
 
 #[async_trait]

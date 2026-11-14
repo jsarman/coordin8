@@ -27,6 +27,27 @@ pub struct SpaceWatchRecord {
     pub handback: Vec<u8>,
 }
 
+/// What a transaction commit or abort moved out of its buffers.
+///
+/// Each tuple moves on its own, so a failure part-way leaves the rest
+/// buffered for a retry (the coordinator re-sends Commit/Abort). Whatever is
+/// listed here did move and must still be acted on, error or not.
+#[derive(Debug, Default)]
+pub struct TxnApplied {
+    /// Tuples that became visible: broadcast them to wake blocked readers.
+    pub published: Vec<TupleRecord>,
+    /// Tuples gone for good (taken, or discarded writes): cancel their leases.
+    pub released: Vec<TupleRecord>,
+    /// The first failure, if any. Moves after it were still attempted.
+    pub error: Option<Error>,
+}
+
+impl TxnApplied {
+    pub fn fail(&mut self, e: Error) {
+        self.error.get_or_insert(e);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpaceEventKind {
     Appearance,
@@ -80,21 +101,27 @@ pub trait SpaceStore: Send + Sync {
         txn_id: Option<&str>,
     ) -> Result<Vec<TupleRecord>, Error>;
 
-    /// Commit a transaction: flush uncommitted writes to the visible store,
-    /// finalize takes (stay removed). Returns (flushed, taken).
-    /// Flushed tuples need broadcasting; taken tuples (including the txn's own
-    /// uncommitted writes it took) need lease cleanup.
-    async fn commit_txn(&self, txn_id: &str)
-        -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error>;
+    /// Commit a transaction: flush uncommitted writes to the visible store
+    /// (`published`), finalize takes, which stay removed (`released`,
+    /// including the txn's own writes it took).
+    ///
+    /// Must be safe to repeat and to run concurrently with itself: recovery
+    /// re-sends Commit, and a tuple moved once must never be moved again (a
+    /// replay that re-publishes a tuple someone has since taken would hand it
+    /// out twice).
+    async fn commit_txn(&self, txn_id: &str) -> TxnApplied;
 
-    /// Abort a transaction: discard uncommitted writes (including own writes the
-    /// txn took), restore tuples taken from the committed store.
-    /// Returns (discarded_uncommitted, restored_taken).
-    /// Discarded tuples need lease cleanup; restored tuples need broadcasting.
-    async fn abort_txn(&self, txn_id: &str) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error>;
+    /// Abort a transaction: discard uncommitted writes and own writes the txn
+    /// took (`released`), restore tuples taken from the committed store
+    /// (`published`). Same repeat/concurrency contract as [`Self::commit_txn`].
+    async fn abort_txn(&self, txn_id: &str) -> TxnApplied;
 
     /// Check if this store has any uncommitted state for the given transaction.
     async fn has_txn(&self, txn_id: &str) -> Result<bool, Error>;
+
+    /// Every transaction this store holds buffered state for (writes or
+    /// takes), deduplicated. Used to reconcile against the coordinator.
+    async fn list_txns(&self) -> Result<Vec<String>, Error>;
 
     /// List all tuples (for debugging/tests).
     async fn list_all(&self) -> Result<Vec<TupleRecord>, Error>;

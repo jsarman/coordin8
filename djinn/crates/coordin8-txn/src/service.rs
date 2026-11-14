@@ -40,7 +40,9 @@ fn state_to_proto(s: &TransactionState) -> i32 {
         TransactionState::Voting => 1,
         TransactionState::Prepared => 2,
         TransactionState::Committed => 3,
-        TransactionState::Aborted => 4,
+        // Decided; participants still being told. Clients only need the
+        // decision.
+        TransactionState::Aborting | TransactionState::Aborted => 4,
     }
 }
 
