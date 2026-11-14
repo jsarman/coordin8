@@ -156,26 +156,26 @@ impl TxnManager {
     /// the allowlist names that address — the same default the Proxy
     /// applies to upstreams, and in force even when no allowlist is set.
     /// Resolution is bounded; an endpoint that does not resolve now is let
-    /// through (dialing it would fail anyway).
+    /// through. Every dial re-vets ([`Dialer::client`]), so this only
+    /// refuses early.
     async fn refuse_metadata_range(&self, endpoint: &str) -> Result<(), Error> {
-        let addrs =
-            match tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(endpoint))
-                .await
-            {
-                Ok(Ok(addrs)) => addrs,
-                _ => return Ok(()),
-            };
-        for a in addrs {
-            if is_metadata_range(a.ip()) && !self.allowlist.explicitly_allows_ip(a.ip(), a.port()) {
-                return Err(Error::PermissionDenied(format!(
-                    "participant endpoint '{endpoint}' resolves to {} (link-local / metadata range); \
-                     name it in {} to allow",
-                    a.ip(),
-                    self.allowlist.var()
-                )));
-            }
+        let addrs = match resolve(endpoint).await {
+            Ok(addrs) => addrs,
+            Err(_) => return Ok(()),
+        };
+        if let Some(bad) = addrs.iter().find(|a| {
+            is_metadata_range(a.ip()) && !self.allowlist.explicitly_allows_ip(a.ip(), a.port())
+        }) {
+            return Err(metadata_refusal(endpoint, bad, &self.allowlist));
         }
         Ok(())
+    }
+
+    fn dialer(&self) -> Dialer {
+        Dialer {
+            auth: self.client_auth.clone(),
+            allow: self.allowlist.clone(),
+        }
     }
 
     pub async fn get_state(&self, txn_id: &str) -> Result<TransactionState, Error> {
@@ -232,8 +232,10 @@ impl TxnManager {
         }
 
         // Enlists are rejected from here on, so this list is final.
-        if let Some(txn) = self.store.get(txn_id).await? {
-            self.deliver_abort(&txn).await?;
+        match self.store.get(txn_id).await {
+            Ok(Some(txn)) => self.deliver_abort_or_defer(&txn).await,
+            Ok(None) => {}
+            Err(e) => warn!(txn_id, error = %e, "abort decided; recovery will deliver it"),
         }
         debug!(txn_id, "transaction aborted (lease expired)");
         Ok(())
@@ -252,9 +254,15 @@ impl TxnManager {
             };
         }
 
-        let txn = self.fetch(txn_id).await?;
-        self.lease_manager.cancel(&txn.lease_id).await.ok();
-        self.deliver_abort(&txn).await?;
+        // Aborting is recorded: the answer is "aborted" whatever happens
+        // next. Recovery finishes anything left undelivered.
+        match self.fetch(txn_id).await {
+            Ok(txn) => {
+                self.lease_manager.cancel(&txn.lease_id).await.ok();
+                self.deliver_abort_or_defer(&txn).await;
+            }
+            Err(e) => warn!(txn_id, error = %e, "abort decided; recovery will deliver it"),
+        }
         debug!(txn_id, "transaction aborted");
         Ok(())
     }
@@ -313,7 +321,7 @@ impl TxnManager {
         // ── Single-participant optimization: PrepareAndCommit ─────────────────
         if participants.len() == 1 {
             let ep = &participants[0].endpoint;
-            match Self::call_prepare_and_commit(ep, txn_id, &self.client_auth).await {
+            match Self::call_prepare_and_commit(ep, txn_id, &self.dialer()).await {
                 Ok(PrepareVote::Prepared) | Ok(PrepareVote::NotChanged) => {
                     self.transition(
                         txn_id,
@@ -332,9 +340,10 @@ impl TxnManager {
                     warn!(txn_id, endpoint = %ep, "single participant voted ABORTED");
                     return Err(Error::TransactionAborted(txn_id.to_string()));
                 }
-                Err(Error::Unavailable(e)) => {
-                    // Never connected, so the participant never saw the
-                    // request: aborting is safe and final.
+                Err(e @ (Error::Unavailable(_) | Error::PermissionDenied(_))) => {
+                    // Never connected (unreachable, or the dial was refused),
+                    // so the participant never saw the request: aborting is
+                    // safe and final.
                     // It still holds the txn's state, though, and must be
                     // told: Aborting until recovery delivers the Abort.
                     warn!(txn_id, endpoint = %ep, error = %e, "participant unreachable — aborting");
@@ -364,9 +373,9 @@ impl TxnManager {
             .map(|p| {
                 let ep = p.endpoint.clone();
                 let tid = txn_id.to_string();
-                let client_auth = self.client_auth.clone();
+                let dial = self.dialer();
                 async move {
-                    let result = Self::call_prepare(&ep, &tid, &client_auth).await;
+                    let result = Self::call_prepare(&ep, &tid, &dial).await;
                     (ep, result)
                 }
             })
@@ -397,7 +406,7 @@ impl TxnManager {
             self.transition(txn_id, TransactionState::Voting, TransactionState::Aborting)
                 .await?;
             self.lease_manager.cancel(&txn.lease_id).await.ok();
-            self.deliver_abort(&txn).await?;
+            self.deliver_abort_or_defer(&txn).await;
             return Err(Error::TransactionAborted(txn_id.to_string()));
         }
 
@@ -410,8 +419,8 @@ impl TxnManager {
             .map(|ep| {
                 let ep = ep.clone();
                 let tid = txn_id.to_string();
-                let client_auth = self.client_auth.clone();
-                async move { Self::call_commit(&ep, &tid, &client_auth).await }
+                let dial = self.dialer();
+                async move { Self::call_commit(&ep, &tid, &dial).await }
             })
             .collect();
 
@@ -590,8 +599,8 @@ impl TxnManager {
         match txn.state {
             TransactionState::Prepared => {
                 let acks = join_all(txn.participants.iter().map(|p| {
-                    let client_auth = self.client_auth.clone();
-                    async move { Self::call_commit(&p.endpoint, id, &client_auth).await }
+                    let dial = self.dialer();
+                    async move { Self::call_commit(&p.endpoint, id, &dial).await }
                 }))
                 .await;
                 if let Some(e) = acks.into_iter().find_map(Result::err) {
@@ -603,7 +612,7 @@ impl TxnManager {
             }
             TransactionState::Voting if txn.participants.len() == 1 => {
                 let ep = &txn.participants[0].endpoint;
-                match Self::call_prepare_and_commit(ep, id, &self.client_auth).await {
+                match Self::call_prepare_and_commit(ep, id, &self.dialer()).await {
                     Ok(PrepareVote::Prepared) | Ok(PrepareVote::NotChanged) => {
                         self.finish(txn, TransactionState::Voting, TransactionState::Committed)
                             .await
@@ -681,27 +690,12 @@ impl TxnManager {
 
     // ── Outbound gRPC helpers (static — no self needed) ───────────────────────
 
-    fn connect_to(host_port: &str) -> Result<tonic::transport::Endpoint, Error> {
-        let uri = format!("http://{}", host_port);
-        tonic::transport::Channel::from_shared(uri)
-            .map_err(|e| Error::Internal(format!("invalid endpoint '{}': {}", host_port, e)))
-            .map(|ep| {
-                ep.connect_timeout(Duration::from_secs(5))
-                    .timeout(Duration::from_secs(10))
-            })
-    }
-
     async fn call_prepare(
         endpoint: &str,
         txn_id: &str,
-        client_auth: &ClientAuthConfig,
+        dial: &Dialer,
     ) -> Result<PrepareVote, Error> {
-        let channel = Self::connect_to(endpoint)?
-            .connect()
-            .await
-            .map_err(|e| Error::Unavailable(format!("connect to {} failed: {}", endpoint, e)))?;
-
-        let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
+        let mut client = dial.client(endpoint).await?;
         let resp = client
             .prepare(ParticipantRequest {
                 txn_id: txn_id.to_string(),
@@ -712,17 +706,8 @@ impl TxnManager {
         Ok(vote_from_i32(resp.into_inner().vote))
     }
 
-    async fn call_commit(
-        endpoint: &str,
-        txn_id: &str,
-        client_auth: &ClientAuthConfig,
-    ) -> Result<(), Error> {
-        let channel = Self::connect_to(endpoint)?
-            .connect()
-            .await
-            .map_err(|e| Error::Unavailable(format!("connect to {} failed: {}", endpoint, e)))?;
-
-        let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
+    async fn call_commit(endpoint: &str, txn_id: &str, dial: &Dialer) -> Result<(), Error> {
+        let mut client = dial.client(endpoint).await?;
         client
             .commit(ParticipantRequest {
                 txn_id: txn_id.to_string(),
@@ -732,17 +717,8 @@ impl TxnManager {
         Ok(())
     }
 
-    async fn call_abort(
-        endpoint: &str,
-        txn_id: &str,
-        client_auth: &ClientAuthConfig,
-    ) -> Result<(), Error> {
-        let channel = Self::connect_to(endpoint)?
-            .connect()
-            .await
-            .map_err(|e| Error::Unavailable(format!("connect to {} failed: {}", endpoint, e)))?;
-
-        let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
+    async fn call_abort(endpoint: &str, txn_id: &str, dial: &Dialer) -> Result<(), Error> {
+        let mut client = dial.client(endpoint).await?;
         client
             .abort(ParticipantRequest {
                 txn_id: txn_id.to_string(),
@@ -755,14 +731,9 @@ impl TxnManager {
     async fn call_prepare_and_commit(
         endpoint: &str,
         txn_id: &str,
-        client_auth: &ClientAuthConfig,
+        dial: &Dialer,
     ) -> Result<PrepareVote, Error> {
-        let channel = Self::connect_to(endpoint)?
-            .connect()
-            .await
-            .map_err(|e| Error::Unavailable(format!("connect to {} failed: {}", endpoint, e)))?;
-
-        let mut client = ParticipantServiceClient::new(wrap_channel(channel, client_auth));
+        let mut client = dial.client(endpoint).await?;
         let resp = client
             .prepare_and_commit(ParticipantRequest {
                 txn_id: txn_id.to_string(),
@@ -778,6 +749,15 @@ impl TxnManager {
         Ok(vote_from_i32(resp.into_inner().vote))
     }
 
+    /// [`Self::deliver_abort`] for a caller whose answer is already fixed
+    /// (the `Aborting` CAS won): a failure to deliver or to record
+    /// `Aborted` is recovery's to finish, not an error for the caller.
+    async fn deliver_abort_or_defer(&self, txn: &TransactionRecord) {
+        if let Err(e) = self.deliver_abort(txn).await {
+            warn!(txn_id = %txn.txn_id, error = %e, "abort decided; recovery will finish it");
+        }
+    }
+
     /// Send Abort to every participant of a transaction in `Aborting`, in
     /// parallel. When all ack, move it to `Aborted`; otherwise it stays
     /// `Aborting` and recovery re-sends. `Some(Aborted)` when finished.
@@ -787,9 +767,9 @@ impl TxnManager {
     ) -> Result<Option<TransactionState>, Error> {
         let id = txn.txn_id.as_str();
         let acks = join_all(txn.participants.iter().map(|p| {
-            let client_auth = self.client_auth.clone();
+            let dial = self.dialer();
             async move {
-                let r = Self::call_abort(&p.endpoint, id, &client_auth).await;
+                let r = Self::call_abort(&p.endpoint, id, &dial).await;
                 if let Err(e) = &r {
                     warn!(txn_id = id, endpoint = %p.endpoint, error = %e, "abort not acked yet — recovery will re-send");
                 }
@@ -849,4 +829,78 @@ impl coordin8_core::TxnEnlister for LocalTxnEnlister {
             Err(e) => Err(e),
         }
     }
+}
+
+/// How the coordinator reaches participants: outbound auth plus the
+/// participant allowlist. Each dial resolves the endpoint once, drops any
+/// cloud-metadata address the allowlist does not name explicitly, and
+/// connects to exactly the address it vetted, so a DNS answer that changes
+/// after the check (or after Enlist) cannot redirect the call.
+#[derive(Clone)]
+struct Dialer {
+    auth: ClientAuthConfig,
+    allow: EndpointAllowlist,
+}
+
+impl Dialer {
+    async fn client(
+        &self,
+        endpoint: &str,
+    ) -> Result<ParticipantServiceClient<coordin8_observability::TracedAuthedChannel>, Error> {
+        let addrs = resolve(endpoint)
+            .await
+            .map_err(|e| Error::Unavailable(format!("resolve {endpoint} failed: {e}")))?;
+        let allowed = |a: &std::net::SocketAddr| {
+            !is_metadata_range(a.ip()) || self.allow.explicitly_allows_ip(a.ip(), a.port())
+        };
+        let vetted: Vec<std::net::SocketAddr> = addrs.iter().copied().filter(allowed).collect();
+        if vetted.is_empty() {
+            return Err(match addrs.first() {
+                Some(bad) => metadata_refusal(endpoint, bad, &self.allow),
+                None => Error::Unavailable(format!("{endpoint} resolved to no address")),
+            });
+        }
+        let mut last = String::new();
+        for addr in vetted {
+            let ep = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+                .map_err(|e| Error::Internal(format!("invalid endpoint '{addr}': {e}")))?
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10));
+            match ep.connect().await {
+                Ok(channel) => {
+                    return Ok(ParticipantServiceClient::new(wrap_channel(
+                        channel, &self.auth,
+                    )))
+                }
+                Err(e) => last = format!("{addr}: {e}"),
+            }
+        }
+        Err(Error::Unavailable(format!(
+            "connect to {endpoint} failed ({last})"
+        )))
+    }
+}
+
+/// Resolve `host:port`, bounded at 2s.
+async fn resolve(endpoint: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    match tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(endpoint)).await {
+        Ok(r) => r.map(Iterator::collect),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "dns timeout",
+        )),
+    }
+}
+
+fn metadata_refusal(
+    endpoint: &str,
+    bad: &std::net::SocketAddr,
+    allow: &EndpointAllowlist,
+) -> Error {
+    Error::PermissionDenied(format!(
+        "participant endpoint '{endpoint}' resolves to {} (link-local / metadata range); \
+         name it in {} to allow",
+        bad.ip(),
+        allow.var()
+    ))
 }

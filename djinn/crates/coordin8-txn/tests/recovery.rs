@@ -466,3 +466,122 @@ async fn recovery_sends_no_abort_when_its_cas_loses() {
     assert_eq!(b.aborts.load(Ordering::SeqCst), 0);
     assert_eq!(state(&real, &txn_id).await, TransactionState::Prepared);
 }
+
+/// Fails the last write of an abort (`Aborting` → `Aborted`) while `fail` is set.
+struct FailFinish {
+    real: Arc<InMemoryTxnStore>,
+    fail: AtomicBool,
+}
+
+#[tonic::async_trait]
+impl TxnStore for FailFinish {
+    async fn create(&self, r: coordin8_core::TransactionRecord) -> Result<(), Error> {
+        self.real.create(r).await
+    }
+    async fn get(&self, id: &str) -> Result<Option<coordin8_core::TransactionRecord>, Error> {
+        self.real.get(id).await
+    }
+    async fn update_state(&self, id: &str, s: TransactionState) -> Result<(), Error> {
+        self.real.update_state(id, s).await
+    }
+    async fn update_state_if(
+        &self,
+        id: &str,
+        expected: TransactionState,
+        new: TransactionState,
+    ) -> Result<bool, Error> {
+        if new == TransactionState::Aborted && self.fail.load(Ordering::SeqCst) {
+            return Err(Error::Storage("injected write failure".into()));
+        }
+        self.real.update_state_if(id, expected, new).await
+    }
+    async fn add_participant(
+        &self,
+        id: &str,
+        p: coordin8_core::ParticipantRecord,
+    ) -> Result<(), Error> {
+        self.real.add_participant(id, p).await
+    }
+    async fn remove(&self, id: &str) -> Result<(), Error> {
+        self.real.remove(id).await
+    }
+    async fn list_all(&self) -> Result<Vec<coordin8_core::TransactionRecord>, Error> {
+        self.real.list_all().await
+    }
+}
+
+fn make_fail_finish() -> (Arc<TxnManager>, Arc<FailFinish>, Arc<InMemoryTxnStore>) {
+    let (tx, _) = tokio::sync::broadcast::channel(256);
+    let lm: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
+        Arc::new(InMemoryLeaseStore::new()),
+        coordin8_core::LeaseConfig::default(),
+        tx,
+    ));
+    let real = Arc::new(InMemoryTxnStore::new());
+    let store = Arc::new(FailFinish {
+        real: real.clone(),
+        fail: AtomicBool::new(true),
+    });
+    let mgr = TxnManager::new(store.clone(), lm).with_recovery_backoff(Duration::ZERO);
+    (Arc::new(mgr), store, real)
+}
+
+/// Round 3 (review 2026-11-14): once `Aborting` is recorded the answer is
+/// "aborted"; a failed final write is recovery's to finish, not an
+/// internal error for the caller.
+#[tokio::test]
+async fn abort_answer_survives_failed_final_write() {
+    // commit(): one participant down, so prepare fails and the txn aborts.
+    let (mgr, store, real) = make_fail_finish();
+    let up = Arc::new(Flaky::default());
+    let up_ep = spawn(up.clone()).await;
+    let (down_ep, _hold) = reserve().await;
+    drop(_hold);
+    let (txn_id, _) = mgr.begin(60).await.unwrap();
+    mgr.enlist(&txn_id, up_ep.clone(), 0).await.unwrap();
+    mgr.enlist(&txn_id, down_ep, 0).await.unwrap();
+    let err = mgr.commit(&txn_id).await.unwrap_err();
+    assert!(matches!(err, Error::TransactionAborted(_)), "got {err:?}");
+    assert_eq!(state(&real, &txn_id).await, TransactionState::Aborting);
+
+    // abort(): same, explicitly.
+    let (txn2, _) = mgr.begin(60).await.unwrap();
+    mgr.enlist(&txn2, up_ep, 0).await.unwrap();
+    mgr.abort(&txn2).await.unwrap();
+    assert_eq!(state(&real, &txn2).await, TransactionState::Aborting);
+    assert!(
+        up.aborts.load(Ordering::SeqCst) >= 2,
+        "abort was still delivered"
+    );
+
+    // Store healthy again: recovery finishes the reachable one.
+    store.fail.store(false, Ordering::SeqCst);
+    mgr.recover().await.unwrap();
+    assert_eq!(state(&real, &txn2).await, TransactionState::Aborted);
+}
+
+/// The dial re-vets the endpoint (round 3, enlist DNS): an address that
+/// resolves into the metadata range at dial time is refused without
+/// connecting, and for a single participant that means abort, not
+/// "outcome unknown".
+#[tokio::test]
+async fn refused_dial_aborts_single_participant() {
+    let (mgr, store) = make_manager();
+    let (txn_id, _) = mgr.begin(60).await.unwrap();
+    // Bypass Enlist's check, as a DNS answer that changed after it would.
+    store
+        .add_participant(
+            &txn_id,
+            coordin8_core::ParticipantRecord {
+                endpoint: "169.254.169.254:9".into(),
+                crash_count: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let err = tokio::time::timeout(Duration::from_secs(3), mgr.commit(&txn_id))
+        .await
+        .expect("refused before any connect attempt")
+        .unwrap_err();
+    assert!(matches!(err, Error::TransactionAborted(_)), "got {err:?}");
+}
