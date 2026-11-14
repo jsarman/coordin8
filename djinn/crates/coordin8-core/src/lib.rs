@@ -8,7 +8,7 @@ pub mod space;
 pub mod txn;
 
 pub use allowlist::{
-    is_link_local, EndpointAllowlist, PROXY_UPSTREAM_ALLOW_VAR, TXN_PARTICIPANT_ALLOW_VAR,
+    is_metadata_range, EndpointAllowlist, PROXY_UPSTREAM_ALLOW_VAR, TXN_PARTICIPANT_ALLOW_VAR,
 };
 pub use error::Error;
 pub use event::{DeliveryMode, EventRecord, EventStore, SubscriptionRecord};
