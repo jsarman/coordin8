@@ -8,15 +8,17 @@ use coordin8_proto::coordin8::{Lease, OpenRequest, ProxyHandle, ReleaseRequest};
 
 use crate::manager::{ProxyError, ProxyManager};
 
-/// Map a proxy error to a gRPC status. A `Store` error wrapping
-/// `Unavailable` gets its own code (the dependency isn't ready yet, safe to
-/// retry) rather than falling into the generic `not_found` bucket used for
-/// everything else here.
+/// Map a proxy error to a gRPC status: a refused upstream is
+/// `PERMISSION_DENIED`, an exhausted port range `RESOURCE_EXHAUSTED`, and a
+/// dependency that isn't ready (`Store(Unavailable)`, I/O) `UNAVAILABLE`.
 fn map_err(e: ProxyError) -> Status {
     match e {
         ProxyError::Store(coordin8_core::error::Error::Unavailable(_)) => {
             Status::unavailable(e.to_string())
         }
+        ProxyError::Forbidden(_) => Status::permission_denied(e.to_string()),
+        ProxyError::PortRangeExhausted => Status::resource_exhausted(e.to_string()),
+        ProxyError::Io(_) => Status::unavailable(e.to_string()),
         _ => Status::not_found(e.to_string()),
     }
 }

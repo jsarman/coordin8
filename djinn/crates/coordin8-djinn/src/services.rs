@@ -23,6 +23,7 @@ use tracing::{info, warn};
 use crate::sweep::{self, Held};
 use coordin8_auth::AuthConfig;
 use coordin8_bootstrap::{self_register, RemoteCapabilityResolver, RemoteTxnEnlister};
+use coordin8_core::{EndpointAllowlist, PROXY_UPSTREAM_ALLOW_VAR, TXN_PARTICIPANT_ALLOW_VAR};
 use coordin8_core::{
     EventStore, LeaseReclaimed, LeaseStore, Leasing, RegistryStore, SpaceStore, TransactionState,
     TxnStore,
@@ -44,9 +45,7 @@ use coordin8_proxy::{LocalCapabilityResolver, ProxyConfig, ProxyManager, ProxySe
 use coordin8_registry::service::RegistryBroadcast;
 use coordin8_registry::{store::RegistryIndex, RegistryServiceImpl};
 use coordin8_space::{SpaceManager, SpaceParticipantService, SpaceServiceImpl};
-use coordin8_txn::{
-    LocalTxnEnlister, ParticipantAllowlist, TxnManager, TxnServiceImpl, ALLOW_ENV_VAR,
-};
+use coordin8_txn::{LocalTxnEnlister, TxnManager, TxnServiceImpl};
 use tonic_health::ServingStatus;
 
 // ── Env var helpers (pub for tests) ──────────────────────────────────────────
@@ -60,8 +59,9 @@ use tonic_health::ServingStatus;
 fn txn_participant_allowlist(
     auth_enabled: bool,
     implicit: Option<&str>,
-) -> Result<ParticipantAllowlist> {
-    let allowlist = ParticipantAllowlist::from_env().map_err(|e| anyhow::anyhow!(e))?;
+) -> Result<EndpointAllowlist> {
+    const ALLOW_ENV_VAR: &str = TXN_PARTICIPANT_ALLOW_VAR;
+    let allowlist = EndpointAllowlist::from_env(ALLOW_ENV_VAR).map_err(|e| anyhow::anyhow!(e))?;
     if auth_enabled && allowlist.is_allow_all() {
         warn!(
             "{ALLOW_ENV_VAR} is not set while JWT auth is enabled: TransactionMgr will dial \
@@ -79,6 +79,24 @@ fn txn_participant_allowlist(
             .map_err(|e| anyhow::anyhow!(e)),
         None => Ok(allowlist),
     }
+}
+
+/// Read the Proxy's config (`PROXY_*`, `COORDIN8_PROXY_UPSTREAM_ALLOW`;
+/// fail-fast on invalid entries). Warns when no upstream allowlist is set
+/// while auth is on: JWT guards `OpenProxy`, but anyone who can register an
+/// entry can still point the proxy at any non-link-local host.
+fn proxy_config(auth_enabled: bool) -> Result<ProxyConfig> {
+    let config = ProxyConfig::from_env().map_err(|e| anyhow::anyhow!(e))?;
+    if auth_enabled && config.upstream_allow.is_allow_all() {
+        warn!(
+            "{PROXY_UPSTREAM_ALLOW_VAR} is not set while JWT auth is enabled: the Proxy will \
+             forward to ANY host:port a Registry entry advertises (link-local addresses \
+             excepted), so any caller that can Register can tunnel through the Djinn. Set \
+             {PROXY_UPSTREAM_ALLOW_VAR} to the hostnames, *.suffix wildcards, IPs or CIDRs \
+             (optional :port) your services run on."
+        );
+    }
+    Ok(config)
 }
 
 pub fn bind_addr() -> String {
@@ -662,7 +680,7 @@ fn spawn_space_sweep(
 }
 
 /// Only Active transactions: a finished one legitimately outlives its lease,
-/// and `abort_expired` would ignore it anyway.
+/// and `on_lease_reclaimed` would ignore it anyway.
 fn spawn_txn_sweep(leases: &Arc<LeaseManager>, store: Arc<dyn TxnStore>, manager: Arc<TxnManager>) {
     sweep::spawn_orphan_sweep(
         "txn",
@@ -682,7 +700,7 @@ fn spawn_txn_sweep(leases: &Arc<LeaseManager>, store: Arc<dyn TxnStore>, manager
         move |held: Held| {
             let manager = Arc::clone(&manager);
             async move {
-                let _ = manager.abort_expired(&held.id).await;
+                let _ = manager.on_lease_reclaimed(&held.id, &held.lease_id).await;
             }
         },
     );
@@ -790,7 +808,7 @@ pub async fn run_all() -> Result<()> {
     // reclaimed lease (expiry or cancel) closes that proxy's listener.
     let (proxy_lease_manager, lease_svc_for_proxy) =
         embedded_landlord("proxy", &host, 9003, &auth_config, &shutdown_sig).await?;
-    let proxy_config = ProxyConfig::from_env();
+    let proxy_config = proxy_config(auth_config.enabled())?;
     let proxy_resolver = Arc::new(LocalCapabilityResolver::new(registry_store));
     let proxy_leasing: Arc<dyn Leasing> = proxy_lease_manager.clone();
     let proxy_manager = Arc::new(ProxyManager::new(
@@ -827,7 +845,7 @@ pub async fn run_all() -> Result<()> {
                     let mgr = Arc::clone(&txn_expiry_mgr);
                     let txn_id = txn_id.to_string();
                     tokio::spawn(async move {
-                        let _ = mgr.abort_expired(&txn_id).await;
+                        let _ = mgr.on_lease_reclaimed(&txn_id, &record.lease_id).await;
                     });
                 }
             },
@@ -1555,7 +1573,7 @@ pub async fn run_txn_on_listener_until(
                     let mgr = Arc::clone(&expiry_txn_mgr);
                     let txn_id = txn_id.to_string();
                     tokio::spawn(async move {
-                        let _ = mgr.abort_expired(&txn_id).await;
+                        let _ = mgr.on_lease_reclaimed(&txn_id, &record.lease_id).await;
                     });
                 }
             },
@@ -1643,8 +1661,8 @@ pub async fn run_proxy() -> Result<()> {
 /// Resolution is done through `RemoteCapabilityResolver`, so every open and
 /// every forwarded connection issues a Registry `Lookup` RPC — the same
 /// "resolve at connection time" semantics as the monolith, but over the
-/// wire. Reads `PROXY_BIND_HOST` / `PROXY_PORT_MIN` / `PROXY_PORT_MAX` via
-/// `ProxyConfig::from_env`.
+/// wire. Reads `PROXY_BIND_HOST` / `PROXY_PORT_MIN` / `PROXY_PORT_MAX` /
+/// `COORDIN8_PROXY_UPSTREAM_ALLOW` via `ProxyConfig::from_env`.
 pub async fn run_proxy_on_listener(
     listener: tokio::net::TcpListener,
     registry_addr: &str,
@@ -1683,7 +1701,7 @@ pub async fn run_proxy_on_listener_until(
     let pending_resolver = Arc::new(coordin8_bootstrap::PendingCapabilityResolver::new());
     let resolver: Arc<dyn coordin8_core::CapabilityResolver> =
         Arc::clone(&pending_resolver) as Arc<dyn coordin8_core::CapabilityResolver>;
-    let proxy_config = ProxyConfig::from_env();
+    let proxy_config = proxy_config(auth_config.enabled())?;
     let (proxy_lease_manager, proxy_lease_svc) = embedded_landlord(
         "proxy",
         advertise_host,

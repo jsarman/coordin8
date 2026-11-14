@@ -4,15 +4,16 @@ use std::sync::Arc;
 
 use tonic::{Code, Request};
 
+use coordin8_core::{EndpointAllowlist, TXN_PARTICIPANT_ALLOW_VAR as VAR};
 use coordin8_core::{Leasing, TransactionState, TxnStore};
 use coordin8_lease::LeaseManager;
 use coordin8_proto::coordin8::{
     transaction_service_server::TransactionService, BeginRequest, CommitRequest, EnlistRequest,
 };
 use coordin8_provider_local::{InMemoryLeaseStore, InMemoryTxnStore};
-use coordin8_txn::{ParticipantAllowlist, TxnManager, TxnServiceImpl};
+use coordin8_txn::{TxnManager, TxnServiceImpl};
 
-fn make(allow: ParticipantAllowlist) -> (TxnServiceImpl, Arc<InMemoryTxnStore>) {
+fn make(allow: EndpointAllowlist) -> (TxnServiceImpl, Arc<InMemoryTxnStore>) {
     let lease_store = Arc::new(InMemoryLeaseStore::new());
     let (tx, _) = tokio::sync::broadcast::channel(256);
     let lm: Arc<dyn Leasing> = Arc::new(LeaseManager::new(
@@ -45,7 +46,7 @@ async fn enlist(svc: &TxnServiceImpl, txn_id: &str, ep: &str) -> Result<(), toni
 
 #[tokio::test]
 async fn disallowed_enlist_is_permission_denied_and_not_stored() {
-    let (svc, store) = make(ParticipantAllowlist::parse("space:9006").unwrap());
+    let (svc, store) = make(EndpointAllowlist::parse(VAR, "space:9006").unwrap());
     let txn_id = begin(&svc).await;
 
     // 127.0.0.1:9 would fail to connect (and hang/err) if it were dialed on commit.
@@ -68,7 +69,7 @@ async fn disallowed_enlist_is_permission_denied_and_not_stored() {
 
 #[tokio::test]
 async fn allowed_enlist_is_stored() {
-    let (svc, store) = make(ParticipantAllowlist::parse("127.0.0.0/8, space:9006").unwrap());
+    let (svc, store) = make(EndpointAllowlist::parse(VAR, "127.0.0.0/8, space:9006").unwrap());
     let txn_id = begin(&svc).await;
     enlist(&svc, &txn_id, "127.0.0.1:5555").await.unwrap();
     enlist(&svc, &txn_id, "space:9006").await.unwrap();
@@ -86,7 +87,7 @@ async fn allowed_enlist_is_stored() {
 #[tokio::test]
 async fn malformed_endpoint_is_invalid_argument() {
     for allow in ["", "space:9006"] {
-        let (svc, store) = make(ParticipantAllowlist::parse(allow).unwrap());
+        let (svc, store) = make(EndpointAllowlist::parse(VAR, allow).unwrap());
         let txn_id = begin(&svc).await;
         for bad in [
             "",
@@ -115,7 +116,7 @@ async fn malformed_endpoint_is_invalid_argument() {
 
 #[tokio::test]
 async fn unset_allowlist_allows_any_well_formed_endpoint() {
-    let (svc, _) = make(ParticipantAllowlist::allow_all());
+    let (svc, _) = make(EndpointAllowlist::allow_all(VAR));
     let txn_id = begin(&svc).await;
     enlist(&svc, &txn_id, "anything.example:1234")
         .await
@@ -126,7 +127,7 @@ async fn unset_allowlist_allows_any_well_formed_endpoint() {
 /// allowed even when the operator's allowlist doesn't mention it.
 #[tokio::test]
 async fn bundled_space_endpoint_is_implicitly_allowed() {
-    let allow = ParticipantAllowlist::parse("*.corp.internal")
+    let allow = EndpointAllowlist::parse(VAR, "*.corp.internal")
         .unwrap()
         .with_implicit_endpoint("127.0.0.1:9006")
         .unwrap();

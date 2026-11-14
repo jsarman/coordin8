@@ -8,7 +8,7 @@ use futures::future::join_all;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
-use crate::allowlist::ParticipantAllowlist;
+use coordin8_core::{EndpointAllowlist, TXN_PARTICIPANT_ALLOW_VAR};
 use coordin8_core::{
     Error, LeaseRecord, Leasing, ParticipantRecord, PrepareVote, TransactionRecord,
     TransactionState, TxnStore,
@@ -21,7 +21,7 @@ pub struct TxnManager {
     store: Arc<dyn TxnStore>,
     lease_manager: Arc<dyn Leasing>,
     client_auth: ClientAuthConfig,
-    allowlist: ParticipantAllowlist,
+    allowlist: EndpointAllowlist,
 }
 
 impl TxnManager {
@@ -42,13 +42,13 @@ impl TxnManager {
             store,
             lease_manager,
             client_auth,
-            allowlist: ParticipantAllowlist::allow_all(),
+            allowlist: EndpointAllowlist::allow_all(TXN_PARTICIPANT_ALLOW_VAR),
         }
     }
 
     /// Restrict which `participant_endpoint`s `enlist` accepts (SSRF /
-    /// token-leak guard — see [`ParticipantAllowlist`]). Default is allow-all.
-    pub fn with_participant_allowlist(mut self, allowlist: ParticipantAllowlist) -> Self {
+    /// token-leak guard — see [`EndpointAllowlist`]). Default is allow-all.
+    pub fn with_participant_allowlist(mut self, allowlist: EndpointAllowlist) -> Self {
         self.allowlist = allowlist;
         self
     }
@@ -102,6 +102,25 @@ impl TxnManager {
             .get(txn_id)
             .await?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))
+    }
+
+    /// Cascade entry point: the lease `lease_id` on resource `txn:<txn_id>`
+    /// was reclaimed. Acts only if that is the lease the transaction holds:
+    /// `LeaseService.Grant` accepts any resource id, so anyone could grant
+    /// and cancel a lease named `txn:<victim>` to abort someone else's
+    /// transaction.
+    pub async fn on_lease_reclaimed(&self, txn_id: &str, lease_id: &str) -> Result<(), Error> {
+        match self.store.get(txn_id).await? {
+            Some(t) if t.lease_id == lease_id => self.abort_expired(txn_id).await,
+            Some(_) => {
+                warn!(
+                    txn_id,
+                    lease_id, "reclaimed lease is not this transaction's lease — ignoring"
+                );
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 
     /// Abort a transaction due to lease expiry. Does not cancel the lease
