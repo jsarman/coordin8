@@ -956,6 +956,8 @@ export const TransactionServiceClient = makeGenericClientConstructor(
  * ParticipantService — implemented BY services that want to participate.
  * The manager calls these during 2PC. Participants register their
  * endpoint address via EnlistRequest.participant_endpoint.
+ * Every call must be idempotent: TransactionMgr re-sends after a crash, a
+ * lost reply or a failed call, until it gets an answer.
  */
 export type ParticipantServiceService = typeof ParticipantServiceService;
 export const ParticipantServiceService = {
@@ -969,7 +971,12 @@ export const ParticipantServiceService = {
     responseSerialize: (value: PrepareResponse) => Buffer.from(PrepareResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer) => PrepareResponse.decode(value),
   },
-  /** Phase 2: commit (only called if you returned PREPARED). */
+  /**
+   * Phase 2: commit. Normally only sent to PREPARED voters, but recovery
+   * re-sends it to every participant of a decided transaction, so Commit
+   * for a transaction you hold no state for (NOTCHANGED, or already
+   * committed) must succeed as a no-op.
+   */
   commit: {
     path: "/coordin8.ParticipantService/Commit",
     requestStream: false,
@@ -979,7 +986,7 @@ export const ParticipantServiceService = {
     responseSerialize: (value: Empty) => Buffer.from(Empty.encode(value).finish()),
     responseDeserialize: (value: Buffer) => Empty.decode(value),
   },
-  /** Rollback. */
+  /** Rollback. A no-op for a transaction you hold no state for. */
   abort: {
     path: "/coordin8.ParticipantService/Abort",
     requestStream: false,
@@ -989,7 +996,10 @@ export const ParticipantServiceService = {
     responseSerialize: (value: Empty) => Buffer.from(Empty.encode(value).finish()),
     responseDeserialize: (value: Buffer) => Empty.decode(value),
   },
-  /** Optimization: single-participant transactions skip a round-trip. */
+  /**
+   * Optimization: single-participant transactions skip a round-trip. On
+   * a retry after the transaction already committed, answer NOTCHANGED.
+   */
   prepareAndCommit: {
     path: "/coordin8.ParticipantService/PrepareAndCommit",
     requestStream: false,
@@ -1004,11 +1014,19 @@ export const ParticipantServiceService = {
 export interface ParticipantServiceServer extends UntypedServiceImplementation {
   /** Phase 1: can you commit? Returns PREPARED, NOTCHANGED, or ABORTED. */
   prepare: handleUnaryCall<ParticipantRequest, PrepareResponse>;
-  /** Phase 2: commit (only called if you returned PREPARED). */
+  /**
+   * Phase 2: commit. Normally only sent to PREPARED voters, but recovery
+   * re-sends it to every participant of a decided transaction, so Commit
+   * for a transaction you hold no state for (NOTCHANGED, or already
+   * committed) must succeed as a no-op.
+   */
   commit: handleUnaryCall<ParticipantRequest, Empty>;
-  /** Rollback. */
+  /** Rollback. A no-op for a transaction you hold no state for. */
   abort: handleUnaryCall<ParticipantRequest, Empty>;
-  /** Optimization: single-participant transactions skip a round-trip. */
+  /**
+   * Optimization: single-participant transactions skip a round-trip. On
+   * a retry after the transaction already committed, answer NOTCHANGED.
+   */
   prepareAndCommit: handleUnaryCall<ParticipantRequest, PrepareResponse>;
 }
 
@@ -1029,7 +1047,12 @@ export interface ParticipantServiceClient extends Client {
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: PrepareResponse) => void,
   ): ClientUnaryCall;
-  /** Phase 2: commit (only called if you returned PREPARED). */
+  /**
+   * Phase 2: commit. Normally only sent to PREPARED voters, but recovery
+   * re-sends it to every participant of a decided transaction, so Commit
+   * for a transaction you hold no state for (NOTCHANGED, or already
+   * committed) must succeed as a no-op.
+   */
   commit(request: ParticipantRequest, callback: (error: ServiceError | null, response: Empty) => void): ClientUnaryCall;
   commit(
     request: ParticipantRequest,
@@ -1042,7 +1065,7 @@ export interface ParticipantServiceClient extends Client {
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: Empty) => void,
   ): ClientUnaryCall;
-  /** Rollback. */
+  /** Rollback. A no-op for a transaction you hold no state for. */
   abort(request: ParticipantRequest, callback: (error: ServiceError | null, response: Empty) => void): ClientUnaryCall;
   abort(
     request: ParticipantRequest,
@@ -1055,7 +1078,10 @@ export interface ParticipantServiceClient extends Client {
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: Empty) => void,
   ): ClientUnaryCall;
-  /** Optimization: single-participant transactions skip a round-trip. */
+  /**
+   * Optimization: single-participant transactions skip a round-trip. On
+   * a retry after the transaction already committed, answer NOTCHANGED.
+   */
   prepareAndCommit(
     request: ParticipantRequest,
     callback: (error: ServiceError | null, response: PrepareResponse) => void,

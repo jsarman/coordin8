@@ -19,10 +19,13 @@ public class SpaceClient {
 
     private final SpaceServiceGrpc.SpaceServiceBlockingStub stub;
     private final SpaceServiceGrpc.SpaceServiceStub asyncStub;
+    /** Space's own LeaseService: renews Notify watch leases. */
+    private final LeaseClient leases;
 
     SpaceClient(ManagedChannel channel) {
         this.stub = SpaceServiceGrpc.newBlockingStub(channel);
         this.asyncStub = SpaceServiceGrpc.newStub(channel);
+        this.leases = LeaseClient.wrap(channel);
     }
 
     // ── Write ───────────────────────────────────────────────────────────────
@@ -157,7 +160,10 @@ public class SpaceClient {
      *
      * @param template   attribute pattern to watch
      * @param on         event type: "appearance" or "expiration"
-     * @param ttlSeconds lease TTL for the watch itself
+     * @param ttlSeconds lease TTL for the watch itself. The lease arrives as the
+     *                   stream's first message and is renewed in the background
+     *                   while the stream is open; if it is reclaimed anyway,
+     *                   the stream ends and {@code onError} gets NOT_FOUND.
      * @param handback   opaque data echoed with events (may be null)
      * @param onEvent    callback for each event (invoked on a gRPC thread)
      * @param onError    callback for errors (stream closed)
@@ -177,8 +183,30 @@ public class SpaceClient {
         if (handback != null) req.setHandback(ByteString.copyFrom(handback));
 
         asyncStub.notify(req.build(), new StreamObserver<Space.SpaceEvent>() {
+            /** Renews the watch lease while the stream is open. */
+            private volatile java.io.Closeable keepAlive;
+
+            private void stopKeepAlive() {
+                java.io.Closeable k = keepAlive;
+                if (k != null) {
+                    try { k.close(); } catch (java.io.IOException ignored) { }
+                }
+            }
+
             @Override
             public void onNext(Space.SpaceEvent evt) {
+                if (evt.getType() == Space.SpaceEventType.REGISTERED) {
+                    // First message: the watch's lease. The watch lives as
+                    // long as it does, so keep it renewed.
+                    if (evt.hasLease()) {
+                        long ttl = evt.getLease().getTtlSeconds() > 0
+                                ? evt.getLease().getTtlSeconds() : ttlSeconds;
+                        if (ttl > 0) {
+                            keepAlive = leases.keepAlive(evt.getLease().getLeaseId(), ttl, t -> {});
+                        }
+                    }
+                    return;
+                }
                 TupleRecord tuple = evt.hasTuple() ? toRecord(evt.getTuple()) : null;
                 Instant occurredAt = evt.hasOccurredAt()
                         ? Instant.ofEpochSecond(evt.getOccurredAt().getSeconds(),
@@ -192,11 +220,14 @@ public class SpaceClient {
 
             @Override
             public void onError(Throwable t) {
+                stopKeepAlive();
                 onError.accept(t);
             }
 
             @Override
-            public void onCompleted() {}
+            public void onCompleted() {
+                stopKeepAlive();
+            }
         });
     }
 

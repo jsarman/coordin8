@@ -189,7 +189,7 @@ impl SpaceService for SpaceServiceImpl {
             _ => SpaceEventKind::Appearance,
         };
 
-        let (_, _lease_id) = self
+        let (_, lease, mut reclaimed) = self
             .manager
             .notify(
                 r.template.clone(),
@@ -214,12 +214,42 @@ impl SpaceService for SpaceServiceImpl {
         let template = r.template;
         let handback = r.handback;
         let (tx, rx) = mpsc::channel::<Result<SpaceEvent, Status>>(64);
+        // First message: the watch lease, so the client can renew it before
+        // any tuple matches.
+        let lease_id = lease.lease_id.clone();
+        tx.send(Ok(SpaceEvent {
+            r#type: SpaceEventType::Registered as i32,
+            tuple: None,
+            occurred_at: Some(to_timestamp(chrono::Utc::now())),
+            handback: handback.clone(),
+            lease: Some(self.lease_to_proto(lease)),
+        }))
+        .await
+        .map_err(|_| Status::internal("notify stream closed"))?;
 
+        let manager = Arc::clone(&self.manager);
         tokio::spawn(async move {
             let ops = parse_template(&template);
             let mut stream = BroadcastStream::new(broadcast_rx);
 
-            while let Some(result) = stream.next().await {
+            loop {
+                let result = tokio::select! {
+                    r = stream.next() => match r {
+                        Some(r) => r,
+                        None => break,
+                    },
+                    // The watch lease lapsed or was cancelled: the watch is
+                    // gone, so is the stream.
+                    _ = &mut reclaimed => {
+                        let _ = tx
+                            .send(Err(Status::not_found("watch lease reclaimed")))
+                            .await;
+                        return;
+                    }
+                    // Client gone (noticed even if nothing ever matches):
+                    // release the watch.
+                    _ = tx.closed() => break,
+                };
                 let tuple = match result {
                     Ok(t) => t,
                     Err(BroadcastStreamRecvError::Lagged(_)) => {
@@ -228,7 +258,7 @@ impl SpaceService for SpaceServiceImpl {
                                 "watcher lagged; resubscribe and re-snapshot",
                             )))
                             .await;
-                        return;
+                        break;
                     }
                 };
 
@@ -241,12 +271,14 @@ impl SpaceService for SpaceServiceImpl {
                     tuple: Some(tuple_record_to_proto(&tuple, None)),
                     occurred_at: Some(to_timestamp(chrono::Utc::now())),
                     handback: handback.clone(),
+                    lease: None,
                 };
 
                 if tx.send(Ok(event)).await.is_err() {
-                    return; // client disconnected
+                    break; // client disconnected
                 }
             }
+            manager.end_watch(&lease_id).await;
         });
 
         #[allow(clippy::result_large_err)] // tonic::Status is the gRPC error type
@@ -416,6 +448,113 @@ mod tests {
         }
         assert!(saw_loss, "lagged watcher must receive DATA_LOSS");
         assert!(stream.next().await.is_none(), "stream ends after DATA_LOSS");
+    }
+
+    /// Manager + its own landlord with a fast reaper and the watch cascade,
+    /// wired like services.rs.
+    fn watch_rig() -> (Arc<SpaceManager>, Arc<LeaseManager>) {
+        let (expiry, _) = broadcast::channel(64);
+        let lm = Arc::new(LeaseManager::new(
+            Arc::new(InMemoryLeaseStore::new()),
+            coordin8_core::LeaseConfig::default(),
+            expiry,
+        ));
+        let manager = Arc::new(SpaceManager::new(
+            Arc::new(InMemorySpaceStore::new()),
+            lm.clone(),
+            broadcast::channel::<TupleRecord>(16).0,
+            broadcast::channel::<TupleRecord>(16).0,
+        ));
+        let (reaper_lm, reaper_tx) = (lm.clone(), lm.expiry_tx());
+        tokio::spawn(async move {
+            coordin8_lease::reaper::run_reaper(
+                reaper_lm,
+                reaper_tx,
+                std::time::Duration::from_millis(100),
+            )
+            .await;
+        });
+        let (m, mut rx) = (manager.clone(), lm.expiry_tx().subscribe());
+        tokio::spawn(async move {
+            while let Ok(ev) = rx.recv().await {
+                if ev.record.resource_id.starts_with("space-watch:") {
+                    m.on_watch_expired(&ev.record.lease_id).await;
+                }
+            }
+        });
+        (manager, lm)
+    }
+
+    async fn open_watch(
+        svc: &SpaceServiceImpl,
+        ttl_seconds: u64,
+    ) -> <SpaceServiceImpl as SpaceService>::NotifyStream {
+        svc.notify(Request::new(NotifyRequest {
+            template: [("never".to_string(), "matches".to_string())].into(),
+            on: SpaceEventType::Appearance as i32,
+            ttl_seconds,
+            handback: vec![7],
+            txn_id: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+    }
+
+    /// The watch lease comes first, and the watch lives exactly as long as
+    /// it: unrenewed, the stream ends NOT_FOUND; renewed, it stays.
+    #[tokio::test]
+    async fn notify_stream_carries_and_ends_with_its_lease() {
+        let (manager, lm) = watch_rig();
+        let svc = SpaceServiceImpl::new(manager, "127.0.0.1", 9006);
+
+        let mut lapsing = open_watch(&svc, 1).await;
+        let first = lapsing.next().await.unwrap().unwrap();
+        assert_eq!(first.r#type, SpaceEventType::Registered as i32);
+        assert!(first.tuple.is_none());
+        assert_eq!(first.handback, vec![7]);
+        let lease = first.lease.expect("registered event carries the lease");
+        assert!(lease.resource_id.starts_with("space-watch:"));
+        assert_eq!(lease.grantor_port, 9006);
+
+        let mut renewed = open_watch(&svc, 1).await;
+        let kept = renewed.next().await.unwrap().unwrap().lease.unwrap();
+
+        let end = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                lm.renew(&kept.lease_id, 1).await.unwrap();
+                tokio::select! {
+                    item = lapsing.next() => return item,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {}
+                }
+            }
+        })
+        .await
+        .expect("unrenewed watch stream must end");
+        assert_eq!(end.unwrap().unwrap_err().code(), tonic::Code::NotFound);
+
+        // The renewed one is still open.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), renewed.next())
+                .await
+                .is_err()
+        );
+    }
+
+    /// A client that goes away releases its watch even if nothing ever
+    /// matches (the forwarding task no longer leaks).
+    #[tokio::test]
+    async fn dropped_notify_stream_releases_its_watch() {
+        let (manager, lm) = watch_rig();
+        let svc = SpaceServiceImpl::new(manager, "127.0.0.1", 9006);
+        let mut s = open_watch(&svc, 60).await;
+        let lease = s.next().await.unwrap().unwrap().lease.unwrap();
+        drop(s);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            lm.renew(&lease.lease_id, 60).await.is_err(),
+            "watch lease should be cancelled when the client leaves"
+        );
     }
 }
 

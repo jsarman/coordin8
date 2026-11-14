@@ -51,10 +51,40 @@ public class EventClient {
      * Receive events for a registration (server-streaming).
      * The callback is invoked on a gRPC thread for each event.
      *
+     * <p>DURABLE registrations are at-least-once: the server keeps each event
+     * until it is acknowledged. This acknowledges an event once {@code onEvent}
+     * has returned for it, so an event whose callback threw, or that was in
+     * flight when the connection dropped, is delivered again on the next
+     * {@code receive}. Handle duplicates by {@code seqNum}.
+     *
      * @param registrationId the subscription registration ID
      * @param onEvent        callback for each event
      * @param onError        callback for errors (stream closed)
      */
+    /**
+     * Acknowledge every DURABLE event on the registration with
+     * {@code seqNum <= upToSeq}, deleting it from the mailbox. {@link #receive}
+     * does this for you.
+     */
+    public void ack(String registrationId, long upToSeq) {
+        stub.ack(EventOuterClass.AckRequest.newBuilder()
+                .setRegistrationId(registrationId)
+                .setUpToSeq(upToSeq)
+                .build());
+    }
+
+    private void ackAsync(String registrationId, long upToSeq) {
+        asyncStub.ack(EventOuterClass.AckRequest.newBuilder()
+                        .setRegistrationId(registrationId)
+                        .setUpToSeq(upToSeq)
+                        .build(),
+                new StreamObserver<>() {
+                    @Override public void onNext(com.google.protobuf.Empty v) {}
+                    @Override public void onError(Throwable t) {}
+                    @Override public void onCompleted() {}
+                });
+    }
+
     public void receive(String registrationId,
                         Consumer<EventRecord> onEvent,
                         Consumer<Throwable> onError) {
@@ -78,6 +108,9 @@ public class EventClient {
                                 evt.getPayload().toByteArray(),
                                 evt.getHandback().toByteArray(),
                                 emittedAt));
+                        // Processed: acknowledge it (fire and forget; an ack
+                        // that fails only means a redelivery).
+                        ackAsync(registrationId, evt.getSeqNum());
                     }
 
                     @Override

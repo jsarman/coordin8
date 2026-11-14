@@ -22,6 +22,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	EventService_Subscribe_FullMethodName          = "/coordin8.EventService/Subscribe"
 	EventService_Receive_FullMethodName            = "/coordin8.EventService/Receive"
+	EventService_Ack_FullMethodName                = "/coordin8.EventService/Ack"
 	EventService_Emit_FullMethodName               = "/coordin8.EventService/Emit"
 	EventService_RenewSubscription_FullMethodName  = "/coordin8.EventService/RenewSubscription"
 	EventService_CancelSubscription_FullMethodName = "/coordin8.EventService/CancelSubscription"
@@ -43,7 +44,14 @@ type EventServiceClient interface {
 	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (*EventRegistration, error)
 	// Receive events for a registration (server-streaming).
 	// Equivalent to RemoteEventListener.notify() in Jini — but pull-based.
+	// DURABLE: delivery is at-least-once. An event stays in the mailbox,
+	// and is re-sent on the next Receive, until the client acknowledges it
+	// with Ack (or a Receive whose after_seq covers it). Sending it is not
+	// enough: frames in flight when a connection drops never arrived.
 	Receive(ctx context.Context, in *ReceiveRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
+	// Acknowledge (delete) every DURABLE mailbox event with
+	// seq_num <= up_to_seq. A no-op for BEST_EFFORT registrations.
+	Ack(ctx context.Context, in *AckRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Emit an event into the bus. Any service can call this.
 	Emit(ctx context.Context, in *EmitRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Renew a subscription lease.
@@ -88,6 +96,16 @@ func (c *eventServiceClient) Receive(ctx context.Context, in *ReceiveRequest, op
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type EventService_ReceiveClient = grpc.ServerStreamingClient[Event]
+
+func (c *eventServiceClient) Ack(ctx context.Context, in *AckRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, EventService_Ack_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
 func (c *eventServiceClient) Emit(ctx context.Context, in *EmitRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -135,7 +153,14 @@ type EventServiceServer interface {
 	Subscribe(context.Context, *SubscribeRequest) (*EventRegistration, error)
 	// Receive events for a registration (server-streaming).
 	// Equivalent to RemoteEventListener.notify() in Jini — but pull-based.
+	// DURABLE: delivery is at-least-once. An event stays in the mailbox,
+	// and is re-sent on the next Receive, until the client acknowledges it
+	// with Ack (or a Receive whose after_seq covers it). Sending it is not
+	// enough: frames in flight when a connection drops never arrived.
 	Receive(*ReceiveRequest, grpc.ServerStreamingServer[Event]) error
+	// Acknowledge (delete) every DURABLE mailbox event with
+	// seq_num <= up_to_seq. A no-op for BEST_EFFORT registrations.
+	Ack(context.Context, *AckRequest) (*emptypb.Empty, error)
 	// Emit an event into the bus. Any service can call this.
 	Emit(context.Context, *EmitRequest) (*emptypb.Empty, error)
 	// Renew a subscription lease.
@@ -157,6 +182,9 @@ func (UnimplementedEventServiceServer) Subscribe(context.Context, *SubscribeRequ
 }
 func (UnimplementedEventServiceServer) Receive(*ReceiveRequest, grpc.ServerStreamingServer[Event]) error {
 	return status.Errorf(codes.Unimplemented, "method Receive not implemented")
+}
+func (UnimplementedEventServiceServer) Ack(context.Context, *AckRequest) (*emptypb.Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Ack not implemented")
 }
 func (UnimplementedEventServiceServer) Emit(context.Context, *EmitRequest) (*emptypb.Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Emit not implemented")
@@ -216,6 +244,24 @@ func _EventService_Receive_Handler(srv interface{}, stream grpc.ServerStream) er
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type EventService_ReceiveServer = grpc.ServerStreamingServer[Event]
+
+func _EventService_Ack_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AckRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EventServiceServer).Ack(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EventService_Ack_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EventServiceServer).Ack(ctx, req.(*AckRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
 
 func _EventService_Emit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(EmitRequest)
@@ -281,6 +327,10 @@ var EventService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Subscribe",
 			Handler:    _EventService_Subscribe_Handler,
+		},
+		{
+			MethodName: "Ack",
+			Handler:    _EventService_Ack_Handler,
 		},
 		{
 			MethodName: "Emit",

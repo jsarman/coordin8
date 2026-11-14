@@ -21,7 +21,15 @@ service EventService {
 
     // Receive events for a registration (server-streaming).
     // Equivalent to RemoteEventListener.notify() in Jini — but pull-based.
+    // DURABLE: delivery is at-least-once. An event stays in the mailbox,
+    // and is re-sent on the next Receive, until the client acknowledges it
+    // with Ack (or a Receive whose after_seq covers it). Sending it is not
+    // enough: frames in flight when a connection drops never arrived.
     rpc Receive(ReceiveRequest)         returns (stream Event);
+
+    // Acknowledge (delete) every DURABLE mailbox event with
+    // seq_num <= up_to_seq. A no-op for BEST_EFFORT registrations.
+    rpc Ack(AckRequest)                 returns (google.protobuf.Empty);
 
     // Emit an event into the bus. Any service can call this.
     rpc Emit(EmitRequest)               returns (google.protobuf.Empty);
@@ -53,6 +61,15 @@ message EventRegistration {
 
 message ReceiveRequest {
     string registration_id = 1;
+    // Resume cursor (DURABLE): acknowledges every event with
+    // seq_num <= after_seq, then delivers from after_seq + 1. 0 = from the
+    // oldest unacknowledged event.
+    uint64 after_seq       = 2;
+}
+
+message AckRequest {
+    string registration_id = 1;
+    uint64 up_to_seq       = 2;  // the seq_num of the last event processed
 }
 
 message EmitRequest {

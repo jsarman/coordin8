@@ -205,6 +205,36 @@ impl EventManager {
         self.store.ack(registration_id, seq_nums).await
     }
 
+    /// Acknowledge (delete) every queued event with seq <= `up_to_seq`: the
+    /// client has processed them. `SubscriptionNotFound` for an unknown
+    /// registration.
+    pub async fn ack_through(&self, registration_id: &str, up_to_seq: u64) -> Result<(), Error> {
+        if self
+            .store
+            .get_subscription(registration_id)
+            .await?
+            .is_none()
+        {
+            return Err(Error::SubscriptionNotFound(registration_id.to_string()));
+        }
+        const PAGE: usize = 256;
+        loop {
+            let page = self.store.peek(registration_id, 0, PAGE).await?;
+            let seqs: Vec<u64> = page
+                .iter()
+                .map(|e| e.seq_num)
+                .filter(|s| *s <= up_to_seq)
+                .collect();
+            if seqs.is_empty() {
+                return Ok(());
+            }
+            self.store.ack(registration_id, &seqs).await?;
+            if seqs.len() < PAGE {
+                return Ok(());
+            }
+        }
+    }
+
     /// Subscribe to the live broadcast channel.
     pub fn subscribe_broadcast(&self) -> broadcast::Receiver<EventRecord> {
         self.event_tx.subscribe()

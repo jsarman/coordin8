@@ -86,6 +86,12 @@ const discovery = await ServiceDiscovery.watch(djinn);
 const greeter = await discovery.get(addr => new GreeterClient(addr, creds), { interface: "Greeter" });
 ```
 
+### Stream contracts
+
+- **Durable events are client-acked.** `Receive` never deletes from the mailbox; the client acknowledges with `Ack(registration_id, up_to_seq)` or a `Receive` with `after_seq`. Unacked events (including frames in flight when a connection died) are re-sent on the next `Receive`. All three SDKs ack once the caller has processed an event (Go: taken from the unbuffered channel, batched every 250ms; Java: after `onEvent` returns; Node: when the loop asks for the next event).
+- **Notify watches are leased.** The first message of every `Notify` stream is `REGISTERED` with the watch lease (renew it at Space's LeaseService; the SDKs do). When the lease is reclaimed the stream ends `NOT_FOUND`; when the client leaves, the watch lease is cancelled.
+- **Go SDK streams return `*Stream[T]`** (`C` + `Err()`), so `DATA_LOSS` (lagged), `UNAVAILABLE` (shutdown) and `NOT_FOUND` (lease gone) reach the caller instead of a bare closed channel.
+
 ### Template Matching
 
 Operators: `contains:`, `starts_with:`, exact match, or `Any` (missing field = match anything). The `interface` field is always injected into the match set alongside `attrs`.

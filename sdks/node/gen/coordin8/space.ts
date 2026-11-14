@@ -30,6 +30,12 @@ export const protobufPackage = "coordin8";
 export enum SpaceEventType {
   APPEARANCE = 0,
   EXPIRATION = 1,
+  /**
+   * REGISTERED - First message of every Notify stream: carries the watch's lease (no
+   * tuple). Renew it at the lease's grantor to keep the watch; when it is
+   * reclaimed (expired or cancelled) the stream ends with NOT_FOUND.
+   */
+  REGISTERED = 2,
   UNRECOGNIZED = -1,
 }
 
@@ -41,6 +47,9 @@ export function spaceEventTypeFromJSON(object: any): SpaceEventType {
     case 1:
     case "EXPIRATION":
       return SpaceEventType.EXPIRATION;
+    case 2:
+    case "REGISTERED":
+      return SpaceEventType.REGISTERED;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -54,6 +63,8 @@ export function spaceEventTypeToJSON(object: SpaceEventType): string {
       return "APPEARANCE";
     case SpaceEventType.EXPIRATION:
       return "EXPIRATION";
+    case SpaceEventType.REGISTERED:
+      return "REGISTERED";
     case SpaceEventType.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -165,6 +176,8 @@ export interface SpaceEvent {
     | undefined;
   /** echoed from NotifyRequest */
   handback: Buffer;
+  /** REGISTERED only: the watch lease */
+  lease: Lease | undefined;
 }
 
 export interface ContentsRequest {
@@ -1495,7 +1508,7 @@ export const NotifyRequest_TemplateEntry = {
 };
 
 function createBaseSpaceEvent(): SpaceEvent {
-  return { type: 0, tuple: undefined, occurredAt: undefined, handback: Buffer.alloc(0) };
+  return { type: 0, tuple: undefined, occurredAt: undefined, handback: Buffer.alloc(0), lease: undefined };
 }
 
 export const SpaceEvent = {
@@ -1511,6 +1524,9 @@ export const SpaceEvent = {
     }
     if (message.handback.length !== 0) {
       writer.uint32(34).bytes(message.handback);
+    }
+    if (message.lease !== undefined) {
+      Lease.encode(message.lease, writer.uint32(42).fork()).ldelim();
     }
     return writer;
   },
@@ -1550,6 +1566,13 @@ export const SpaceEvent = {
 
           message.handback = reader.bytes() as Buffer;
           continue;
+        case 5:
+          if (tag !== 42) {
+            break;
+          }
+
+          message.lease = Lease.decode(reader, reader.uint32());
+          continue;
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1565,6 +1588,7 @@ export const SpaceEvent = {
       tuple: isSet(object.tuple) ? Tuple.fromJSON(object.tuple) : undefined,
       occurredAt: isSet(object.occurredAt) ? fromJsonTimestamp(object.occurredAt) : undefined,
       handback: isSet(object.handback) ? Buffer.from(bytesFromBase64(object.handback)) : Buffer.alloc(0),
+      lease: isSet(object.lease) ? Lease.fromJSON(object.lease) : undefined,
     };
   },
 
@@ -1582,6 +1606,9 @@ export const SpaceEvent = {
     if (message.handback.length !== 0) {
       obj.handback = base64FromBytes(message.handback);
     }
+    if (message.lease !== undefined) {
+      obj.lease = Lease.toJSON(message.lease);
+    }
     return obj;
   },
 
@@ -1594,6 +1621,7 @@ export const SpaceEvent = {
     message.tuple = (object.tuple !== undefined && object.tuple !== null) ? Tuple.fromPartial(object.tuple) : undefined;
     message.occurredAt = object.occurredAt ?? undefined;
     message.handback = object.handback ?? Buffer.alloc(0);
+    message.lease = (object.lease !== undefined && object.lease !== null) ? Lease.fromPartial(object.lease) : undefined;
     return message;
   },
 };

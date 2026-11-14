@@ -183,36 +183,22 @@ type ExpiryEvent struct {
 	Cancelled  bool // false = expired naturally, true = holder called Cancel
 }
 
-// Watch streams expiry events for resourceID (empty = all expirations).
-// Returns a channel that receives events until ctx is cancelled.
-func (c *LeaseClient) Watch(ctx context.Context, resourceID string) (<-chan ExpiryEvent, error) {
+// Watch streams expiry events for resourceID (empty = all expirations)
+// until ctx is cancelled or the stream ends (then Err says why).
+func (c *LeaseClient) Watch(ctx context.Context, resourceID string) (*Stream[ExpiryEvent], error) {
 	stream, err := c.client.WatchExpiry(ctx, &pb.WatchExpiryRequest{ResourceId: resourceID}, grpc.WaitForReady(true))
 	if err != nil {
 		return nil, err
 	}
-
-	ch := make(chan ExpiryEvent, 16)
-	go func() {
-		defer close(ch)
-		for {
-			evt, err := stream.Recv()
-			if err != nil {
-				return
-			}
-			e := ExpiryEvent{
-				LeaseID:    evt.LeaseId,
-				ResourceID: evt.ResourceId,
-				Cancelled:  evt.Reason == pb.ReclaimReason_CANCELLED,
-			}
-			if evt.ExpiredAt != nil {
-				e.ExpiredAt = evt.ExpiredAt.AsTime()
-			}
-			select {
-			case ch <- e:
-			case <-ctx.Done():
-				return
-			}
+	return pump(ctx, 16, stream.Recv, func(evt *pb.ExpiryEvent) (ExpiryEvent, bool) {
+		e := ExpiryEvent{
+			LeaseID:    evt.LeaseId,
+			ResourceID: evt.ResourceId,
+			Cancelled:  evt.Reason == pb.ReclaimReason_CANCELLED,
 		}
-	}()
-	return ch, nil
+		if evt.ExpiredAt != nil {
+			e.ExpiredAt = evt.ExpiredAt.AsTime()
+		}
+		return e, true
+	}, nil), nil
 }

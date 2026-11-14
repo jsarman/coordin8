@@ -3,10 +3,11 @@ package coordin8
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	pb "github.com/coordin8/sdk-go/gen/coordin8"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 )
 
@@ -71,19 +72,16 @@ func TestDiscoveryGetCachesConnection(t *testing.T) {
 	}
 }
 
-// expired then registered: the proxy re-resolves per connection, so the live
-// entry is untouched -- no new Open, same conn object, still usable.
-func TestDiscoveryExpiredThenRegisteredKeepsLiveProxy(t *testing.T) {
-	sd, reg, px := newDiscovery(t)
+// The service expiring and re-registering changes nothing client side: the
+// proxy re-resolves per connection, so the live entry is untouched -- no new
+// Open, same conn object, still usable.
+func TestDiscoveryRepeatGetKeepsLiveProxy(t *testing.T) {
+	sd, _, px := newDiscovery(t)
 	tmpl := Template{"interface": "G"}
 	held, err := sd.Get(context.Background(), tmpl)
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "registry watch", func() bool { return reg.watches.Load() >= 1 })
-
-	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_EXPIRED}
-	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_REGISTERED}
 	time.Sleep(100 * time.Millisecond)
 
 	again, err := sd.Get(context.Background(), tmpl)
@@ -101,20 +99,17 @@ func TestDiscoveryExpiredThenRegisteredKeepsLiveProxy(t *testing.T) {
 	}
 }
 
-// Regression: repeated service expire/register cycles must not accumulate
-// live proxies (each holds a Djinn port and renews a lease).
-func TestDiscoveryAtMostOneLiveProxyAcrossExpireRegisterCycles(t *testing.T) {
-	sd, reg, px := newDiscovery(t)
+// Regression: repeated Gets must not accumulate live proxies (each holds a
+// Djinn port and renews a lease).
+func TestDiscoveryAtMostOneLiveProxyAcrossGets(t *testing.T) {
+	sd, _, px := newDiscovery(t)
 	tmpl := Template{"interface": "G"}
 	held, err := sd.Get(context.Background(), tmpl)
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "registry watch", func() bool { return reg.watches.Load() >= 1 })
 
 	for i := 0; i < 6; i++ {
-		reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_EXPIRED}
-		reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_REGISTERED}
 		time.Sleep(30 * time.Millisecond)
 		if _, err := sd.Get(context.Background(), tmpl); err != nil {
 			t.Fatal(err)
@@ -150,7 +145,7 @@ func TestDiscoveryCloseReleasesAllProxies(t *testing.T) {
 	if a.GetState() != connectivity.Shutdown || b.GetState() != connectivity.Shutdown {
 		t.Fatal("connections should be closed")
 	}
-	if len(sd.cache) != 0 || len(sd.cancels) != 0 {
+	if len(sd.cache) != 0 {
 		t.Fatal("state not cleared")
 	}
 	sd.Close() // idempotent: nothing more to release
@@ -171,36 +166,47 @@ func TestDiscoveryGetPropagatesProxyOpenError(t *testing.T) {
 	}
 }
 
-// A "modified" event must not close the ClientConn the caller holds, nor
-// reopen: Proxy re-resolves per connection so the existing port stays correct.
-func TestDiscoveryModifiedDoesNotCloseHeldConnection(t *testing.T) {
-	sd, reg, px := newDiscovery(t)
+// Concurrent first Gets for one template share a single proxy: none of
+// them closes a connection another has already returned.
+func TestDiscoveryConcurrentGetsShareOneProxy(t *testing.T) {
+	sd, _, px := newDiscovery(t)
+	px.openDelay = 100 * time.Millisecond
 	tmpl := Template{"interface": "G"}
-	held, err := sd.Get(context.Background(), tmpl)
-	if err != nil {
-		t.Fatal(err)
+
+	const n = 8
+	conns := make([]*grpc.ClientConn, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c, err := sd.Get(context.Background(), tmpl)
+			if err != nil {
+				t.Error(err)
+			}
+			conns[i] = c
+		}(i)
 	}
-	eventually(t, "registry watch", func() bool { return reg.watches.Load() >= 1 })
-	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_MODIFIED}
-	time.Sleep(200 * time.Millisecond) // let the watcher process the event
-	if held.GetState() == connectivity.Shutdown {
-		t.Fatal("held connection was closed by a modified event")
+	wg.Wait()
+	if px.openCount() != 1 {
+		t.Fatalf("opens = %d, want 1", px.openCount())
 	}
-	if px.openCount() != 1 || len(px.released()) != 0 {
-		t.Fatalf("modified must not reopen/release (opens=%d released=%v)", px.openCount(), px.released())
+	for i, c := range conns {
+		if c != conns[0] || c.GetState() == connectivity.Shutdown {
+			t.Fatalf("Get %d got a different or closed conn", i)
+		}
 	}
 }
 
-func TestDiscoveryModifiedLeavesFreshEntryUntouched(t *testing.T) {
-	sd, reg, px := newDiscovery(t)
-	tmpl := Template{"interface": "G"}
-	c1, _ := sd.Get(context.Background(), tmpl)
-	eventually(t, "registry watch", func() bool { return reg.watches.Load() >= 1 })
-	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_MODIFIED}
-	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_REGISTERED} // barrier
-	time.Sleep(50 * time.Millisecond)
-	c2, _ := sd.Get(context.Background(), tmpl)
-	if c1 != c2 || px.openCount() != 1 {
-		t.Fatalf("modified should keep the cached entry (opens=%d)", px.openCount())
+// Discovery keeps no Registry watch: the proxy re-resolves per connection,
+// so a stream per template would be held for nothing.
+func TestDiscoveryHoldsNoRegistryWatch(t *testing.T) {
+	sd, reg, _ := newDiscovery(t)
+	if _, err := sd.Get(context.Background(), Template{"interface": "G"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := reg.watches.Load(); n != 0 {
+		t.Fatalf("registry watches = %d, want 0", n)
 	}
 }

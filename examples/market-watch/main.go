@@ -97,6 +97,13 @@ func main() {
 			fmt.Printf("    [%d] seq=%-4d  %-15s  %-6s  payload=%s  handback=%s\n",
 				received, ev.SeqNum, ev.EventType,
 				ev.Attrs["ticker"], string(ev.Payload), string(ev.Handback))
+			// Durable delivery is at-least-once: until acknowledged, an
+			// event stays in the mailbox and is re-sent on reconnect.
+			if _, err := client.Ack(ctx, &pb.AckRequest{
+				RegistrationId: reg.RegistrationId, UpToSeq: ev.SeqNum,
+			}); err != nil {
+				log.Printf("ack: %v", err)
+			}
 			if received >= 5 {
 				return
 			}

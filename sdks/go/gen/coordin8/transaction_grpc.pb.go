@@ -315,14 +315,20 @@ const (
 // ParticipantService — implemented BY services that want to participate.
 // The manager calls these during 2PC. Participants register their
 // endpoint address via EnlistRequest.participant_endpoint.
+// Every call must be idempotent: TransactionMgr re-sends after a crash, a
+// lost reply or a failed call, until it gets an answer.
 type ParticipantServiceClient interface {
 	// Phase 1: can you commit? Returns PREPARED, NOTCHANGED, or ABORTED.
 	Prepare(ctx context.Context, in *ParticipantRequest, opts ...grpc.CallOption) (*PrepareResponse, error)
-	// Phase 2: commit (only called if you returned PREPARED).
+	// Phase 2: commit. Normally only sent to PREPARED voters, but recovery
+	// re-sends it to every participant of a decided transaction, so Commit
+	// for a transaction you hold no state for (NOTCHANGED, or already
+	// committed) must succeed as a no-op.
 	Commit(ctx context.Context, in *ParticipantRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Rollback.
+	// Rollback. A no-op for a transaction you hold no state for.
 	Abort(ctx context.Context, in *ParticipantRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Optimization: single-participant transactions skip a round-trip.
+	// Optimization: single-participant transactions skip a round-trip. On
+	// a retry after the transaction already committed, answer NOTCHANGED.
 	PrepareAndCommit(ctx context.Context, in *ParticipantRequest, opts ...grpc.CallOption) (*PrepareResponse, error)
 }
 
@@ -381,14 +387,20 @@ func (c *participantServiceClient) PrepareAndCommit(ctx context.Context, in *Par
 // ParticipantService — implemented BY services that want to participate.
 // The manager calls these during 2PC. Participants register their
 // endpoint address via EnlistRequest.participant_endpoint.
+// Every call must be idempotent: TransactionMgr re-sends after a crash, a
+// lost reply or a failed call, until it gets an answer.
 type ParticipantServiceServer interface {
 	// Phase 1: can you commit? Returns PREPARED, NOTCHANGED, or ABORTED.
 	Prepare(context.Context, *ParticipantRequest) (*PrepareResponse, error)
-	// Phase 2: commit (only called if you returned PREPARED).
+	// Phase 2: commit. Normally only sent to PREPARED voters, but recovery
+	// re-sends it to every participant of a decided transaction, so Commit
+	// for a transaction you hold no state for (NOTCHANGED, or already
+	// committed) must succeed as a no-op.
 	Commit(context.Context, *ParticipantRequest) (*emptypb.Empty, error)
-	// Rollback.
+	// Rollback. A no-op for a transaction you hold no state for.
 	Abort(context.Context, *ParticipantRequest) (*emptypb.Empty, error)
-	// Optimization: single-participant transactions skip a round-trip.
+	// Optimization: single-participant transactions skip a round-trip. On
+	// a retry after the transaction already committed, answer NOTCHANGED.
 	PrepareAndCommit(context.Context, *ParticipantRequest) (*PrepareResponse, error)
 	mustEmbedUnimplementedParticipantServiceServer()
 }

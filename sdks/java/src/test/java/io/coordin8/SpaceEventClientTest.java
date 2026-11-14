@@ -78,6 +78,8 @@ class SpaceEventClientTest {
         @Override
         public void notify(Space.NotifyRequest req, StreamObserver<Space.SpaceEvent> out) {
             notify = req;
+            out.onNext(Space.SpaceEvent.newBuilder().setType(Space.SpaceEventType.REGISTERED)
+                    .setLease(Lease.newBuilder().setLeaseId("watch-lease").setTtlSeconds(60)).build());
             out.onNext(Space.SpaceEvent.newBuilder().setType(Space.SpaceEventType.EXPIRATION)
                     .setTuple(tuple("n")).setHandback(req.getHandback())
                     .setOccurredAt(Timestamp.newBuilder().setSeconds(9).setNanos(1)).build());
@@ -106,6 +108,14 @@ class SpaceEventClientTest {
         volatile EventOuterClass.SubscribeRequest subscribe;
         volatile EventOuterClass.EmitRequest emit;
         volatile String cancelled;
+        final List<Long> acks = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void ack(EventOuterClass.AckRequest req, StreamObserver<Empty> out) {
+            acks.add(req.getUpToSeq());
+            out.onNext(Empty.getDefaultInstance());
+            out.onCompleted();
+        }
 
         @Override
         public void subscribe(EventOuterClass.SubscribeRequest req, StreamObserver<EventOuterClass.EventRegistration> out) {
@@ -299,6 +309,12 @@ class SpaceEventClientTest {
         assertEquals("hb", new String(e.handback()));
         assertEquals(5, e.emittedAt().getEpochSecond());
         assertNull(got.get(1).emittedAt());
+        // Each event is acknowledged once its callback has returned.
+        long deadline = System.currentTimeMillis() + 5000;
+        while (fakeEvents.acks.size() < 2 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(List.of(3L, 0L), fakeEvents.acks);
     }
 
     @Test

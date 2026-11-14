@@ -98,6 +98,10 @@ message TakeResponse {
 enum SpaceEventType {
     APPEARANCE = 0;
     EXPIRATION = 1;
+    // First message of every Notify stream: carries the watch's lease (no
+    // tuple). Renew it at the lease's grantor to keep the watch; when it is
+    // reclaimed (expired or cancelled) the stream ends with NOT_FOUND.
+    REGISTERED = 2;
 }
 
 message NotifyRequest {
@@ -113,6 +117,7 @@ message SpaceEvent {
     Tuple                         tuple       = 2;
     google.protobuf.Timestamp     occurred_at = 3;
     bytes                         handback    = 4;  // echoed from NotifyRequest
+    Lease                         lease       = 5;  // REGISTERED only: the watch lease
 }
 
 // ── Contents ────────────────────────────────────────────────────────────────

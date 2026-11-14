@@ -91,6 +91,7 @@ async fn split_event_subscribe_emit_receive_round_trip() {
     let mut stream = client
         .receive(ReceiveRequest {
             registration_id: sub.registration_id.clone(),
+            after_seq: 0,
         })
         .await
         .expect("receive stream")
@@ -153,6 +154,7 @@ async fn split_event_expiry_cleans_subscription() {
     let err = client
         .receive(ReceiveRequest {
             registration_id: sub.registration_id.clone(),
+            after_seq: 0,
         })
         .await
         .expect_err("receive on expired subscription should fail");

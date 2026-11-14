@@ -90,6 +90,8 @@ type fakeProxy struct {
 	renewIDs []string
 	// renewErr, if set, decides the Renew result for the nth (1-based) call.
 	renewErr func(n int) error
+	// openDelay slows Open, widening the window concurrent Gets race in.
+	openDelay time.Duration
 }
 
 func (f *fakeProxy) Renew(_ context.Context, r *pb.RenewRequest) (*pb.Lease, error) {
@@ -119,6 +121,7 @@ func (f *fakeProxy) requestedTTLs() []uint64 {
 }
 
 func (f *fakeProxy) Open(_ context.Context, r *pb.OpenRequest) (*pb.ProxyHandle, error) {
+	time.Sleep(f.openDelay)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.opens = append(f.opens, r.Template)
@@ -267,10 +270,11 @@ func TestWatchMapsEventTypes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ch, err := c.Registry().Watch(ctx, Template{"interface": "G"})
+	s, err := c.Registry().Watch(ctx, Template{"interface": "G"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	ch := s.C
 	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_REGISTERED, Capability: &pb.Capability{CapabilityId: "a"}}
 	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_EXPIRED, Capability: &pb.Capability{CapabilityId: "b"}}
 	reg.watchCh <- &pb.RegistryEvent{Type: pb.RegistryEvent_MODIFIED, Capability: &pb.Capability{CapabilityId: "c"}}
