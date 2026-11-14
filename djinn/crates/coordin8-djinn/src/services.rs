@@ -908,6 +908,7 @@ pub async fn run_all() -> Result<()> {
         Arc::clone(&space_store),
         Arc::clone(&space_manager),
     );
+    space_manager.spawn_txn_reconcile(sweep::SWEEP_EVERY);
     info!("  ✓ Space: ready");
 
     // ── gRPC servers ─────────────────────────────────────────────────────────
@@ -1441,6 +1442,7 @@ pub async fn run_space_on_listener_until(
         Arc::clone(&space_store),
         Arc::clone(&space_manager),
     );
+    space_manager.spawn_txn_reconcile(sweep::SWEEP_EVERY);
 
     let space_svc = SpaceServiceServer::with_interceptor(
         SpaceServiceImpl::new(Arc::clone(&space_manager), advertise_host, advertise_port)

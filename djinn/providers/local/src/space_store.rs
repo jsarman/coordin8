@@ -300,6 +300,21 @@ impl SpaceStore for InMemorySpaceStore {
         Ok(has_writes || has_takes)
     }
 
+    async fn list_txns(&self) -> Result<Vec<String>, Error> {
+        let mut ids: Vec<String> = [&self.uncommitted, &self.txn_taken, &self.txn_self_taken]
+            .into_iter()
+            .flat_map(|m| {
+                m.iter()
+                    .filter(|e| !e.value().is_empty())
+                    .map(|e| e.key().clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
     async fn list_all(&self) -> Result<Vec<TupleRecord>, Error> {
         Ok(self.tuples.iter().map(|r| r.clone()).collect())
     }

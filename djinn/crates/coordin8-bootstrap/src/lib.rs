@@ -40,13 +40,13 @@ use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
 use coordin8_core::{
-    CapabilityResolver, Error as CoreError, RegistryEntry, TransportConfig as CoreTransportConfig,
-    TxnEnlister,
+    CapabilityResolver, Error as CoreError, RegistryEntry, TransactionState,
+    TransportConfig as CoreTransportConfig, TxnEnlister,
 };
 use coordin8_proto::coordin8::{
     lease_service_client::LeaseServiceClient, registry_service_client::RegistryServiceClient,
     transaction_service_client::TransactionServiceClient, CancelRequest, Capability, EnlistRequest,
-    LookupRequest, RegisterRequest, TransportDescriptor,
+    GetStateRequest, LookupRequest, RegisterRequest, TransportDescriptor,
 };
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -646,6 +646,44 @@ impl TxnEnlister for RemoteTxnEnlister {
             }
             Err(status) => Err(CoreError::Internal(format!("enlist failed: {status}"))),
         }
+    }
+
+    async fn state(&self, txn_id: &str) -> Result<Option<TransactionState>, CoreError> {
+        // Discovery waits for TxnMgr indefinitely; a background reconcile
+        // must not, so bound the whole call.
+        let call = async {
+            let request = GetStateRequest {
+                txn_id: txn_id.to_string(),
+            };
+            let mut client = self.ensure_client().await?;
+            let resp = match client.get_state(request.clone()).await {
+                Err(status) if is_transport_failure(&status) => {
+                    self.rediscover().await?.get_state(request).await
+                }
+                other => other,
+            };
+            match resp {
+                Ok(r) => Ok(Some(state_from_wire(r.into_inner().state))),
+                Err(s) if s.code() == tonic::Code::NotFound => Ok(None),
+                Err(s) => Err(CoreError::Unavailable(format!("get_state failed: {s}"))),
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), call)
+            .await
+            .unwrap_or_else(|_| Err(CoreError::Unavailable("get_state timed out".into())))
+    }
+}
+
+/// Wire `TransactionState` to core. TxnMgr reports its internal `Aborting`
+/// as ABORTED; an unknown value is treated as undecided (left alone).
+fn state_from_wire(v: i32) -> TransactionState {
+    use coordin8_proto::coordin8::TransactionState as W;
+    match W::try_from(v) {
+        Ok(W::Prepared) => TransactionState::Prepared,
+        Ok(W::Committed) => TransactionState::Committed,
+        Ok(W::Aborted) => TransactionState::Aborted,
+        Ok(W::Voting) => TransactionState::Voting,
+        _ => TransactionState::Active,
     }
 }
 
