@@ -1,6 +1,6 @@
 # Code Review Fixes (2026-11-12) — PRD
 
-> **Status: In progress** — PRs #63–#68 open (2026-11-13). See `session-1-complete.md`. Not started: H4 (TLS), M1 (scans), M9 (authorization), and several Lows.
+> **Status: COMPLETE (merged to main, 2026-11-14)** — PRs #63–#69. See `session-1-complete.md`. Follow-up review: [`review-2026-11-14`](../review-2026-11-14/PRD.md). Not started (own initiatives / decisions): H4 (TLS), M1 (scans), M9 (authorization), L5–L7.
 
 ## Goal
 
