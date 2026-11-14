@@ -7,22 +7,15 @@
 #![cfg(unix)]
 
 use std::collections::HashMap;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use coordin8_bootstrap::self_register;
 use coordin8_proto::coordin8::registry_service_client::RegistryServiceClient;
 use coordin8_proto::coordin8::{LookupRequest, RegistryWatchRequest};
 
-/// Kills the wrapped child on drop so a failing assertion doesn't leak it.
-struct KillOnDrop(Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+mod common;
+use common::{djinn, restart_registry_on, start_registry, KillOnDrop};
 
 impl KillOnDrop {
     fn sigterm(&self) {
@@ -46,20 +39,6 @@ impl KillOnDrop {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-}
-
-fn djinn(args: &[&str], envs: &[(&str, String)]) -> KillOnDrop {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_djinn"));
-    cmd.args(args).stdout(Stdio::null()).stderr(Stdio::null());
-    for (k, v) in envs {
-        cmd.env(k, v);
-    }
-    KillOnDrop(cmd.spawn().expect("spawn djinn subprocess"))
-}
-
-async fn free_port() -> u16 {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    l.local_addr().unwrap().port()
 }
 
 async fn wait_until_accepting(host_port: &str, timeout: Duration) {
@@ -126,13 +105,10 @@ async fn bundled_djinn_exits_zero_on_sigterm() {
 /// within ~2s (the self-lease TTL is 30s) and exits 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_service_deregisters_on_sigterm() {
-    let reg_port = free_port().await;
-    let reg_hp = format!("127.0.0.1:{reg_port}");
+    let (_registry, reg_hp) = start_registry(&[]).await;
     let reg_url = format!("http://{reg_hp}");
-    let _registry = djinn(&["registry"], &[("COORDIN8_BIND_ADDR", reg_hp.clone())]);
-    wait_until_accepting(&reg_hp, Duration::from_secs(10)).await;
 
-    let space_port = free_port().await;
+    let space_port = common::free_port().await;
     let mut space = djinn(
         &["space"],
         &[
@@ -166,12 +142,8 @@ async fn split_service_deregisters_on_sigterm() {
 /// lease id would be a silent no-op and the entry would linger).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_uses_post_recovery_lease_id() {
-    let port = free_port().await;
-    let hp = format!("127.0.0.1:{port}");
+    let (mut registry, hp) = start_registry(&[]).await;
     let url = format!("http://{hp}");
-
-    let mut registry = djinn(&["registry"], &[("COORDIN8_BIND_ADDR", hp.clone())]);
-    wait_until_accepting(&hp, Duration::from_secs(10)).await;
 
     let channel = tonic::transport::Channel::from_shared(url.clone())
         .unwrap()
@@ -196,8 +168,7 @@ async fn cancel_uses_post_recovery_lease_id() {
 
     registry.0.kill().unwrap();
     registry.0.wait().unwrap();
-    let _fresh = djinn(&["registry"], &[("COORDIN8_BIND_ADDR", hp.clone())]);
-    wait_until_accepting(&hp, Duration::from_secs(10)).await;
+    let _fresh = restart_registry_on(&hp).await;
 
     // Wait for the renewal task to recover under a new lease.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -220,17 +191,9 @@ async fn cancel_uses_post_recovery_lease_id() {
 /// clean EOF) and the process exits 0 far inside the grace period.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_watch_stream_ends_unavailable_and_exit_is_prompt() {
-    let port = free_port().await;
-    let hp = format!("127.0.0.1:{port}");
+    let (mut registry, hp) =
+        start_registry(&[("COORDIN8_SHUTDOWN_GRACE_SECS", "15".to_string())]).await;
     let url = format!("http://{hp}");
-    let mut registry = djinn(
-        &["registry"],
-        &[
-            ("COORDIN8_BIND_ADDR", hp.clone()),
-            ("COORDIN8_SHUTDOWN_GRACE_SECS", "15".to_string()),
-        ],
-    );
-    wait_until_accepting(&hp, Duration::from_secs(10)).await;
 
     let channel = tonic::transport::Channel::from_shared(url)
         .unwrap()

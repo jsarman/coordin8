@@ -17,34 +17,14 @@
 //! (not a hand-rolled replica of it), so this actually proves the fix
 //! rather than just the server's NotFound contract.
 
-use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use coordin8_bootstrap::self_register;
 use coordin8_proto::coordin8::registry_service_client::RegistryServiceClient;
 use coordin8_proto::coordin8::LookupRequest;
 
-/// Kills the wrapped child on drop, so a panicking assertion (which skips
-/// the rest of the test function) still doesn't leak the subprocess.
-struct KillOnDrop(Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn spawn_registry_process(port: u16) -> KillOnDrop {
-    let child = Command::new(env!("CARGO_BIN_EXE_djinn"))
-        .arg("registry")
-        .env("COORDIN8_BIND_ADDR", format!("127.0.0.1:{port}"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn `djinn registry` subprocess");
-    KillOnDrop(child)
-}
+mod common;
+use common::{restart_registry_on, start_registry};
 
 async fn dial(addr: &str) -> RegistryServiceClient<tonic::transport::Channel> {
     let channel = tonic::transport::Channel::from_shared(addr.to_string())
@@ -68,22 +48,6 @@ async fn dial_authed(addr: &str) -> coordin8_observability::TracedAuthedChannel 
     coordin8_observability::wrap_traced_channel(channel, &coordin8_auth::ClientAuthConfig::trust())
 }
 
-/// Polls until a plain TCP connect to `addr` succeeds, or panics after
-/// `timeout`. Used to wait for the (real, separately-booting) subprocess to
-/// actually be accepting connections before the test proceeds.
-async fn wait_until_accepting(host_port: &str, timeout: Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if tokio::net::TcpStream::connect(host_port).await.is_ok() {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("nothing accepting connections on {host_port} after {timeout:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 async fn interface_is_registered(addr: &str, interface: &str) -> bool {
     let mut client = dial(addr).await;
     client
@@ -99,18 +63,8 @@ async fn interface_is_registered(addr: &str, interface: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn self_registration_recovers_after_registry_restarts() {
-    // Grab a probably-free ephemeral port, then release it immediately —
-    // the subprocess needs to bind it itself, so this can't hold the
-    // listener open. A tiny TOCTOU window is an acceptable trade-off here.
-    let port = {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        l.local_addr().unwrap().port()
-    };
-    let host_port = format!("127.0.0.1:{port}");
+    let (mut registry, host_port) = start_registry(&[]).await;
     let addr = format!("http://{host_port}");
-
-    let mut registry = spawn_registry_process(port);
-    wait_until_accepting(&host_port, Duration::from_secs(5)).await;
 
     // Short TTL (renewal interval = ttl.max(3)/3 = 1s) so the test doesn't
     // need to wait long for the fix's re-registration path to kick in.
@@ -139,8 +93,7 @@ async fn self_registration_recovers_after_registry_restarts() {
     // renewal task's next tick is guaranteed to hit NotFound.
     registry.0.kill().expect("kill registry subprocess");
     registry.0.wait().expect("reap registry subprocess");
-    let _fresh_registry = spawn_registry_process(port);
-    wait_until_accepting(&host_port, Duration::from_secs(5)).await;
+    let _fresh_registry = restart_registry_on(&host_port).await;
 
     // Poll rather than a single fixed sleep: the renewal interval is ~1s,
     // and re-registration takes one more RPC round trip after the NotFound.
