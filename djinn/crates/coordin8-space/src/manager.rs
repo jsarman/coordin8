@@ -11,7 +11,7 @@ use uuid::Uuid;
 use coordin8_core::shutdown::ShutdownSignal;
 use coordin8_core::{
     Error, LeaseRecord, Leasing, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord,
-    TxnEnlister,
+    TxnApplied, TxnEnlister,
 };
 use coordin8_registry::matcher::{matches, parse_template};
 
@@ -362,25 +362,10 @@ impl SpaceManager {
     /// visible store and broadcast them. Takes under the txn stay removed and
     /// their leases are cancelled.
     pub async fn commit_space_txn(&self, txn_id: &str) -> Result<(), Error> {
-        let (flushed, taken) = self.store.commit_txn(txn_id).await?;
-        self.enlisted.remove(txn_id);
-
-        // Tuples taken under the txn are consumed: cancel their leases.
-        for record in &taken {
-            let _ = self.lease_manager.cancel(&record.lease_id).await;
-        }
-
-        // Broadcast all newly visible tuples to wake blocked readers/takers.
-        for record in &flushed {
-            let _ = self.tuple_tx.send(record.clone());
-        }
-
-        debug!(
-            txn_id,
-            flushed = flushed.len(),
-            taken = taken.len(),
-            "space txn committed"
-        );
+        let applied = self.store.commit_txn(txn_id).await;
+        let (flushed, taken) = (applied.published.len(), applied.released.len());
+        self.settle(applied, txn_id).await?;
+        debug!(txn_id, flushed, taken, "space txn committed");
         Ok(())
     }
 
@@ -388,26 +373,32 @@ impl SpaceManager {
     /// their leases) and restore taken tuples back to the visible store.
     /// Restored tuples are broadcast to wake any blocked readers/takers.
     pub async fn abort_space_txn(&self, txn_id: &str) -> Result<(), Error> {
-        let (discarded, restored) = self.store.abort_txn(txn_id).await?;
-        self.enlisted.remove(txn_id);
+        let applied = self.store.abort_txn(txn_id).await;
+        let (restored, discarded) = (applied.published.len(), applied.released.len());
+        self.settle(applied, txn_id).await?;
+        debug!(txn_id, discarded, restored, "space txn aborted");
+        Ok(())
+    }
 
-        // Cancel leases on discarded uncommitted tuples.
-        for record in &discarded {
+    /// Act on whatever a commit/abort moved, even when part of it failed:
+    /// tuples that became visible are broadcast (wake blocked readers and
+    /// takers), tuples gone for good have their leases cancelled. On a
+    /// partial failure the rest stays buffered and the error goes back to the
+    /// coordinator, which re-sends; the replay moves only what is left.
+    async fn settle(&self, applied: TxnApplied, txn_id: &str) -> Result<(), Error> {
+        for record in &applied.released {
             let _ = self.lease_manager.cancel(&record.lease_id).await;
         }
-
-        // Broadcast restored tuples — wake blocked read/take waiters.
-        for record in &restored {
+        for record in &applied.published {
             let _ = self.tuple_tx.send(record.clone());
         }
-
-        debug!(
-            txn_id,
-            discarded = discarded.len(),
-            restored = restored.len(),
-            "space txn aborted"
-        );
-        Ok(())
+        match applied.error {
+            None => {
+                self.enlisted.remove(txn_id);
+                Ok(())
+            }
+            Some(e) => Err(e),
+        }
     }
 
     /// Check if this Space has any uncommitted state for the given transaction.

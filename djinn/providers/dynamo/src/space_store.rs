@@ -7,7 +7,7 @@ use aws_sdk_dynamodb::{
 };
 use chrono::{DateTime, Utc};
 
-use coordin8_core::{Error, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord};
+use coordin8_core::{Error, SpaceEventKind, SpaceStore, SpaceWatchRecord, TupleRecord, TxnApplied};
 use coordin8_registry::matcher::{matches, parse_template};
 
 use crate::table::{
@@ -89,6 +89,21 @@ impl DynamoSpaceStore {
         key: HashMap<String, AttributeValue>,
         item: HashMap<String, AttributeValue>,
     ) -> Result<bool, Error> {
+        let to = self.txn_taken_table.clone();
+        self.move_row(from, key, Some((&to, item))).await
+    }
+
+    /// One `TransactWriteItems`: delete `key` from `from`, only if it still
+    /// exists, and (if given) put `item` into the `to` table. Either both
+    /// happen or neither. `Ok(false)` when the row was already gone or a
+    /// concurrent writer touched it: someone else moved it, so the caller
+    /// must not act on it again.
+    async fn move_row(
+        &self,
+        from: &str,
+        key: HashMap<String, AttributeValue>,
+        put: Option<(&str, HashMap<String, AttributeValue>)>,
+    ) -> Result<bool, Error> {
         let build = |e: aws_sdk_dynamodb::error::BuildError| Error::Storage(e.to_string());
         let delete = Delete::builder()
             .table_name(from)
@@ -96,19 +111,19 @@ impl DynamoSpaceStore {
             .condition_expression("attribute_exists(tuple_id)")
             .build()
             .map_err(build)?;
-        let put = Put::builder()
-            .table_name(&self.txn_taken_table)
-            .set_item(Some(item))
-            .build()
-            .map_err(build)?;
-        let result = self
+        let mut req = self
             .client
             .transact_write_items()
-            .transact_items(TransactWriteItem::builder().delete(delete).build())
-            .transact_items(TransactWriteItem::builder().put(put).build())
-            .send()
-            .await;
-        match result {
+            .transact_items(TransactWriteItem::builder().delete(delete).build());
+        if let Some((to, item)) = put {
+            let put = Put::builder()
+                .table_name(to)
+                .set_item(Some(item))
+                .build()
+                .map_err(build)?;
+            req = req.transact_items(TransactWriteItem::builder().put(put).build());
+        }
+        match req.send().await {
             Ok(_) => Ok(true),
             Err(e) => {
                 let lost_race = e
@@ -129,9 +144,62 @@ impl DynamoSpaceStore {
                     Ok(false)
                 } else {
                     Err(Error::Storage(format!(
-                        "transact_write_items (take into txn_taken) failed: {e}"
+                        "transact_write_items (move from {from}) failed: {e}"
                     )))
                 }
+            }
+        }
+    }
+
+    /// Key of a row in a txn buffer table.
+    fn buffer_key(
+        txn_id: &str,
+        item: &HashMap<String, AttributeValue>,
+    ) -> Result<HashMap<String, AttributeValue>, Error> {
+        let tuple_id = item
+            .get("tuple_id")
+            .and_then(|v| v.as_s().ok())
+            .ok_or_else(|| Error::Storage("txn buffer row without tuple_id".into()))?;
+        Ok(HashMap::from([
+            ("txn_id".to_string(), AttributeValue::S(txn_id.to_string())),
+            ("tuple_id".to_string(), AttributeValue::S(tuple_id.clone())),
+        ]))
+    }
+
+    /// Move every row of `txn_id` out of a buffer table. `publish(item)`
+    /// decides each row's fate: `true` puts it into the tuple table (visible),
+    /// `false` just deletes it. Each row moves in its own atomic write,
+    /// conditional on the row still being buffered, so a replay or a
+    /// concurrent apply never moves a tuple twice.
+    async fn drain_buffer(
+        &self,
+        table: &str,
+        txn_id: &str,
+        publish: impl Fn(&HashMap<String, AttributeValue>) -> bool,
+        out: &mut TxnApplied,
+    ) {
+        let items = match query_by_pk(&self.client, table, "txn_id", txn_id).await {
+            Ok(items) => items,
+            Err(e) => return out.fail(e),
+        };
+        for item in &items {
+            let moved = async {
+                let record = tuple_from_item(item)?;
+                let key = Self::buffer_key(txn_id, item)?;
+                let visible = publish(item);
+                let put = visible.then(|| (self.tuple_table.as_str(), tuple_to_item(&record)));
+                Ok::<_, Error>(
+                    self.move_row(table, key, put)
+                        .await?
+                        .then_some((record, visible)),
+                )
+            }
+            .await;
+            match moved {
+                Ok(Some((record, true))) => out.published.push(record),
+                Ok(Some((record, false))) => out.released.push(record),
+                Ok(None) => {} // already moved by an earlier or concurrent apply
+                Err(e) => out.fail(e),
             }
         }
     }
@@ -709,108 +777,31 @@ impl SpaceStore for DynamoSpaceStore {
         Ok(results)
     }
 
-    async fn commit_txn(
-        &self,
-        txn_id: &str,
-    ) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error> {
-        // Flush uncommitted writes to the visible store
-        let uncommitted_items =
-            query_by_pk(&self.client, &self.uncommitted_table, "txn_id", txn_id).await?;
-
-        let mut flushed = Vec::new();
-        for item in &uncommitted_items {
-            let record = tuple_from_item(item)?;
-            self.insert(record.clone()).await?;
-            flushed.push(record);
-
-            // Remove from uncommitted
-            self.client
-                .delete_item()
-                .table_name(&self.uncommitted_table)
-                .key("txn_id", AttributeValue::S(txn_id.to_string()))
-                .key(
-                    "tuple_id",
-                    AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()),
-                )
-                .send()
-                .await
-                .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
-        }
-
-        // Finalize takes — clean up tracking buffer (they stay removed)
-        let taken_items =
-            query_by_pk(&self.client, &self.txn_taken_table, "txn_id", txn_id).await?;
-        let mut taken = Vec::new();
-        for item in &taken_items {
-            taken.push(tuple_from_item(item)?);
-            self.client
-                .delete_item()
-                .table_name(&self.txn_taken_table)
-                .key("txn_id", AttributeValue::S(txn_id.to_string()))
-                .key(
-                    "tuple_id",
-                    AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()),
-                )
-                .send()
-                .await
-                .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
-        }
-
-        Ok((flushed, taken))
+    async fn commit_txn(&self, txn_id: &str) -> TxnApplied {
+        let mut out = TxnApplied::default();
+        // Uncommitted writes become visible; takes (own writes included)
+        // stay removed.
+        self.drain_buffer(&self.uncommitted_table, txn_id, |_| true, &mut out)
+            .await;
+        self.drain_buffer(&self.txn_taken_table, txn_id, |_| false, &mut out)
+            .await;
+        out
     }
 
-    async fn abort_txn(&self, txn_id: &str) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error> {
-        // Discard uncommitted writes
-        let uncommitted_items =
-            query_by_pk(&self.client, &self.uncommitted_table, "txn_id", txn_id).await?;
-
-        let mut discarded = Vec::new();
-        for item in &uncommitted_items {
-            let record = tuple_from_item(item)?;
-            discarded.push(record);
-
-            self.client
-                .delete_item()
-                .table_name(&self.uncommitted_table)
-                .key("txn_id", AttributeValue::S(txn_id.to_string()))
-                .key(
-                    "tuple_id",
-                    AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()),
-                )
-                .send()
-                .await
-                .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
-        }
-
-        // Restore taken tuples back to committed store
-        let taken_items =
-            query_by_pk(&self.client, &self.txn_taken_table, "txn_id", txn_id).await?;
-
-        let mut restored = Vec::new();
-        for item in &taken_items {
-            let record = tuple_from_item(item)?;
-            if is_own_write(item) {
-                // The txn's own write that it then took — discard, never restore.
-                discarded.push(record);
-            } else {
-                self.insert(record.clone()).await?;
-                restored.push(record);
-            }
-
-            self.client
-                .delete_item()
-                .table_name(&self.txn_taken_table)
-                .key("txn_id", AttributeValue::S(txn_id.to_string()))
-                .key(
-                    "tuple_id",
-                    AttributeValue::S(item.get("tuple_id").unwrap().as_s().unwrap().clone()),
-                )
-                .send()
-                .await
-                .map_err(|e| Error::Storage(format!("delete_item failed: {e}")))?;
-        }
-
-        Ok((discarded, restored))
+    async fn abort_txn(&self, txn_id: &str) -> TxnApplied {
+        let mut out = TxnApplied::default();
+        // Uncommitted writes are discarded; taken tuples go back, except the
+        // txn's own writes it then took, which never existed outside it.
+        self.drain_buffer(&self.uncommitted_table, txn_id, |_| false, &mut out)
+            .await;
+        self.drain_buffer(
+            &self.txn_taken_table,
+            txn_id,
+            |item| !is_own_write(item),
+            &mut out,
+        )
+        .await;
+        out
     }
 
     async fn has_txn(&self, txn_id: &str) -> Result<bool, Error> {
@@ -1097,7 +1088,9 @@ mod tests {
         assert!(!store.has_txn(loser).await.unwrap());
 
         // Abort restores it.
-        let (_, restored) = store.abort_txn(winner).await.unwrap();
+        let applied = store.abort_txn(winner).await;
+        assert!(applied.error.is_none(), "{:?}", applied.error);
+        let (_, restored) = (applied.released, applied.published);
         assert_eq!(restored.len(), 1);
         assert!(store.get("t-race").await.unwrap().is_some());
 
@@ -1135,7 +1128,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (flushed, taken) = store.commit_txn("txn-commit").await.unwrap();
+        let applied = store.commit_txn("txn-commit").await;
+        assert!(applied.error.is_none(), "{:?}", applied.error);
+        let (flushed, taken) = (applied.published, applied.released);
         assert!(taken.is_empty());
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].tuple_id, "t-c1");
@@ -1179,7 +1174,9 @@ mod tests {
         assert_eq!(taken.unwrap().tuple_id, "t-taken");
 
         // Abort — uncommitted should be discarded, taken should be restored
-        let (discarded, restored) = store.abort_txn("txn-abort").await.unwrap();
+        let applied = store.abort_txn("txn-abort").await;
+        assert!(applied.error.is_none(), "{:?}", applied.error);
+        let (discarded, restored) = (applied.released, applied.published);
         assert_eq!(discarded.len(), 1);
         assert_eq!(discarded[0].tuple_id, "t-uc");
         assert_eq!(restored.len(), 1);
@@ -1192,6 +1189,77 @@ mod tests {
         // Uncommitted tuple is gone
         let fetched_uc = store.get("t-uc").await.unwrap();
         assert!(fetched_uc.is_none());
+
+        teardown(&client, &tables).await;
+    }
+
+    /// N4 (review 2026-11-14): recovery replays Commit. A replay — or two
+    /// applies racing — must move each tuple exactly once; re-publishing a
+    /// tuple a worker has since taken would hand it out twice.
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn commit_replay_and_race_move_each_tuple_once() {
+        let (store, tables, client) = setup().await;
+        let store = std::sync::Arc::new(store);
+        for i in 0..5 {
+            store
+                .insert_uncommitted(
+                    "txn-rp",
+                    make_tuple(&format!("t-rp{i}"), &format!("l-rp{i}")),
+                )
+                .await
+                .unwrap();
+        }
+
+        let (a, b) = tokio::join!(store.commit_txn("txn-rp"), store.commit_txn("txn-rp"));
+        assert!(
+            a.error.is_none() && b.error.is_none(),
+            "{:?} {:?}",
+            a.error,
+            b.error
+        );
+        assert_eq!(
+            a.published.len() + b.published.len(),
+            5,
+            "each tuple published once"
+        );
+
+        // A worker takes one; a later replay must not bring it back.
+        let mut template = HashMap::new();
+        template.insert("type".to_string(), "order".to_string());
+        let took = store.take_match(&template, None).await.unwrap().unwrap();
+        let replay = store.commit_txn("txn-rp").await;
+        assert!(replay.error.is_none());
+        assert!(replay.published.is_empty() && replay.released.is_empty());
+        assert!(store.get(&took.tuple_id).await.unwrap().is_none());
+        assert!(!store.has_txn("txn-rp").await.unwrap());
+
+        teardown(&client, &tables).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MiniStack on localhost:4566"]
+    async fn abort_replay_restores_once() {
+        let (store, tables, client) = setup().await;
+        store.insert(make_tuple("t-ar", "l-ar")).await.unwrap();
+        let mut template = HashMap::new();
+        template.insert("type".to_string(), "order".to_string());
+        store
+            .take_match(&template, Some("txn-ar"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let first = store.abort_txn("txn-ar").await;
+        assert!(first.error.is_none());
+        assert_eq!(first.published.len(), 1);
+
+        // Restored, then taken by a worker; a replayed Abort must not restore it again.
+        store.take_match(&template, None).await.unwrap().unwrap();
+        let replay = store.abort_txn("txn-ar").await;
+        assert!(replay.error.is_none());
+        assert!(replay.published.is_empty());
+        assert!(store.get("t-ar").await.unwrap().is_none());
 
         teardown(&client, &tables).await;
     }
@@ -1266,7 +1334,9 @@ mod tests {
         let removed = store.remove_by_lease("lease-x").await.unwrap();
         assert_eq!(removed.unwrap().tuple_id, "t-x");
 
-        let (flushed, taken) = store.commit_txn("txn-x").await.unwrap();
+        let applied = store.commit_txn("txn-x").await;
+        assert!(applied.error.is_none(), "{:?}", applied.error);
+        let (flushed, taken) = (applied.published, applied.released);
         assert!(flushed.is_empty() && taken.is_empty());
         assert!(store.get("t-x").await.unwrap().is_none());
 
@@ -1288,7 +1358,9 @@ mod tests {
         let removed = store.remove_by_lease("lease-y").await.unwrap();
         assert_eq!(removed.unwrap().tuple_id, "t-y");
 
-        let (discarded, restored) = store.abort_txn("txn-y").await.unwrap();
+        let applied = store.abort_txn("txn-y").await;
+        assert!(applied.error.is_none(), "{:?}", applied.error);
+        let (discarded, restored) = (applied.released, applied.published);
         assert!(discarded.is_empty() && restored.is_empty());
         assert!(store.get("t-y").await.unwrap().is_none());
 
@@ -1318,7 +1390,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let (flushed, taken) = store.commit_txn("txn-z").await.unwrap();
+        let applied = store.commit_txn("txn-z").await;
+        assert!(applied.error.is_none(), "{:?}", applied.error);
+        let (flushed, taken) = (applied.published, applied.released);
         assert!(flushed.is_empty());
         let mut ids: Vec<_> = taken.iter().map(|r| r.tuple_id.as_str()).collect();
         ids.sort();
