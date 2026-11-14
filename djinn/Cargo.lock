@@ -994,6 +994,7 @@ dependencies = [
  "coordin8-provider-local",
  "coordin8-registry",
  "dashmap",
+ "futures",
  "futures-core",
  "prost-types 0.13.5",
  "tokio",

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use dashmap::DashMap;
+use futures::stream::{self, StreamExt};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -18,6 +19,9 @@ use coordin8_registry::matcher::{matches, parse_template};
 fn shutting_down() -> Error {
     Error::Unavailable("space is shutting down; retry against another instance".into())
 }
+
+/// How many `GetState` lookups one reconcile pass runs at once.
+const RECONCILE_CONCURRENCY: usize = 8;
 
 pub struct SpaceManager {
     store: Arc<dyn SpaceStore>,
@@ -44,9 +48,10 @@ pub struct SpaceManager {
     /// Live Notify streams by watch lease id: fired when the lease is
     /// reclaimed, so the stream ends with its watch.
     watch_ends: DashMap<String, tokio::sync::oneshot::Sender<()>>,
-    /// Transactions the coordinator had no record of on the last reconcile
-    /// pass. One "no record" answer is not enough to abort: it takes two
-    /// passes in a row, as the orphan sweep does for resources.
+    /// Transactions the coordinator had no record of on an earlier reconcile
+    /// pass. One "no record" answer is not enough to abort: it takes two,
+    /// with no other answer between them (a pass that got no answer at all
+    /// does not reset the mark), as the orphan sweep does for resources.
     unknown_txns: DashMap<String, ()>,
 }
 
@@ -423,12 +428,20 @@ impl SpaceManager {
         let held = self.store.list_txns().await?;
         // Forget marks for transactions this Space no longer holds.
         self.unknown_txns.retain(|id, _| held.contains(id));
-        for txn_id in held {
-            let state = match enlister.state(&txn_id).await {
+        // Look up several at once; the first lookup that fails ends the pass
+        // (the coordinator is down or not answering, so the rest would each
+        // wait out their timeout too). Next pass retries everything.
+        let mut lookups = stream::iter(held.into_iter().map(|txn_id| async move {
+            let state = enlister.state(&txn_id).await;
+            (txn_id, state)
+        }))
+        .buffer_unordered(RECONCILE_CONCURRENCY);
+        while let Some((txn_id, state)) = lookups.next().await {
+            let state = match state {
                 Ok(s) => s,
                 Err(e) => {
-                    debug!(txn_id, error = %e, "reconcile: coordinator unreachable, retry later");
-                    continue;
+                    debug!(txn_id, error = %e, "reconcile: coordinator not answering, ending this pass");
+                    break;
                 }
             };
             if state.is_some() {
@@ -439,8 +452,8 @@ impl SpaceManager {
                     self.commit_space_txn(&txn_id).await
                 }
                 Some(s) if s.is_abort() => self.abort_space_txn(&txn_id).await,
-                // No record twice in a row: the coordinator never committed
-                // it and has forgotten it. Once could be a transient miss.
+                // A second "no record": the coordinator never committed it
+                // and has forgotten it. Once could be a transient miss.
                 None if self.unknown_txns.remove(&txn_id).is_some() => {
                     self.abort_space_txn(&txn_id).await
                 }

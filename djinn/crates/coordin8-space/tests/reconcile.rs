@@ -15,6 +15,7 @@ use tokio::sync::broadcast;
 struct FakeCoordinator {
     states: Mutex<HashMap<String, TransactionState>>,
     unreachable: Mutex<bool>,
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeCoordinator {
@@ -29,7 +30,9 @@ impl TxnEnlister for FakeCoordinator {
         Ok(())
     }
     async fn state(&self, txn_id: &str) -> Result<Option<TransactionState>, Error> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if *self.unreachable.lock().unwrap() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             return Err(Error::Unavailable("down".into()));
         }
         Ok(self.states.lock().unwrap().get(txn_id).cloned())
@@ -163,4 +166,31 @@ async fn no_record_must_repeat_consecutively() {
     assert!(mgr.has_txn("t4").await.unwrap());
     assert_eq!(mgr.reconcile_txns().await.unwrap(), 1);
     assert!(!mgr.has_txn("t4").await.unwrap());
+}
+
+/// Round 3 (review 2026-11-14): with the coordinator down a pass must not
+/// wait out one timeout per held transaction. The first failed lookup ends
+/// the pass; at most one batch of lookups is ever in flight.
+#[tokio::test]
+async fn coordinator_down_ends_the_pass_early() {
+    let (mgr, coord) = make();
+    for i in 0..20 {
+        write(&mgr, "w", Some(&format!("t{i}"))).await;
+    }
+    *coord.unreachable.lock().unwrap() = true;
+    let started = std::time::Instant::now();
+    assert_eq!(mgr.reconcile_txns().await.unwrap(), 0);
+    let calls = coord.calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(calls <= 8, "{calls} lookups for one failed pass");
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+
+    *coord.unreachable.lock().unwrap() = false;
+    for i in 0..20 {
+        coord.set(&format!("t{i}"), TransactionState::Committed);
+    }
+    assert_eq!(
+        mgr.reconcile_txns().await.unwrap(),
+        20,
+        "next pass does them all"
+    );
 }
