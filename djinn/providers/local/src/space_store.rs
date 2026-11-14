@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use dashmap::DashMap;
 
-use coordin8_core::{Error, SpaceStore, SpaceWatchRecord, TupleRecord};
+use coordin8_core::{Error, SpaceStore, SpaceWatchRecord, TupleRecord, TxnApplied};
 use coordin8_registry::matcher::{matches, parse_template};
 
 pub struct InMemorySpaceStore {
@@ -212,10 +212,7 @@ impl SpaceStore for InMemorySpaceStore {
         Ok(results)
     }
 
-    async fn commit_txn(
-        &self,
-        txn_id: &str,
-    ) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error> {
+    async fn commit_txn(&self, txn_id: &str) -> TxnApplied {
         // Flush uncommitted writes to the visible store.
         let flushed = if let Some((_, tuples)) = self.uncommitted.remove(txn_id) {
             for record in &tuples {
@@ -246,10 +243,15 @@ impl SpaceStore for InMemorySpaceStore {
             self.txn_lease_index.remove(&record.lease_id);
         }
 
-        Ok((flushed, taken))
+        // Each buffer is removed atomically, so a repeat finds nothing.
+        TxnApplied {
+            published: flushed,
+            released: taken,
+            error: None,
+        }
     }
 
-    async fn abort_txn(&self, txn_id: &str) -> Result<(Vec<TupleRecord>, Vec<TupleRecord>), Error> {
+    async fn abort_txn(&self, txn_id: &str) -> TxnApplied {
         // Discard uncommitted writes — return them for lease cleanup.
         let mut discarded = if let Some((_, tuples)) = self.uncommitted.remove(txn_id) {
             tuples
@@ -278,7 +280,11 @@ impl SpaceStore for InMemorySpaceStore {
             vec![]
         };
 
-        Ok((discarded, restored))
+        TxnApplied {
+            published: restored,
+            released: discarded,
+            error: None,
+        }
     }
 
     async fn has_txn(&self, txn_id: &str) -> Result<bool, Error> {
