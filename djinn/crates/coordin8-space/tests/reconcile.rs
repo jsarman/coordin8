@@ -138,7 +138,29 @@ async fn unknown_txn_is_aborted_and_unreachable_coordinator_is_not() {
     );
 
     *coord.unreachable.lock().unwrap() = false;
-    assert_eq!(mgr.reconcile_txns().await.unwrap(), 1);
+    assert_eq!(
+        mgr.reconcile_txns().await.unwrap(),
+        0,
+        "one 'no record' answer is not enough"
+    );
+    assert!(mgr.has_txn("t3").await.unwrap());
+    assert_eq!(mgr.reconcile_txns().await.unwrap(), 1, "second in a row");
     assert!(!mgr.has_txn("t3").await.unwrap());
     assert!(!visible(&mgr, "w").await, "uncommitted write discarded");
+}
+
+/// A "no record" answer followed by a real one resets the count: a
+/// transient miss must not leave the txn one pass from being aborted.
+#[tokio::test]
+async fn no_record_must_repeat_consecutively() {
+    let (mgr, coord) = make();
+    write(&mgr, "w", Some("t4")).await;
+    assert_eq!(mgr.reconcile_txns().await.unwrap(), 0, "first miss");
+    coord.set("t4", TransactionState::Active);
+    assert_eq!(mgr.reconcile_txns().await.unwrap(), 0, "found again");
+    coord.states.lock().unwrap().remove("t4");
+    assert_eq!(mgr.reconcile_txns().await.unwrap(), 0, "a new first miss");
+    assert!(mgr.has_txn("t4").await.unwrap());
+    assert_eq!(mgr.reconcile_txns().await.unwrap(), 1);
+    assert!(!mgr.has_txn("t4").await.unwrap());
 }

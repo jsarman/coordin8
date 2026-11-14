@@ -1,6 +1,6 @@
 # Follow-up Review Fixes (2026-11-14) — PRD
 
-> **Status: In progress** — PRs #70–#74 open (2026-11-14), plan docs #75. See `session-1-complete.md`. Not started: L-a's operator "force outcome" command, plus everything carried over from [`review-2026-11-12`](../review-2026-11-12/PRD.md) (H4 TLS, M1 scans, M9 authorization, L5–L7, proxy connection cap, mailbox cap).
+> **Status: COMPLETE (merged to main, 2026-11-14)** — PRs #70–#75; round-3 follow-up (GetState NOT_FOUND mapping) in session 2. See `session-1-complete.md`, `session-2-complete.md`. Not started: L-a's operator "force outcome" command, plus everything carried over from [`review-2026-11-12`](../review-2026-11-12/PRD.md) (H4 TLS, M1 scans, M9 authorization, L5–L7, proxy connection cap, mailbox cap).
 
 ## Goal
 
