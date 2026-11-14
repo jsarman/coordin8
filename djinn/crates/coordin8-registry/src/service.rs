@@ -10,6 +10,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use coordin8_core::{Leasing, RegistryEntry, TransportConfig};
+use coordin8_proto::coordin8::registry_event::EventType;
 use coordin8_proto::coordin8::{
     registry_service_server::RegistryService, Capability, LookupRequest, ModifyAttrsRequest,
     RegisterRequest, RegisterResponse, RegistryEvent, RegistryWatchRequest,
@@ -180,7 +181,7 @@ impl RegistryService for RegistryServiceImpl {
                 );
 
                 let _ = self.event_tx.send(RegistryChangedEvent {
-                    event_type: 2, // MODIFIED
+                    event_type: EventType::Modified as i32,
                     entry,
                 });
             } else {
@@ -234,7 +235,7 @@ impl RegistryService for RegistryServiceImpl {
             );
 
             let _ = self.event_tx.send(RegistryChangedEvent {
-                event_type: 0, // REGISTERED
+                event_type: EventType::Registered as i32,
                 entry,
             });
 
@@ -284,7 +285,7 @@ impl RegistryService for RegistryServiceImpl {
         );
 
         let _ = self.event_tx.send(RegistryChangedEvent {
-            event_type: 2, // MODIFIED
+            event_type: EventType::Modified as i32,
             entry: entry.clone(),
         });
 
@@ -599,7 +600,7 @@ mod tests {
             .await
             .unwrap();
         let evt = rx.try_recv().expect("attr change must emit MODIFIED");
-        assert_eq!(evt.event_type, 2);
+        assert_eq!(evt.event_type, EventType::Modified as i32);
         assert!(rx.try_recv().is_err());
     }
 
@@ -623,7 +624,7 @@ mod tests {
         };
         for _ in 0..10 {
             let _ = tx.send(RegistryChangedEvent {
-                event_type: 0,
+                event_type: EventType::Registered as i32,
                 entry: entry.clone(),
             });
         }

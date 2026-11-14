@@ -5,6 +5,7 @@ use tracing::debug;
 
 use coordin8_proto::coordin8::{
     participant_service_server::ParticipantService, ParticipantRequest, PrepareResponse,
+    PrepareVote,
 };
 
 use crate::manager::SpaceManager;
@@ -52,13 +53,13 @@ impl ParticipantService for SpaceParticipantService {
 
         let vote = if has_state {
             debug!(txn_id, "space participant: PREPARED");
-            0 // VOTE_PREPARED
+            PrepareVote::VotePrepared
         } else {
             debug!(txn_id, "space participant: NOTCHANGED");
-            1 // VOTE_NOTCHANGED
+            PrepareVote::VoteNotchanged
         };
 
-        Ok(Response::new(PrepareResponse { vote }))
+        Ok(Response::new(PrepareResponse { vote: vote as i32 }))
     }
 
     async fn commit(&self, req: Request<ParticipantRequest>) -> Result<Response<()>, Status> {
@@ -100,10 +101,14 @@ impl ParticipantService for SpaceParticipantService {
                 .map_err(map_err)?;
 
             debug!(txn_id, "space participant: prepare-and-commit (PREPARED)");
-            Ok(Response::new(PrepareResponse { vote: 0 }))
+            Ok(Response::new(PrepareResponse {
+                vote: PrepareVote::VotePrepared as i32,
+            }))
         } else {
             debug!(txn_id, "space participant: prepare-and-commit (NOTCHANGED)");
-            Ok(Response::new(PrepareResponse { vote: 1 }))
+            Ok(Response::new(PrepareResponse {
+                vote: PrepareVote::VoteNotchanged as i32,
+            }))
         }
     }
 }

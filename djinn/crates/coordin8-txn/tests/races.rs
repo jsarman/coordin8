@@ -11,7 +11,7 @@ use coordin8_core::{Error, Leasing, TransactionState, TxnStore};
 use coordin8_lease::LeaseManager;
 use coordin8_proto::coordin8::{
     participant_service_server::{ParticipantService, ParticipantServiceServer},
-    ParticipantRequest, PrepareResponse,
+    ParticipantRequest, PrepareResponse, PrepareVote,
 };
 use coordin8_provider_local::{InMemoryLeaseStore, InMemoryTxnStore};
 use coordin8_txn::TxnManager;
@@ -27,7 +27,9 @@ impl ParticipantService for SlowParticipant {
         &self,
         _: Request<ParticipantRequest>,
     ) -> Result<Response<PrepareResponse>, Status> {
-        Ok(Response::new(PrepareResponse { vote: 0 }))
+        Ok(Response::new(PrepareResponse {
+            vote: PrepareVote::VotePrepared as i32,
+        }))
     }
     async fn commit(&self, _: Request<ParticipantRequest>) -> Result<Response<()>, Status> {
         Ok(Response::new(()))
@@ -40,7 +42,9 @@ impl ParticipantService for SlowParticipant {
         _: Request<ParticipantRequest>,
     ) -> Result<Response<PrepareResponse>, Status> {
         tokio::time::sleep(self.delay).await;
-        Ok(Response::new(PrepareResponse { vote: 0 }))
+        Ok(Response::new(PrepareResponse {
+            vote: PrepareVote::VotePrepared as i32,
+        }))
     }
 }
 
@@ -218,4 +222,57 @@ async fn forged_lease_reclaim_does_not_abort() {
         store.get(&txn_id).await.unwrap().unwrap().state,
         TransactionState::Aborted
     );
+}
+
+/// An empty `PrepareResponse` (vote unset, decoded as 0 =
+/// `VOTE_UNSPECIFIED`) must not count as a yes vote.
+#[tokio::test]
+async fn empty_prepare_response_aborts() {
+    struct Mute;
+    #[tonic::async_trait]
+    impl ParticipantService for Mute {
+        async fn prepare(
+            &self,
+            _: Request<ParticipantRequest>,
+        ) -> Result<Response<PrepareResponse>, Status> {
+            Ok(Response::new(PrepareResponse::default()))
+        }
+        async fn commit(&self, _: Request<ParticipantRequest>) -> Result<Response<()>, Status> {
+            Ok(Response::new(()))
+        }
+        async fn abort(&self, _: Request<ParticipantRequest>) -> Result<Response<()>, Status> {
+            Ok(Response::new(()))
+        }
+        async fn prepare_and_commit(
+            &self,
+            _: Request<ParticipantRequest>,
+        ) -> Result<Response<PrepareResponse>, Status> {
+            Ok(Response::new(PrepareResponse::default()))
+        }
+    }
+    let mut eps = Vec::new();
+    for _ in 0..2 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        eps.push(listener.local_addr().unwrap().to_string());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ParticipantServiceServer::new(Mute))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+    }
+
+    // Two participants (full 2PC) and one (PrepareAndCommit fast path).
+    for n in [2, 1] {
+        let (mgr, store) = make_manager();
+        let (txn_id, _) = mgr.begin(60).await.unwrap();
+        for ep in &eps[..n] {
+            mgr.enlist(&txn_id, ep.clone(), 0).await.unwrap();
+        }
+        assert!(mgr.commit(&txn_id).await.is_err(), "{n} participant(s)");
+        assert_eq!(
+            store.get(&txn_id).await.unwrap().unwrap().state,
+            TransactionState::Aborted,
+            "{n} participant(s)"
+        );
+    }
 }

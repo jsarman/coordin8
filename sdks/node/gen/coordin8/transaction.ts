@@ -80,25 +80,35 @@ export function transactionStateToJSON(object: TransactionState): string {
   }
 }
 
+/**
+ * 0 is deliberately not a vote: proto3 decodes an unset field (an empty
+ * PrepareResponse) as 0, and that must never count as a yes. The coordinator
+ * treats UNSPECIFIED, like any unknown value, as ABORTED.
+ */
 export enum PrepareVote {
+  /** VOTE_UNSPECIFIED - no vote; treated as ABORTED */
+  VOTE_UNSPECIFIED = 0,
   /** VOTE_PREPARED - state modified; ready to commit */
-  VOTE_PREPARED = 0,
+  VOTE_PREPARED = 1,
   /** VOTE_NOTCHANGED - read-only participant; no action needed at commit */
-  VOTE_NOTCHANGED = 1,
+  VOTE_NOTCHANGED = 2,
   /** VOTE_ABORTED - cannot commit; transaction must abort */
-  VOTE_ABORTED = 2,
+  VOTE_ABORTED = 3,
   UNRECOGNIZED = -1,
 }
 
 export function prepareVoteFromJSON(object: any): PrepareVote {
   switch (object) {
     case 0:
+    case "VOTE_UNSPECIFIED":
+      return PrepareVote.VOTE_UNSPECIFIED;
+    case 1:
     case "VOTE_PREPARED":
       return PrepareVote.VOTE_PREPARED;
-    case 1:
+    case 2:
     case "VOTE_NOTCHANGED":
       return PrepareVote.VOTE_NOTCHANGED;
-    case 2:
+    case 3:
     case "VOTE_ABORTED":
       return PrepareVote.VOTE_ABORTED;
     case -1:
@@ -110,6 +120,8 @@ export function prepareVoteFromJSON(object: any): PrepareVote {
 
 export function prepareVoteToJSON(object: PrepareVote): string {
   switch (object) {
+    case PrepareVote.VOTE_UNSPECIFIED:
+      return "VOTE_UNSPECIFIED";
     case PrepareVote.VOTE_PREPARED:
       return "VOTE_PREPARED";
     case PrepareVote.VOTE_NOTCHANGED:

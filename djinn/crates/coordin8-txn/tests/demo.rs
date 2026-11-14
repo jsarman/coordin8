@@ -17,7 +17,7 @@ use coordin8_core::{Leasing, TransactionState};
 use coordin8_lease::LeaseManager;
 use coordin8_proto::coordin8::{
     participant_service_server::{ParticipantService, ParticipantServiceServer},
-    ParticipantRequest, PrepareResponse,
+    ParticipantRequest, PrepareResponse, PrepareVote,
 };
 use coordin8_provider_local::{InMemoryLeaseStore, InMemoryTxnStore};
 use coordin8_txn::TxnManager;
@@ -27,7 +27,7 @@ use coordin8_txn::TxnManager;
 /// A mock participant that records what happened to it.
 struct MockParticipant {
     name: String,
-    /// What vote to cast in Prepare (0=PREPARED, 1=NOTCHANGED, 2=ABORTED)
+    /// What vote to cast in Prepare (a wire `PrepareVote`)
     prepare_vote: i32,
     pub prepared: Arc<AtomicBool>,
     pub committed: Arc<AtomicBool>,
@@ -56,11 +56,9 @@ impl ParticipantService for MockParticipant {
         req: Request<ParticipantRequest>,
     ) -> Result<Response<PrepareResponse>, Status> {
         self.prepared.store(true, Ordering::SeqCst);
-        let vote_name = match self.prepare_vote {
-            1 => "NOTCHANGED",
-            2 => "ABORTED",
-            _ => "PREPARED",
-        };
+        let vote_name = PrepareVote::try_from(self.prepare_vote)
+            .map(|v| v.as_str_name())
+            .unwrap_or("?");
         println!(
             "    [{}] prepare({}) → {}",
             self.name,
@@ -97,7 +95,7 @@ impl ParticipantService for MockParticipant {
         req: Request<ParticipantRequest>,
     ) -> Result<Response<PrepareResponse>, Status> {
         let tid = &req.into_inner().txn_id[..8].to_string();
-        if self.prepare_vote == 0 {
+        if self.prepare_vote == PrepareVote::VotePrepared as i32 {
             self.committed.store(true, Ordering::SeqCst);
             println!(
                 "    [{}] prepare_and_commit({}) → PREPARED+committed",
@@ -160,7 +158,8 @@ async fn single_participant_commit() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let mgr = make_manager();
-    let (ep, committed, aborted) = spawn_participant("store-A", 0 /* PREPARED */).await;
+    let (ep, committed, aborted) =
+        spawn_participant("store-A", PrepareVote::VotePrepared as i32).await;
 
     let (txn_id, _lease) = mgr.begin(60).await.unwrap();
     println!("  Begin:  txn={}", &txn_id[..8]);
@@ -200,8 +199,10 @@ async fn multi_participant_all_prepared_commits() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let mgr = make_manager();
-    let (ep_a, committed_a, aborted_a) = spawn_participant("store-A", 0 /* PREPARED */).await;
-    let (ep_b, committed_b, aborted_b) = spawn_participant("store-B", 0 /* PREPARED */).await;
+    let (ep_a, committed_a, aborted_a) =
+        spawn_participant("store-A", PrepareVote::VotePrepared as i32).await;
+    let (ep_b, committed_b, aborted_b) =
+        spawn_participant("store-B", PrepareVote::VotePrepared as i32).await;
 
     let (txn_id, _) = mgr.begin(60).await.unwrap();
     println!("  Begin:  txn={}", &txn_id[..8]);
@@ -243,8 +244,10 @@ async fn participant_vetoes_aborts_everyone() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let mgr = make_manager();
-    let (ep_a, committed_a, aborted_a) = spawn_participant("store-A", 0 /* PREPARED */).await;
-    let (ep_b, committed_b, aborted_b) = spawn_participant("store-B", 2 /* ABORTED  */).await;
+    let (ep_a, committed_a, aborted_a) =
+        spawn_participant("store-A", PrepareVote::VotePrepared as i32).await;
+    let (ep_b, committed_b, aborted_b) =
+        spawn_participant("store-B", PrepareVote::VoteAborted as i32).await;
 
     let (txn_id, _) = mgr.begin(60).await.unwrap();
     println!("  Begin:  txn={}", &txn_id[..8]);
@@ -302,8 +305,10 @@ async fn explicit_abort_no_state_change() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let mgr = make_manager();
-    let (ep_a, committed_a, aborted_a) = spawn_participant("store-A", 0 /* PREPARED */).await;
-    let (ep_b, committed_b, aborted_b) = spawn_participant("store-B", 0 /* PREPARED */).await;
+    let (ep_a, committed_a, aborted_a) =
+        spawn_participant("store-A", PrepareVote::VotePrepared as i32).await;
+    let (ep_b, committed_b, aborted_b) =
+        spawn_participant("store-B", PrepareVote::VotePrepared as i32).await;
 
     let (txn_id, _) = mgr.begin(60).await.unwrap();
     println!("  Begin:  txn={}", &txn_id[..8]);
@@ -357,8 +362,10 @@ async fn notchanged_voter_skipped_at_commit() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let mgr = make_manager();
-    let (ep_a, committed_a, _) = spawn_participant("writer", 0 /* PREPARED    */).await;
-    let (ep_b, committed_b, _) = spawn_participant("readonly", 1 /* NOTCHANGED  */).await;
+    let (ep_a, committed_a, _) =
+        spawn_participant("writer", PrepareVote::VotePrepared as i32).await;
+    let (ep_b, committed_b, _) =
+        spawn_participant("readonly", PrepareVote::VoteNotchanged as i32).await;
 
     let (txn_id, _) = mgr.begin(60).await.unwrap();
     println!("  Begin:  txn={}", &txn_id[..8]);
@@ -402,7 +409,8 @@ async fn lease_expiry_auto_aborts() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let mgr = make_manager();
-    let (ep_a, committed_a, aborted_a) = spawn_participant("store-A", 0 /* PREPARED */).await;
+    let (ep_a, committed_a, aborted_a) =
+        spawn_participant("store-A", PrepareVote::VotePrepared as i32).await;
 
     let (txn_id, _lease) = mgr.begin(60).await.unwrap();
     println!("  Begin:  txn={}", &txn_id[..8]);
