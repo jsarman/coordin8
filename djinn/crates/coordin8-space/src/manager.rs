@@ -436,14 +436,21 @@ impl SpaceManager {
             (txn_id, state)
         }))
         .buffer_unordered(RECONCILE_CONCURRENCY);
+        // Gather every answer before applying any: lookups still in flight
+        // are not polled while a local commit/abort runs, so a slow apply
+        // could make one look timed out.
+        let mut answers = Vec::new();
         while let Some((txn_id, state)) = lookups.next().await {
-            let state = match state {
-                Ok(s) => s,
+            match state {
+                Ok(s) => answers.push((txn_id, s)),
                 Err(e) => {
                     debug!(txn_id, error = %e, "reconcile: coordinator not answering, ending this pass");
                     break;
                 }
-            };
+            }
+        }
+        drop(lookups);
+        for (txn_id, state) in answers {
             if state.is_some() {
                 self.unknown_txns.remove(&txn_id);
             }

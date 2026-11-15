@@ -52,7 +52,7 @@ The default `djinn` binary boots all services in-process (bundled mode). Each se
 Two trait seams make this possible without touching manager internals:
 
 - **`CapabilityResolver` trait** (`coordin8-core`) — abstracts Registry template resolution. `LocalCapabilityResolver` reads the in-process `RegistryStore` directly (bundled mode); `RemoteCapabilityResolver` (`coordin8-bootstrap`) forwards to a Registry gRPC client with transparent reconnect (split-mode Proxy).
-- **`TxnEnlister` trait** (`coordin8-core`) — abstracts 2PC enlist. `LocalTxnEnlister` (`coordin8-txn`) calls directly into `TxnManager`; `RemoteTxnEnlister` (`coordin8-bootstrap`) discovers TxnMgr lazily through Registry (Space can boot before TxnMgr exists). Space auto-enlists on the first transactional write/take.
+- **`TxnEnlister` trait** (`coordin8-core`) — abstracts 2PC enlist. `LocalTxnEnlister` (`coordin8-txn`) calls directly into `TxnManager`; `RemoteTxnEnlister` (`coordin8-bootstrap`) discovers TxnMgr lazily through Registry (Space can boot before TxnMgr exists; each `enlist`/`state` call, discovery included, is bounded at 10s and then fails `UNAVAILABLE`). Space auto-enlists on the first transactional write/take.
 
 (The `Leasing` trait still exists in `coordin8-core`, but only to decouple downstream code from the concrete `LeaseManager` type — there's no remote/local split for it anymore, since every service's `LeaseManager` is always its own, in-process.)
 
