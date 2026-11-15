@@ -21,3 +21,11 @@ The round-3 re-check confirmed #76 with a split-mode repro, and listed three low
 - **Docs nit:** a pass with no answer does not reset the "no record" mark; CLAUDE.md now says "two 'no record' answers with no other answer between them" instead of "two passes in a row".
 
 Tests: `recovery.rs::{abort_answer_survives_failed_final_write, refused_dial_aborts_single_participant}`, `reconcile.rs::coordinator_down_ends_the_pass_early` — all three fail on the old code.
+
+## Round-4 check (`fix/enlist-timeout`)
+
+Round 4 confirmed #77 on `main` at `4aa1e02` and found one pre-existing low: `RemoteTxnEnlister::enlist` was unbounded, so with the Registry down a transactional Space write blocked until discovery succeeded (and would hold a graceful shutdown).
+
+- `enlist` and `state` are both bounded by `TXN_CALL_TIMEOUT` (10s, discovery included) and fail `UNAVAILABLE`; a transport failure after rediscovery is now `Unavailable` too, not `Internal`.
+- Reconcile gathers every lookup answer before applying any, so a slow local apply can't stall in-flight lookups into a timeout (round-4 reading note).
+- Noted for TLS: the participant `Dialer` connects by vetted IP, so certificate verification will need the original hostname passed through (comment on `Dialer`).

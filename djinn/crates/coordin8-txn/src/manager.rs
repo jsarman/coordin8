@@ -836,6 +836,9 @@ impl coordin8_core::TxnEnlister for LocalTxnEnlister {
 /// cloud-metadata address the allowlist does not name explicitly, and
 /// connects to exactly the address it vetted, so a DNS answer that changes
 /// after the check (or after Enlist) cannot redirect the call.
+///
+/// TLS (not yet implemented) will need the original hostname passed
+/// through for certificate verification: the URI here carries the IP.
 #[derive(Clone)]
 struct Dialer {
     auth: ClientAuthConfig,

@@ -580,10 +580,16 @@ fn is_transport_failure(status: &tonic::Status) -> bool {
 /// the resulting client, and retries forever until TxnMgr is reachable —
 /// matching the "absence is a signal" stance from the design napkin. On any
 /// later transport failure the cached client is dropped and rediscovered.
+/// Bound on one `enlist` or `state` call, discovery included. Discovery
+/// itself retries forever; a caller (a transactional write, a reconcile
+/// pass, a graceful shutdown waiting on either) must not.
+pub const TXN_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct RemoteTxnEnlister {
     registry_addr: String,
     client_auth: ClientAuthConfig,
     client: Mutex<Option<TransactionServiceClient<AuthedChannel>>>,
+    call_timeout: Duration,
 }
 
 impl RemoteTxnEnlister {
@@ -596,7 +602,14 @@ impl RemoteTxnEnlister {
             registry_addr: registry_addr.to_string(),
             client_auth,
             client: Mutex::new(None),
+            call_timeout: TXN_CALL_TIMEOUT,
         }
+    }
+
+    /// Override [`TXN_CALL_TIMEOUT`] (tests).
+    pub fn with_call_timeout(mut self, timeout: Duration) -> Self {
+        self.call_timeout = timeout;
+        self
     }
 
     /// Return a ready client, discovering TxnMgr if we don't have one yet.
@@ -627,30 +640,40 @@ impl RemoteTxnEnlister {
 #[async_trait]
 impl TxnEnlister for RemoteTxnEnlister {
     async fn enlist(&self, txn_id: &str, endpoint: &str) -> Result<(), CoreError> {
-        let request = EnlistRequest {
-            txn_id: txn_id.to_string(),
-            participant_endpoint: endpoint.to_string(),
-            crash_count: 0,
+        let call = async {
+            let request = EnlistRequest {
+                txn_id: txn_id.to_string(),
+                participant_endpoint: endpoint.to_string(),
+                crash_count: 0,
+            };
+            let mut client = self.ensure_client().await?;
+            let resp = match client.enlist(request.clone()).await {
+                Err(status) if is_transport_failure(&status) => {
+                    self.rediscover().await?.enlist(request).await
+                }
+                other => other,
+            };
+            resp.map(|_| ()).map_err(|s| {
+                if is_transport_failure(&s) {
+                    CoreError::Unavailable(format!("enlist failed: {s}"))
+                } else {
+                    CoreError::Internal(format!("enlist failed: {s}"))
+                }
+            })
         };
-
-        let mut client = self.ensure_client().await?;
-        match client.enlist(request.clone()).await {
-            Ok(_) => Ok(()),
-            Err(status) if is_transport_failure(&status) => {
-                let mut client = self.rediscover().await?;
-                client
-                    .enlist(request)
-                    .await
-                    .map(|_| ())
-                    .map_err(|s| CoreError::Internal(format!("enlist failed: {s}")))
-            }
-            Err(status) => Err(CoreError::Internal(format!("enlist failed: {status}"))),
-        }
+        // Unbounded, a transactional write blocks while TxnMgr can't be
+        // discovered (and holds a graceful shutdown with it).
+        tokio::time::timeout(self.call_timeout, call)
+            .await
+            .unwrap_or_else(|_| {
+                Err(CoreError::Unavailable(
+                    "enlist timed out: TransactionMgr not reachable".into(),
+                ))
+            })
     }
 
     async fn state(&self, txn_id: &str) -> Result<Option<TransactionState>, CoreError> {
-        // Discovery waits for TxnMgr indefinitely; a background reconcile
-        // must not, so bound the whole call.
+        // Discovery waits for TxnMgr indefinitely; bound the whole call.
         let call = async {
             let request = GetStateRequest {
                 txn_id: txn_id.to_string(),
@@ -668,7 +691,7 @@ impl TxnEnlister for RemoteTxnEnlister {
                 Err(s) => Err(CoreError::Unavailable(format!("get_state failed: {s}"))),
             }
         };
-        tokio::time::timeout(Duration::from_secs(10), call)
+        tokio::time::timeout(self.call_timeout, call)
             .await
             .unwrap_or_else(|_| Err(CoreError::Unavailable("get_state timed out".into())))
     }
@@ -760,5 +783,35 @@ mod tests {
         assert!(!entry_is_unusable(tonic::Code::DeadlineExceeded));
         assert!(!entry_is_unusable(tonic::Code::InvalidArgument));
         assert!(!entry_is_unusable(tonic::Code::Internal));
+    }
+}
+
+#[cfg(test)]
+mod remote_txn_enlister_tests {
+    use super::*;
+
+    /// Review 2026-11-14 round 4: with the Registry down, enlist (and so a
+    /// transactional Space write) returned only once discovery succeeded.
+    #[tokio::test]
+    async fn calls_are_bounded_when_txn_mgr_cannot_be_discovered() {
+        // A port with nothing listening: the Registry is down.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .to_string();
+        let e = RemoteTxnEnlister::new(&addr, ClientAuthConfig::trust())
+            .with_call_timeout(Duration::from_millis(300));
+        let bounded = Duration::from_secs(3);
+        let err = tokio::time::timeout(bounded, e.enlist("t", "127.0.0.1:1"))
+            .await
+            .expect("enlist returned")
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Unavailable(_)), "got {err:?}");
+        let err = tokio::time::timeout(bounded, e.state("t"))
+            .await
+            .expect("state returned")
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Unavailable(_)), "got {err:?}");
     }
 }
